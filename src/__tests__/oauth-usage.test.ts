@@ -387,6 +387,32 @@ describe('openai usage', () => {
     expect(u?.weekly).toBeNull()
   })
 
+  test('fetchUsage rejects endpoint windows with non-finite used_percent', async () => {
+    // Regression lock: pre-fix, `typeof w.used_percent !== 'number'` alone let
+    // Infinity / -Infinity through (JSON.parse('1e500') === Infinity in V8/Bun),
+    // then clamp01(Infinity/100) collapsed to 0 — the scheduler then ranked
+    // the malformed account as having FULL headroom and selected it first.
+    // The OpenAI endpoint helper must enforce the same Number.isFinite gate
+    // that parseUsageHeaders() / windowFromPercent and the Anthropic endpoint
+    // helper already do (and that the comment on the Anthropic test
+    // explicitly claims is symmetric across the three).
+    //
+    // The body is a RAW JSON string, not JSON.stringify of a JS object:
+    // `JSON.stringify({ used_percent: 1e500 })` collapses Infinity to `null`
+    // (Infinity isn't valid JSON), which would land in the existing
+    // `typeof !== 'number'` branch — the pre-fix code. Only `response.json()`
+    // parsing a literal `1e500` reproduces the Infinity input shape that
+    // escapes the typeof check.
+    respond = () =>
+      new Response(
+        '{"rate_limit":{"primary_window":{"used_percent":1e500,"reset_at":1900000000},"secondary_window":{"used_percent":-1e500,"reset_at":1900000000}}}',
+        { status: 200 },
+      )
+    const u = await oFetchUsage(acct('openai', 'a'), 0)
+    expect(u?.hourly).toBeNull()
+    expect(u?.weekly).toBeNull()
+  })
+
   test('fetchUsage returns null on non-ok, throw, and missing rate_limit', async () => {
     respond = () => new Response('x', { status: 500 })
     expect(await oFetchUsage(acct('openai', 'a'), 0)).toBeNull()

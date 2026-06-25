@@ -67,7 +67,18 @@ interface UsageEndpointResponse {
 function endpointWindow(
   w: UsageEndpointWindow | null | undefined,
 ): UsageWindow | null {
-  if (!w || typeof w.used_percent !== 'number') return null
+  // Symmetric with parseUsageHeaders() / windowFromPercent above and the
+  // Anthropic endpoint helper: a non-finite `used_percent` (e.g. JSON `1e500`
+  // → Infinity) passes the typeof gate but then `clamp01(Infinity/100)` falls
+  // into the `!Number.isFinite ⇒ 0` branch in score-core, ranking the
+  // malformed account as "0% used" → selected first. Reject it as null so
+  // the scheduler keeps the last-known snapshot instead.
+  if (
+    !w ||
+    typeof w.used_percent !== 'number' ||
+    !Number.isFinite(w.used_percent)
+  )
+    return null
   const resetSec = typeof w.reset_at === 'number' ? w.reset_at : 0
   return {
     utilization: clamp01(w.used_percent / 100),

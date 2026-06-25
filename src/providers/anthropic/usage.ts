@@ -82,8 +82,14 @@ function parseResetAt(value: string | number): number {
 
 function endpointWindow(w: UsageEndpointWindow | null): UsageWindow | null {
   if (!w) return null
+  // Symmetric with parseUsageHeaders() and the OpenAI endpoint helper:
+  // a window without a finite utilization is unusable — return null so the
+  // scheduler does NOT treat a malformed response as "0% used" and rank it first.
+  if (typeof w.utilization !== 'number' || !Number.isFinite(w.utilization)) {
+    return null
+  }
   return {
-    utilization: clamp01((w.utilization ?? 0) / 100), // endpoint is a percent
+    utilization: clamp01(w.utilization / 100), // endpoint is a percent
     resetAt: parseResetAt(w.resets_at),
   }
 }

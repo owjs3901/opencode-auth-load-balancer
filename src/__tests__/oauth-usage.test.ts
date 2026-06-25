@@ -222,6 +222,37 @@ describe('anthropic usage', () => {
     expect(u?.weekly?.resetAt).toBe(0)
   })
 
+  test('fetchUsage rejects endpoint windows with missing or non-finite utilization', async () => {
+    // Missing utilization (undefined after JSON.parse): the pre-fix code
+    // silently produced { utilization: 0 } and the scheduler then ranked the
+    // account as having full headroom. Symmetric with parseUsageHeaders() and
+    // the OpenAI endpoint helper, the window must be rejected as null.
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          five_hour: { resets_at: '2030-01-01T00:00:00Z' },
+          seven_day: null,
+        }),
+        { status: 200 },
+      )
+    let u = await aFetchUsage(acct('anthropic', null), 0)
+    expect(u?.hourly).toBeNull()
+    expect(u?.weekly).toBeNull()
+
+    // Non-number utilization (string) — same outcome.
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          five_hour: { utilization: '50%', resets_at: 1900000000 },
+          seven_day: { utilization: null, resets_at: 1900000000 },
+        }),
+        { status: 200 },
+      )
+    u = await aFetchUsage(acct('anthropic', null), 0)
+    expect(u?.hourly).toBeNull()
+    expect(u?.weekly).toBeNull()
+  })
+
   test('fetchUsage returns null on non-ok, throw, and invalid JSON', async () => {
     respond = () => new Response('x', { status: 429 })
     expect(await aFetchUsage(acct('anthropic', null), 0)).toBeNull()

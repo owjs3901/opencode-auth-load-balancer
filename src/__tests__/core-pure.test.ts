@@ -41,6 +41,16 @@ describe('loadConfig', () => {
     expect(loadConfig({ OPENCODE_AUTH_LB_MIGRATE_AT: 'abc' }).migrateAt).toBe(
       DEFAULT_CONFIG.migrateAt,
     )
+    // weeklyDrainTarget is migrateAt's WEEKLY counterpart (also via loadScoreConfig):
+    // the 5h window migrates at migrateAt, the weekly window migrates at weeklyDrainTarget.
+    expect(
+      loadConfig({ OPENCODE_AUTH_LB_WEEKLY_DRAIN_TARGET: '0.9' })
+        .weeklyDrainTarget,
+    ).toBe(0.9)
+    expect(
+      loadConfig({ OPENCODE_AUTH_LB_WEEKLY_DRAIN_TARGET: 'abc' })
+        .weeklyDrainTarget,
+    ).toBe(DEFAULT_CONFIG.weeklyDrainTarget)
     // ...sessionTtlMs is a server-only field (read via config.ts's own num()).
     expect(
       loadConfig({ OPENCODE_AUTH_LB_SESSION_TTL_MS: '123' }).sessionTtlMs,

@@ -1,0 +1,162 @@
+import type { PoolAccount, PoolFile } from '../types'
+import { DEFAULT_CONFIG, type SchedulerConfig } from './config'
+import {
+  isAvailable,
+  maxUtil,
+  overSoftThreshold,
+  scoreAccount,
+  weeklyUrgency,
+} from './score'
+
+export interface Selection {
+  account: PoolAccount
+  /** true when every account was exhausted/cooling-down and we picked the least-bad one. */
+  degraded: boolean
+  /** true when the account came from this session's existing assignment (no switch). */
+  sticky: boolean
+}
+
+function weeklyUtil(account: PoolAccount): number {
+  return account.usage.weekly?.utilization ?? 0
+}
+
+/**
+ * Pick the best account for a provider by weekly urgency.
+ *
+ * 1. Restrict to the provider's non-disabled accounts, minus `exclude` (already
+ *    tried this request).
+ * 2. Prefer the subset that is currently available (not exhausted / cooling down).
+ * 3. Among those, pick the highest urgency score.
+ * 4. If none are available, fall back to the least-bad account (lowest weekly
+ *    utilization) and flag the selection as `degraded`.
+ *
+ * Returns null when the provider has no usable account left.
+ */
+export function selectAccount(
+  accounts: PoolAccount[],
+  providerID: string,
+  now: number,
+  cfg: SchedulerConfig = DEFAULT_CONFIG,
+  exclude: ReadonlySet<string> = new Set(),
+): Selection | null {
+  const pool = accounts.filter(
+    (a) =>
+      a.providerID === providerID && !a.disabledReason && !exclude.has(a.id),
+  )
+  if (pool.length === 0) return null
+
+  const available = pool.filter((a) => isAvailable(a, cfg, now))
+  const degraded = available.length === 0
+  const candidates = degraded ? pool : available
+
+  let best: PoolAccount | null = null
+  let bestScore = Number.NEGATIVE_INFINITY
+  for (const account of candidates) {
+    const score = degraded
+      ? -weeklyUtil(account)
+      : scoreAccount(account, cfg, now)
+    if (score > bestScore) {
+      bestScore = score
+      best = account
+    }
+  }
+
+  return best ? { account: best, degraded, sticky: false } : null
+}
+
+/** The account currently pinned to a session, if any (ignores availability). */
+function findPinned(
+  pool: PoolFile,
+  providerID: string,
+  sessionKey: string,
+  exclude: ReadonlySet<string>,
+): PoolAccount | null {
+  const assigned = pool.sessions[sessionKey]
+  if (!assigned || exclude.has(assigned.accountId)) return null
+  return (
+    pool.accounts.find(
+      (a) => a.id === assigned.accountId && a.providerID === providerID,
+    ) ?? null
+  )
+}
+
+function withExcluded(
+  exclude: ReadonlySet<string>,
+  extra: string,
+): Set<string> {
+  const next = new Set(exclude)
+  next.add(extra)
+  return next
+}
+
+/**
+ * A "cheap moment" to switch accounts: the outgoing request is small enough that
+ * re-sending its context onto a fresh (uncached) account won't burn a big chunk of
+ * that account's quota. cheapSwitchMaxBytes <= 0 disables the gate (always cheap).
+ */
+function isCheapMoment(requestBytes: number, cfg: SchedulerConfig): boolean {
+  return cfg.cheapSwitchMaxBytes <= 0 || requestBytes <= cfg.cheapSwitchMaxBytes
+}
+
+/**
+ * Session-aware selection. Balances prompt-cache stickiness against headroom safety
+ * and quota perishability:
+ *
+ *  - No pin / pin excluded / pin unavailable (cooldown / disabled / hard-exhausted at
+ *    `exhaustedAt`)  -> FORCED switch to the best urgency pick.
+ *  - Pin healthy but a NON-forced switch is worthwhile AND it's a cheap moment
+ *    (small `requestBytes`):
+ *      (a) proactive: pin crossed the soft `migrateAt` (~95%) and another account has
+ *          more headroom -> move before slamming into the 100% wall (subagent safety);
+ *      (b) drain (opt-in `drainMigrate`): another account's weekly reset is imminent
+ *          and its urgency dominates the pin's by `drainMigrateMargin` -> switch to
+ *          drain that use-it-or-lose-it quota.
+ *  - Otherwise keep the pin (sticky), preserving its prompt cache.
+ *
+ * Forced switches ignore the cost gate; proactive/drain switches honor it so a large
+ * conversation isn't re-sent onto a fresh account all at once.
+ */
+export function selectForSession(
+  pool: PoolFile,
+  providerID: string,
+  sessionKey: string | null,
+  now: number,
+  cfg: SchedulerConfig = DEFAULT_CONFIG,
+  exclude: ReadonlySet<string> = new Set(),
+  requestBytes = 0,
+): Selection | null {
+  const pinned = sessionKey
+    ? findPinned(pool, providerID, sessionKey, exclude)
+    : null
+  if (!pinned)
+    return selectAccount(pool.accounts, providerID, now, cfg, exclude)
+
+  // Forced: the pinned account can no longer serve requests.
+  if (!isAvailable(pinned, cfg, now)) {
+    return selectAccount(pool.accounts, providerID, now, cfg, exclude)
+  }
+
+  // Consider a non-forced migration only when switching is cheap.
+  if (isCheapMoment(requestBytes, cfg)) {
+    const alt = selectAccount(
+      pool.accounts,
+      providerID,
+      now,
+      cfg,
+      withExcluded(exclude, pinned.id),
+    )
+    if (alt) {
+      const proactive =
+        overSoftThreshold(pinned, cfg) && maxUtil(alt.account) < maxUtil(pinned)
+      const drain =
+        cfg.drainMigrate &&
+        weeklyUrgency(alt.account, cfg, now) >=
+          weeklyUrgency(pinned, cfg, now) * cfg.drainMigrateMargin
+      if (proactive || drain) {
+        return { account: alt.account, degraded: alt.degraded, sticky: false }
+      }
+    }
+  }
+
+  return { account: pinned, degraded: false, sticky: true }
+}

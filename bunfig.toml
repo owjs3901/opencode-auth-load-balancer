@@ -1,0 +1,8 @@
+[test]
+coverage = true
+coverageSkipTestFiles = true
+coverageReporter = ["text"]
+# CLI entry point (thin wrapper around the tested status engine; runs on import).
+coveragePathIgnorePatterns = ["src/cli/**"]
+# Enforced at 100% — every source line and function must be exercised.
+coverageThreshold = 1.0

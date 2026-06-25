@@ -156,10 +156,18 @@ export function selectForSession(
       const proactive =
         overSoftThreshold(pinned, cfg, now) &&
         maxUtil(alt.account, now) < maxUtil(pinned, now)
+      // `altUrgency > 0` guard: when BOTH the pin AND the alt are past
+      // `weeklyDrainTarget`, each `weeklyUrgency` collapses to 0 (its
+      // `drainable = max(0, weeklyDrainTarget - util)` term zeroes out). Without
+      // the guard, `0 >= 0 * margin` is true, firing a useless drain switch — no
+      // perishable quota to chase, just a lost prompt cache on the pin. The
+      // unchanged `>=` margin keeps behavior at non-zero urgencies byte-identical
+      // (locked by the drainMigrate tests in scheduler.test.ts).
+      const altUrgency = weeklyUrgency(alt.account, cfg, now)
       const drain =
         cfg.drainMigrate &&
-        weeklyUrgency(alt.account, cfg, now) >=
-          weeklyUrgency(pinned, cfg, now) * cfg.drainMigrateMargin
+        altUrgency > 0 &&
+        altUrgency >= weeklyUrgency(pinned, cfg, now) * cfg.drainMigrateMargin
       if (proactive || drain) {
         return { account: alt.account, degraded: false, sticky: false }
       }

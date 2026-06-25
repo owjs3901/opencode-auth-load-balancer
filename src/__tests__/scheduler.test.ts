@@ -493,4 +493,24 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
     expect(sel?.sticky).toBe(true)
     expect(sel?.degraded).toBe(false)
   })
+
+  test('drainMigrate on: a zero-urgency tie keeps the pin sticky (no wasteful migration)', () => {
+    // Boundary lock: when BOTH the pin AND the best alt are past
+    // `weeklyDrainTarget` (0.98) but still below `exhaustedAt` (0.999),
+    // `weeklyUrgency` collapses to 0 for each (its `drainable = max(0,
+    // weeklyDrainTarget - util)` term zeroes out). Pre-fix the drain check
+    // `0 >= 0 * 1.5` evaluated true and the drain branch fired a useless
+    // migration — no perishable quota to chase, just a lost prompt cache and a
+    // re-billed conversation context on a fresh account with the same headroom.
+    // The proactive branch correctly stays silent here (`maxUtil(alt)` ties at
+    // 0.985 so the `<` guard fails), so drain is the only path that could
+    // wrongly fire. Post-fix the `altUrgency > 0` guard keeps the pin sticky.
+    const a = account('a', { weekly: win(0.985, 5 * DAY) })
+    const b = account('b', { weekly: win(0.985, 5 * DAY) }) // pinned
+    const cfg = { ...DEFAULT_CONFIG, drainMigrate: true }
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1', cfg)
+    expect(sel?.account.id).toBe('b')
+    expect(sel?.sticky).toBe(true)
+    expect(sel?.degraded).toBe(false)
+  })
 })

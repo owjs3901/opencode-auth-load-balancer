@@ -89,7 +89,7 @@ export function loadScoreConfig(
 ): ScoreConfig {
   const num = (key: string, dflt: number): number => {
     const raw = env[key]
-    if (raw === undefined) return dflt
+    if (raw === undefined || raw === '') return dflt
     const n = Number(raw)
     return Number.isFinite(n) ? n : dflt
   }

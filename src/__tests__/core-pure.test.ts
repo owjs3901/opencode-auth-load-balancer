@@ -73,6 +73,26 @@ describe('loadConfig', () => {
       loadConfig({ OPENCODE_AUTH_LB_DRAIN_MIGRATE: '' }).drainMigrate,
     ).toBe(DEFAULT_CONFIG.drainMigrate)
   })
+  test('treats empty-string numeric overrides as unset (fall back to default)', () => {
+    // An unset upstream var in a wrapper (`OPENCODE_AUTH_LB_EXHAUSTED_AT=$X opencode ...`
+    // with `$X` unset, Docker-compose `"${X:-}"`, Windows `set FOO=`, a k8s ConfigMap with
+    // an empty `value:`) all surface as `''`. The bool helper above already falls back to
+    // the default; the num helpers must do the same -- otherwise `Number('') === 0` silently
+    // zeros the knob (e.g. `exhaustedAt=0` excludes every account, `sessionTtlMs=0` prunes
+    // every session affinity entry on the next write).
+    // sessionTtlMs lives in config.ts's own num().
+    expect(
+      loadConfig({ OPENCODE_AUTH_LB_SESSION_TTL_MS: '' }).sessionTtlMs,
+    ).toBe(DEFAULT_CONFIG.sessionTtlMs)
+    // migrateAt and exhaustedAt are scoring fields read via score-core.ts's num()
+    // (loadConfig spreads loadScoreConfig), so this asserts BOTH num helpers in one test.
+    expect(loadConfig({ OPENCODE_AUTH_LB_MIGRATE_AT: '' }).migrateAt).toBe(
+      DEFAULT_CONFIG.migrateAt,
+    )
+    expect(loadConfig({ OPENCODE_AUTH_LB_EXHAUSTED_AT: '' }).exhaustedAt).toBe(
+      DEFAULT_CONFIG.exhaustedAt,
+    )
+  })
 })
 
 describe('deriveSessionKey', () => {

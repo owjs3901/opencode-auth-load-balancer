@@ -204,6 +204,35 @@ describe('refresh', () => {
     ).toBeNull()
   })
 
+  test('does NOT disable an account when a 5xx body coincidentally contains "invalid_grant"', async () => {
+    // Symmetric to the "HTTP 400 in a 5xx body" regression above: when a 502
+    // body happens to mention "invalid_grant" (e.g. a Cloudflare error page,
+    // a proxy debug line, or an operations log snippet), the account must NOT
+    // be permanently disabled. The RFC 6749 §5.2 invalid_grant signal is the
+    // STATUS being 400/401 — body text alone, without that status, must not
+    // flip a working credential to `re-login required`. Pre-fix the leading
+    // /invalid_grant/.test(message) gate matched any body text and disabled
+    // the account regardless of status.
+    const a = account({ expires: Date.now() - 1 })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        throw new Error(
+          'Token refresh failed: 502 — Bad Gateway. Past log line: invalid_grant cleared at 12:30.',
+        )
+      },
+    })
+    await expect(ensureAccessToken(adapter, a, Date.now())).rejects.toThrow(
+      '502',
+    )
+    expect(a.disabledReason).toBeNull()
+    expect(
+      findAccount(await readPool(), a.id)?.disabledReason ?? null,
+    ).toBeNull()
+  })
+
   test('still disables on a real 400 invalid_grant from the OAuth server', async () => {
     // The status-anchored prefix path (status === 400/401) must keep working
     // even when the body does NOT carry the literal "invalid_grant" substring.

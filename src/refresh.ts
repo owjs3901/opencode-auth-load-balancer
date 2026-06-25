@@ -27,14 +27,19 @@ export function needsRefresh(account: PoolAccount, now: number): boolean {
 
 function isInvalidGrant(error: unknown): boolean {
   if (!(error instanceof Error)) return false
-  if (/invalid_grant/.test(error.message)) return true
-  // Only treat as invalid_grant when the FAILING REQUEST'S STATUS is 400/401,
-  // not when arbitrary digits appear inside an error body (a 5xx page that
-  // mentions "HTTP 400" must not permanently disable a working account).
+  // When the error carries the "Token refresh failed: <status>" prefix that
+  // both OAuth refresh paths throw, the HTTP status is AUTHORITATIVE — only a
+  // real 400/401 is invalid_grant (RFC 6749 §5.2). Body text on a 5xx must
+  // NOT flip the verdict, the same way "HTTP 400" inside a 5xx body must not
+  // (symmetric to the existing regression locked in stateful.test.ts).
   const m = error.message.match(/^Token refresh failed: (\d+)/)
-  if (!m) return false
-  const status = Number(m[1])
-  return status === 400 || status === 401
+  if (m) {
+    const status = Number(m[1])
+    return status === 400 || status === 401
+  }
+  // No status prefix at all (e.g. a non-standard adapter or a test fake that
+  // throws `new Error('invalid_grant')`): fall back to body text match.
+  return /invalid_grant/.test(error.message)
 }
 
 /** Copy a rotated TokenSet onto the caller's PoolAccount in place. */

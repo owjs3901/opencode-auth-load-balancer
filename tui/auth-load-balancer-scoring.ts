@@ -75,7 +75,7 @@ const RESET_CUSHION_DAYS = 0.25
 
 /** Scoring-config defaults (the scoring subset of the scheduler's DEFAULT_CONFIG). */
 export const SCORE_DEFAULTS: ScoreConfig = {
-  hourlyInfluence: 0.25,
+  hourlyInfluence: 0.5,
   minResetMs: 5 * 60 * 1000, // 5 minutes
   weekWindowMs: 7 * 24 * 60 * 60 * 1000, // 7 days
   exhaustedAt: 0.999,

@@ -178,6 +178,55 @@ describe('refresh', () => {
     )
   })
 
+  test('does NOT disable an account when a 5xx body coincidentally contains "400"', async () => {
+    // Regression: pre-fix, /\b400\b|\b401\b/ matched the FULL error message,
+    // which includes the upstream response body. A 502 whose body mentions
+    // "HTTP 400" anywhere would permanently mark a working account as needing
+    // re-login. The fix anchors the status check to the "Token refresh failed:
+    // <status>" prefix that both OAuth refresh paths actually throw.
+    const a = account({ expires: Date.now() - 1 })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        throw new Error(
+          'Token refresh failed: 502 — Bad Gateway. See status page: HTTP 400 fallback active.',
+        )
+      },
+    })
+    await expect(ensureAccessToken(adapter, a, Date.now())).rejects.toThrow(
+      '502',
+    )
+    expect(a.disabledReason).toBeNull()
+    expect(
+      findAccount(await readPool(), a.id)?.disabledReason ?? null,
+    ).toBeNull()
+  })
+
+  test('still disables on a real 400 invalid_grant from the OAuth server', async () => {
+    // The status-anchored prefix path (status === 400/401) must keep working
+    // even when the body does NOT carry the literal "invalid_grant" substring.
+    const a = account({ expires: Date.now() - 1 })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        throw new Error(
+          'Token refresh failed: 400 — {"error":"unauthorized_client"}',
+        )
+      },
+    })
+    await expect(ensureAccessToken(adapter, a, Date.now())).rejects.toThrow(
+      '400',
+    )
+    expect(a.disabledReason).toContain('invalid_grant')
+    expect(findAccount(await readPool(), a.id)?.disabledReason).toContain(
+      'invalid_grant',
+    )
+  })
+
   test('collapses concurrent refreshes (singleflight)', async () => {
     const a = account({ expires: Date.now() - 1 })
     let called = 0

@@ -26,10 +26,15 @@ export function needsRefresh(account: PoolAccount, now: number): boolean {
 }
 
 function isInvalidGrant(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    /invalid_grant|\b400\b|\b401\b/.test(error.message)
-  )
+  if (!(error instanceof Error)) return false
+  if (/invalid_grant/.test(error.message)) return true
+  // Only treat as invalid_grant when the FAILING REQUEST'S STATUS is 400/401,
+  // not when arbitrary digits appear inside an error body (a 5xx page that
+  // mentions "HTTP 400" must not permanently disable a working account).
+  const m = error.message.match(/^Token refresh failed: (\d+)/)
+  if (!m) return false
+  const status = Number(m[1])
+  return status === 400 || status === 401
 }
 
 /** Copy a rotated TokenSet onto the caller's PoolAccount in place. */

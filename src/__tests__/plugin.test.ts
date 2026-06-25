@@ -402,6 +402,151 @@ describe('load-balanced fetch — edge paths', () => {
     expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
   })
 
+  test('falls back to default cooldown when retry-after is "0" (server says retry immediately)', async () => {
+    // Regression lock: `Number('0') = 0` is finite but `0 > 0` is false, so the
+    // delay-seconds branch is skipped. `Date.parse('0')` either yields a finite
+    // epoch-ms in the past (year 2000 on V8/Bun) or NaN depending on engine;
+    // both paths fail the `Number.isFinite(httpDate) && httpDate > now` HTTP-date
+    // gate, landing on the 5-min ACCOUNT_COOLDOWN_MS fallback. A regression that
+    // flipped `httpDate > now` to `<` would silently pass the 'garbage' test
+    // (NaN trips Number.isFinite first) but cool A out to the year 2000 here.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      pool.accounts.push(
+        account({
+          id: 'B',
+          access: 'tokB',
+          label: 'B',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      if (n === 1)
+        return new Response('limited', {
+          status: 429,
+          headers: { 'retry-after': '0' },
+        })
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
+    const expected = now + 5 * 60_000
+    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
+  })
+
+  test('falls back to default cooldown when retry-after is a negative integer', async () => {
+    // Regression lock: `Number('-10') = -10` is finite but `> 0` is false, so
+    // the delay-seconds branch is skipped. `Date.parse('-10')` yields a finite
+    // epoch-ms in the past (or NaN), which fails the `httpDate > now` gate —
+    // the parser falls through to ACCOUNT_COOLDOWN_MS. Same regression family as
+    // the '0' case: a flipped comparison would cool A out to a past date.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      pool.accounts.push(
+        account({
+          id: 'B',
+          access: 'tokB',
+          label: 'B',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      if (n === 1)
+        return new Response('limited', {
+          status: 429,
+          headers: { 'retry-after': '-10' },
+        })
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
+    const expected = now + 5 * 60_000
+    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
+  })
+
+  test('honors retry-after for a large-but-valid delay-seconds (1 day)', async () => {
+    // Regression lock: 86400 seconds (1 day) exercises the non-overflowing
+    // finite-delta branch at the upper end of the practical range. The existing
+    // '30' test pins behavior near the lower end; the '1e308' test pins the
+    // OVERFLOW fallback; this test pins the accepted-finite-delta path itself.
+    // A regression that ANDed `Number.isFinite(delta)` with `delta < some_cap`
+    // would silently pass '30' but break '86400'.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      pool.accounts.push(
+        account({
+          id: 'B',
+          access: 'tokB',
+          label: 'B',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      if (n === 1)
+        return new Response('limited', {
+          status: 429,
+          headers: { 'retry-after': '86400' },
+        })
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    // The non-overflowing finite-delta path: `until = now + 86_400 * 1000`.
+    // Allow ±2 s of clock drift.
+    const expected = now + 86_400 * 1000
+    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
+  })
+
   test("rejects when the only account's request throws", async () => {
     await mutatePool((pool) => {
       pool.accounts.push(account({ id: 'solo' }))

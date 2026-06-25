@@ -18,6 +18,7 @@ import type { ToastClient } from '../notify'
 import { mutatePool, readPool } from '../pool/store'
 import { primeInUse } from '../prime'
 import { anthropicAdapter } from '../providers/anthropic/adapter'
+import { loadConfig } from '../scheduler/config'
 import { SESSION_HEADER } from '../session'
 import type { PoolAccount } from '../types'
 
@@ -364,6 +365,37 @@ describe('load-balanced fetch — edge paths', () => {
         body: '{}',
       }),
     ).rejects.toThrow()
+  })
+
+  test('assignSession prunes stale session-affinity entries past sessionTtlMs', async () => {
+    // The TTL-prune branch in assignSession (`delete pool.sessions[key]` when
+    // `now - value.updatedAt > ttlMs`) is line-covered only because the for-loop
+    // body executes — a regression flipping `>` to `<`, swapping the subtraction
+    // order, or omitting the prune entirely would still report 100% coverage.
+    // This test pins the actual deletion behavior: the stale entry points at an
+    // EXISTING account so the ONLY mechanism that can remove it is the TTL prune.
+    const now = Date.now()
+    const cfg = loadConfig()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', label: 'A' }))
+      pool.sessions['s:stale'] = {
+        accountId: 'A',
+        updatedAt: now - cfg.sessionTtlMs - 60_000,
+      }
+      pool.sessions['s:fresh'] = { accountId: 'A', updatedAt: now }
+    })
+    respond = () => new Response('ok', { status: 200 })
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+      headers: { [SESSION_HEADER]: 'new' },
+    })
+    expect(res.status).toBe(200)
+    const pool = await readPool()
+    expect(pool.sessions['s:stale']).toBeUndefined()
+    expect(pool.sessions['s:fresh']).toBeDefined()
+    expect(pool.sessions['s:new']).toBeDefined()
   })
 })
 

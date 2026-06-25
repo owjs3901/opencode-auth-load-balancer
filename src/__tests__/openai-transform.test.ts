@@ -47,6 +47,14 @@ describe('applyAuth', () => {
     applyAuth(h, acct(null))
     expect(h.get('chatgpt-account-id')).toBeNull()
   })
+  test('applyAuth falls back to extracting chatgpt-account-id from the access-token JWT when account.accountId is null', () => {
+    const h = new Headers()
+    applyAuth(h, {
+      ...acct(null),
+      access: jwt({ chatgpt_account_id: 'acc_jwt' }),
+    })
+    expect(h.get('chatgpt-account-id')).toBe('acc_jwt')
+  })
 })
 
 describe('rewriteUrl', () => {

@@ -7,6 +7,7 @@ import {
   SESSION_ID,
   USER_AGENT,
 } from './constants'
+import { extractAccountId } from './jwt'
 
 /**
  * Codex (ChatGPT-OAuth) request shaping, distilled from the openai/codex CLI,
@@ -19,7 +20,8 @@ export function applyAuth(headers: Headers, account: PoolAccount): void {
   headers.delete('Authorization')
   headers.delete('x-api-key')
   headers.set('authorization', `Bearer ${account.access}`)
-  if (account.accountId) headers.set('chatgpt-account-id', account.accountId)
+  const accountId = account.accountId ?? extractAccountId(account.access)
+  if (accountId) headers.set('chatgpt-account-id', accountId)
   headers.set('openai-beta', OPENAI_BETA)
   headers.set('originator', ORIGINATOR)
   headers.set('user-agent', USER_AGENT)

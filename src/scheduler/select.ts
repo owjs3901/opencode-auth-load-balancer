@@ -145,7 +145,14 @@ export function selectForSession(
       cfg,
       withExcluded(exclude, pinned.id),
     )
-    if (alt) {
+    // A `degraded` alt is selectAccount's "least-bad of the cooling-down /
+    // exhausted set" — switching a still-healthy pin onto it just trades one
+    // working account for one that is rate-limited right now (almost certain to
+    // 429 again on the spot, extending its cooldown and burning a real request).
+    // Non-forced migrations require a genuinely available alternative; the
+    // forced-switch path above already handles the "pin itself is unavailable"
+    // case (which is the only legitimate way to return a degraded selection).
+    if (alt && !alt.degraded) {
       const proactive =
         overSoftThreshold(pinned, cfg) && maxUtil(alt.account) < maxUtil(pinned)
       const drain =
@@ -153,7 +160,7 @@ export function selectForSession(
         weeklyUrgency(alt.account, cfg, now) >=
           weeklyUrgency(pinned, cfg, now) * cfg.drainMigrateMargin
       if (proactive || drain) {
-        return { account: alt.account, degraded: alt.degraded, sticky: false }
+        return { account: alt.account, degraded: false, sticky: false }
       }
     }
   }

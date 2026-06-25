@@ -415,4 +415,42 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
     const sel = migPick(pinnedTo([a, b], 'b'), 's:1')
     expect(sel?.account.id).toBe('a')
   })
+
+  test('proactive migration is held back when the only alternative is cooling down (degraded)', () => {
+    // Pinned `b` is over the weekly drain target (0.99 > 0.98) so the proactive
+    // branch WOULD fire — but the sole alt `a` is currently cooling down. A
+    // degraded alt is selectAccount's least-bad pick of the unavailable set;
+    // switching onto it would just 429 again on the next request, extend its
+    // cooldown, and briefly flip the in-use marker before falling back. The
+    // healthy pin must keep serving until either it itself becomes unavailable
+    // (forced-switch path) or a genuinely available alt appears.
+    const a = account('a', {
+      weekly: win(0.5, 5 * DAY),
+      cooldownUntil: NOW + HOUR,
+    })
+    const b = account('b', { weekly: win(0.99, 5 * DAY) })
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1')
+    expect(sel?.account.id).toBe('b')
+    expect(sel?.sticky).toBe(true)
+    expect(sel?.degraded).toBe(false)
+  })
+
+  test('drain migration is held back when the only alternative is cooling down (degraded)', () => {
+    // Symmetric to the proactive guard: with drainMigrate on, alt `a`'s
+    // imminent weekly reset (2h) would normally dominate the pin's urgency by
+    // drainMigrateMargin (1.5x), but its cooldown disqualifies it from a
+    // non-forced migration. A near-reset account in cooldown is the WORST kind
+    // of switch target — its quota is perishable AND it can't actually serve
+    // right now. Stay on the healthy pin.
+    const a = account('a', {
+      weekly: win(0.5, 2 * HOUR),
+      cooldownUntil: NOW + HOUR,
+    })
+    const b = account('b', { weekly: win(0.3, 7 * DAY) })
+    const cfg = { ...DEFAULT_CONFIG, drainMigrate: true }
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1', cfg)
+    expect(sel?.account.id).toBe('b')
+    expect(sel?.sticky).toBe(true)
+    expect(sel?.degraded).toBe(false)
+  })
 })

@@ -339,6 +339,47 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
     )
   })
 
+  test('drainMigrate on: cost gate holds the drain switch on a large request', () => {
+    // The cheapSwitchMaxBytes gate is the OUTER gate around BOTH proactive AND
+    // drain migrations in selectForSession (`if (isCheapMoment(requestBytes, cfg)) {
+    // const alt = ...; if (proactive || drain) return alt; }`). A regression that
+    // moved the gate inside the proactive check (e.g. `if (proactive &&
+    // isCheapMoment) ...; if (drain) ...`) would re-send a huge conversation onto
+    // a fresh account at the worst time — drain accounts are BY DEFINITION near
+    // their weekly reset, so the burned context is wasted. Symmetric to the
+    // existing proactive cost-gate test above; this one pins the drain branch.
+    const a = account('a', { weekly: win(0.5, 2 * HOUR) }) // imminent reset, high urgency
+    const b = account('b', { weekly: win(0.3, 7 * DAY) }) // pinned, healthy
+    const cfg = {
+      ...DEFAULT_CONFIG,
+      drainMigrate: true,
+      cheapSwitchMaxBytes: 1000,
+    }
+    // large body -> keep the pin (drain switch held by the cost gate)
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1', cfg, 5000)
+    expect(sel?.account.id).toBe('b')
+    expect(sel?.sticky).toBe(true)
+  })
+
+  test('drainMigrate on: cost gate allows the drain switch on a small request', () => {
+    // Symmetric to the test above — pins that the drain branch IS reachable once
+    // the request is small enough to fit the gate. Without this counterpart, a
+    // regression that hard-coded the drain branch to FALSE inside the gate would
+    // also green-pass: the previous test would still see "stays sticky", just for
+    // the wrong reason.
+    const a = account('a', { weekly: win(0.5, 2 * HOUR) })
+    const b = account('b', { weekly: win(0.3, 7 * DAY) })
+    const cfg = {
+      ...DEFAULT_CONFIG,
+      drainMigrate: true,
+      cheapSwitchMaxBytes: 1000,
+    }
+    // small body -> cheap moment -> drain to the imminently-resetting account
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1', cfg, 500)
+    expect(sel?.account.id).toBe('a')
+    expect(sel?.sticky).toBe(false)
+  })
+
   test('forced switch (hard-exhausted pin) ignores the cost gate even on a huge request', () => {
     const a = account('a', { weekly: win(0.2, 5 * DAY) })
     const b = account('b', { weekly: win(1.0, 5 * DAY) }) // hard-exhausted

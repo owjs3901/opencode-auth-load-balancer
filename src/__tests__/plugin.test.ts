@@ -351,6 +351,57 @@ describe('load-balanced fetch — edge paths', () => {
     expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
   })
 
+  test('falls back to default cooldown when retry-after seconds overflow numeric precision', async () => {
+    // Regression lock: `Number("1e308") = 1e308` is finite, but `1e308 * 1000`
+    // exceeds Number.MAX_VALUE (~1.798e308) and collapses to +Infinity. Before
+    // the fix in applyCooldown, that set cooldownUntil to +Infinity, and the
+    // scheduler's `account.cooldownUntil > now` check then excluded the account
+    // forever (only a process restart or manual pool-file edit could recover it).
+    // Post-fix the overflowing delta falls through to the ACCOUNT_COOLDOWN_MS
+    // (5 min) fallback, just like the unparseable-retry-after branch above.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      pool.accounts.push(
+        account({
+          id: 'B',
+          access: 'tokB',
+          label: 'B',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      if (n === 1)
+        return new Response('limited', {
+          status: 429,
+          headers: { 'retry-after': '1e308' },
+        })
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
+    const expected = now + 5 * 60_000
+    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    // The locking assertion: a regression that re-introduces the overflow path
+    // sets cooldownUntil to +Infinity, which fails Number.isFinite.
+    expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
+  })
+
   test("rejects when the only account's request throws", async () => {
     await mutatePool((pool) => {
       pool.accounts.push(account({ id: 'solo' }))

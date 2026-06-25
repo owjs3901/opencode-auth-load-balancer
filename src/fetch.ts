@@ -54,7 +54,13 @@ async function applyCooldown(
   if (retryAfter) {
     const secs = Number(retryAfter)
     if (Number.isFinite(secs) && secs > 0) {
-      until = now + secs * 1000
+      // Guard: `secs` like 1e308 is itself finite, but `secs * 1000` exceeds
+      // Number.MAX_VALUE (~1.798e308) and collapses to +Infinity, which would
+      // set `cooldownUntil` to +Infinity and permanently sideline the account
+      // (`account.cooldownUntil > now` would be true forever). Fall through to
+      // the `fallbackMs` default in that case.
+      const delta = secs * 1000
+      if (Number.isFinite(delta)) until = now + delta
     } else {
       // RFC 9110 §10.2.3: Retry-After MAY be HTTP-date instead of delay-seconds.
       const httpDate = Date.parse(retryAfter)

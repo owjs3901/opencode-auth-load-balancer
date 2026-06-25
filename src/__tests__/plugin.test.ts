@@ -547,6 +547,78 @@ describe('load-balanced fetch — edge paths', () => {
     expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
   })
 
+  test('cheapSwitchMaxBytes gate counts UTF-8 bytes (not UTF-16 code units) for non-ASCII bodies', async () => {
+    // Regression lock: before the fix, the cost gate used `bodyStr.length` (UTF-16
+    // code units), so a 10-character Korean body (which is 30 UTF-8 bytes on the
+    // wire) was reported as 10 and slipped under a 20-byte gate. That is exactly the
+    // "re-sending a huge context onto a fresh (uncached) account" the gate exists to
+    // prevent — and it hits CJK / emoji conversations hardest (Hangul/Hanzi/Kana =
+    // 3 UTF-8 bytes per UTF-16 unit, emoji surrogate pair = 4). The fix uses
+    // `Buffer.byteLength(bodyStr, 'utf8')`, so 30 > 20 correctly fails the gate and
+    // the session stays pinned to its account. A regression that reintroduces
+    // `.length` would treat the request as cheap and migrate away (this test would
+    // then see Bearer tokA instead of Bearer tokB).
+    const now = Date.now()
+    await mutatePool((pool) => {
+      // A: healthy migration target (low weekly util, no hourly pressure).
+      pool.accounts.push(account({ id: 'A', access: 'tokA', label: 'A' }))
+      // B: pinned to session 's:cjk', past 5h migrateAt (0.96 > 0.95) so a non-forced
+      //    proactive switch IS on the table — but only when the cost gate calls the
+      //    moment cheap. maxUtil(B)=0.96 > maxUtil(A)=0.1 makes A a strictly better
+      //    proactive target post-gate. B is NOT exhausted (0.96 < 0.999), so the
+      //    switch decision is genuinely gated by the byte count, not forced.
+      pool.accounts.push(
+        account({
+          id: 'B',
+          access: 'tokB',
+          label: 'B',
+          usage: {
+            hourly: { utilization: 0.96, resetAt: now + 2 * 60 * 60 * 1000 },
+            weekly: {
+              utilization: 0.5,
+              resetAt: now + 5 * 24 * 60 * 60 * 1000,
+            },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+      pool.sessions['s:cjk'] = { accountId: 'B', updatedAt: now }
+    })
+    // 10 Hangul code points => 10 UTF-16 units, 30 UTF-8 bytes. Pin the invariant
+    // here so a future tweak to the literal can't silently invalidate the test.
+    const cjkBody = '안녕하세요반갑습니다'
+    expect(cjkBody.length).toBe(10)
+    expect(Buffer.byteLength(cjkBody, 'utf8')).toBe(30)
+    const authHeaders: (string | null)[] = []
+    respond = (_url, init) => {
+      authHeaders.push(
+        new Headers(init?.headers as HeadersInit | undefined).get(
+          'authorization',
+        ),
+      )
+      return new Response('ok', { status: 200 })
+    }
+    // Set the env BEFORE constructing the fetch — createLoadBalancedFetch snapshots
+    // the config via loadConfig() exactly once at construction time.
+    process.env.OPENCODE_AUTH_LB_CHEAP_SWITCH_MAX_BYTES = '20'
+    try {
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const res = await lb('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: cjkBody,
+        headers: { [SESSION_HEADER]: 'cjk' },
+      })
+      expect(res.status).toBe(200)
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_CHEAP_SWITCH_MAX_BYTES
+    }
+    // Exactly one upstream call, on the pinned account B. Pre-fix the cheap gate
+    // (10 <= 20) would have triggered the proactive migration to A and we'd see
+    // Bearer tokA here instead.
+    expect(authHeaders).toEqual(['Bearer tokB'])
+  })
+
   test("rejects when the only account's request throws", async () => {
     await mutatePool((pool) => {
       pool.accounts.push(account({ id: 'solo' }))

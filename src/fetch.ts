@@ -131,7 +131,7 @@ export function createLoadBalancedFetch(
         now,
         cfg,
         tried,
-        bodyStr?.length ?? 0,
+        bodyStr ? Buffer.byteLength(bodyStr, 'utf8') : 0,
       )
       if (!selection) {
         // Exhausted every candidate this request, or none exist for this provider.

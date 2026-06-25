@@ -43,7 +43,7 @@ function parseCallbackInput(
 
 interface TokenResponse {
   access_token: string
-  refresh_token: string
+  refresh_token?: string
   expires_in: number
 }
 
@@ -108,7 +108,11 @@ export async function exchange(
   const json = (await result.json()) as TokenResponse
   return {
     access: json.access_token,
-    refresh: json.refresh_token,
+    // RFC 6749 §5.1: server MAY omit refresh_token; at exchange time there is
+    // no previous token, so the empty-string fall-back matches the OpenAI
+    // exchange path (toTokenSet(json, '')) — a missing field still fails the
+    // next refresh loudly, but never writes `undefined` onto the pool account.
+    refresh: json.refresh_token || '',
     expires: Date.now() + json.expires_in * 1000,
   }
 }
@@ -137,7 +141,9 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
   const json = (await response.json()) as TokenResponse
   return {
     access: json.access_token,
-    refresh: json.refresh_token,
+    // RFC 6749 §5.1: server MAY omit a rotated refresh_token; keep the previous
+    // one then (symmetric with toTokenSet() in ../openai/oauth.ts).
+    refresh: json.refresh_token || refreshToken,
     expires: Date.now() + json.expires_in * 1000,
   }
 }

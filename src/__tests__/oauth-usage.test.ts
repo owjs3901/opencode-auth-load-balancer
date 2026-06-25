@@ -133,6 +133,23 @@ describe('anthropic oauth', () => {
     respond = () => new Response('bad', { status: 401 })
     await expect(aRefresh('r1')).rejects.toThrow('401')
   })
+
+  test('refresh keeps the previous refresh token when the server omits one', async () => {
+    // RFC 6749 §5.1: the authorization server MAY omit a rotated refresh_token.
+    // Pre-fix, the Anthropic helper blindly assigned json.refresh_token, so a
+    // 200 response without the field wrote `undefined` onto the live
+    // PoolAccount; mutatePool then persisted it, and the next refresh shipped
+    // a body missing refresh_token entirely, getting 400/invalid_grant and
+    // permanently sidelining the account (disabledReason: 're-login required').
+    // Symmetric with the OpenAI test of the same name.
+    respond = () =>
+      new Response(JSON.stringify({ access_token: 'a2', expires_in: 3600 }), {
+        status: 200,
+      })
+    const tok = await aRefresh('r1')
+    expect(tok.access).toBe('a2')
+    expect(tok.refresh).toBe('r1')
+  })
 })
 
 describe('anthropic usage', () => {

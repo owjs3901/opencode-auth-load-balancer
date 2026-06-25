@@ -63,9 +63,21 @@ export async function ensureAccessToken(
 
   const existing = inflight.get(account.id)
   if (existing) {
-    const tokens = await existing
-    applyTokensTo(account, tokens)
-    return tokens.access
+    try {
+      const tokens = await existing
+      applyTokensTo(account, tokens)
+      return tokens.access
+    } catch (error) {
+      // Symmetric to the success-path applyTokensTo: a concurrent caller
+      // rejoining via `inflight` must also see disabledReason on its OWN
+      // local PoolAccount, otherwise fetch.ts's `if (!account.disabledReason)`
+      // gate wastes an AUTH cooldown write on an already-disabled credential.
+      // The pool file is already updated by the job-creator's mutatePool.
+      if (isInvalidGrant(error)) {
+        account.disabledReason = `invalid_grant: re-login required (${adapter.id}:${account.label})`
+      }
+      throw error
+    }
   }
 
   const job = (async (): Promise<TokenSet> => {

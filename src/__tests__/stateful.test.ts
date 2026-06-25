@@ -290,6 +290,44 @@ describe('refresh', () => {
     expect(a1.accountId).toBe('acc_x')
     expect(a2.accountId).toBe('acc_x')
   })
+
+  test("singleflight propagates invalid_grant disabledReason to EVERY concurrent caller's account, not just the one that started the refresh", async () => {
+    // Symmetric to the success-path test above: the IIFE's catch sets the
+    // local disabledReason only on the job-creator. A concurrent caller
+    // rejoining via `inflight` must ALSO see disabledReason on its OWN
+    // local PoolAccount — otherwise fetch.ts's `if (!account.disabledReason)`
+    // gate wastes an AUTH cooldown write on an already-disabled credential.
+    const a1 = account({
+      id: 'shared-igrant',
+      access: 'old',
+      refresh: 'r-igrant',
+      expires: Date.now() - 1,
+    })
+    const a2 = { ...a1 } // distinct object, same id, same stale state
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a1 })
+    })
+    let called = 0
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        called += 1
+        await new Promise((r) => setTimeout(r, 10))
+        throw new Error('invalid_grant')
+      },
+    })
+    const results = await Promise.allSettled([
+      ensureAccessToken(adapter, a1, Date.now()),
+      ensureAccessToken(adapter, a2, Date.now()),
+    ])
+    expect(called).toBe(1)
+    expect(results[0]?.status).toBe('rejected')
+    expect(results[1]?.status).toBe('rejected')
+    expect(a1.disabledReason).toContain('invalid_grant')
+    expect(a2.disabledReason).toContain('invalid_grant') // null pre-fix
+    expect(findAccount(await readPool(), a1.id)?.disabledReason).toContain(
+      'invalid_grant',
+    )
+  })
 })
 
 describe('accounts', () => {

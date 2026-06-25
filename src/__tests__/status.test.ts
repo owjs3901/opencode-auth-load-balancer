@@ -99,6 +99,27 @@ describe('buildStatus', () => {
   test('returns an empty list for an empty pool', () => {
     expect(buildStatus(pool([]), NOW)).toEqual([])
   })
+
+  test('a window past its reset shows 0% and stays available (stale value discarded)', () => {
+    // 5h read 100% but its reset already elapsed (resetAt in the past): the window rolled
+    // over, so the account has full 5h headroom again. It must read as available with a 0%
+    // 5h util — never a stale "100% / exhausted" that would wrongly exclude it.
+    const p = pool(
+      [
+        acc({
+          id: 'stale',
+          weekly: win(0.48, 14 * HOUR),
+          hourly: win(1.0, -HOUR),
+        }),
+      ],
+      { anthropic: 'stale' },
+    )
+    const anthropic = buildStatus(p, NOW)[0]!
+    const stale = anthropic.accounts.find((a) => a.id === 'stale')!
+    expect(stale.available).toBe(true)
+    expect(stale.hourlyUtil).toBe(0) // elapsed window -> reset -> 0%
+    expect(stale.weeklyUtil).toBe(0.48) // still-live window unchanged
+  })
 })
 
 describe('renderStatus', () => {

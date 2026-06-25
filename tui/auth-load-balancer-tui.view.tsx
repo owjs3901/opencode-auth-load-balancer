@@ -25,6 +25,7 @@ import { join } from 'node:path'
 import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import type { TuiPluginApi, TuiSlotPlugin } from '@opencode-ai/plugin/tui'
 import {
+  displayUtil,
   isAvailable,
   loadScoreConfig,
   maxUtil,
@@ -153,10 +154,14 @@ function until(resetAt: number | undefined, now: number): string {
   if (hrs < 24) return `${hrs}h`
   return `${Math.round(hrs / 24)}d`
 }
+/** A window's utilization for the bar: "-" when absent, "0%" once it has reset (stale value dropped). */
+function winPct(w: UsageWindow | null | undefined, now: number): string {
+  return pct(displayUtil(toScoreWindow(w), now))
+}
 function stateOf(a: PoolAccount, now: number): string {
   if (a.disabledReason) return 're-login'
   if ((a.cooldownUntil ?? 0) > now) return 'cooldown'
-  if (maxUtil(toScore(a)) >= cfg.exhaustedAt) return 'full'
+  if (maxUtil(toScore(a), now) >= cfg.exhaustedAt) return 'full'
   return ''
 }
 
@@ -191,9 +196,9 @@ function BottomBar(props: { api: TuiPluginApi }) {
       out.push({
         name: PROVIDER_NAMES[providerID] ?? providerID,
         label: a.label,
-        wk: pct(a.usage?.weekly?.utilization),
+        wk: winPct(a.usage?.weekly, now),
         wkReset: until(a.usage?.weekly?.resetAt, now),
-        h: pct(a.usage?.hourly?.utilization),
+        h: winPct(a.usage?.hourly, now),
         hReset: until(a.usage?.hourly?.resetAt, now),
       })
     }
@@ -254,7 +259,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
             score: available
               ? scoreAccount(sa, cfg, now)
               : Number.NEGATIVE_INFINITY,
-            weeklyUtil: utilOf(sa.usage.weekly),
+            weeklyUtil: utilOf(sa.usage.weekly, now),
           }
         })
         .sort((x, y) => {
@@ -271,9 +276,9 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           current: p.lastSelected?.[providerID] === a.id,
           score: available ? score : null,
           rank: available ? rank : null,
-          wk: pct(a.usage?.weekly?.utilization),
+          wk: winPct(a.usage?.weekly, now),
           wkReset: until(a.usage?.weekly?.resetAt, now),
-          h: pct(a.usage?.hourly?.utilization),
+          h: winPct(a.usage?.hourly, now),
           hReset: until(a.usage?.hourly?.resetAt, now),
           state: stateOf(a, now),
         }

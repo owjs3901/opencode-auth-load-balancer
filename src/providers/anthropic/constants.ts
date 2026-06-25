@@ -12,6 +12,13 @@ export const CODE_CALLBACK_URL =
 
 export const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
 
+/**
+ * Bound every OAuth token-endpoint call (exchange/refresh) so a hung network never
+ * holds the per-account refresh lock for its full stale window. Must stay below the
+ * refresh lock's stale timeout (120s) so the lock is released by the abort first.
+ */
+export const OAUTH_HTTP_TIMEOUT_MS = 30_000
+
 /** Dedicated usage endpoint — returns 5h + 7d utilization without consuming quota. */
 export const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 

@@ -5,6 +5,7 @@
  * which structurally satisfy the core's `ScoreAccount` / `ScoreConfig`.
  */
 export {
+  displayUtil,
   isAvailable,
   isExhausted,
   maxUtil,

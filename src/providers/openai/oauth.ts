@@ -4,6 +4,7 @@ import type { AuthorizeRequest } from '../types'
 import {
   AUTHORIZE_URL,
   CLIENT_ID,
+  OAUTH_HTTP_TIMEOUT_MS,
   OAUTH_SCOPES,
   ORIGINATOR,
   REDIRECT_URI,
@@ -105,6 +106,7 @@ export async function exchange(
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
+    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
   })
   if (!res.ok) {
     await res.body?.cancel().catch(ignore)
@@ -127,6 +129,7 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
+    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
   })
   if (!res.ok) {
     const text = await res.text()

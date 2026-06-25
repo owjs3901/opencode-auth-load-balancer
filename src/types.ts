@@ -50,6 +50,13 @@ export interface PoolAccount {
   refresh: string
   /** Access-token expiry, epoch ms. */
   expires: number
+  /**
+   * Monotonic token-rotation generation. Bumped on every successful refresh so a
+   * cross-process refresher that lost the single-use-token race can tell its token
+   * was superseded — and adopt the winner's token instead of permanently disabling
+   * a now-valid account. Absent on legacy pool files (read as 0).
+   */
+  tokenGen?: number
   /** Provider account id (e.g. chatgpt-account-id), or null. */
   accountId: string | null
   usage: UsageSnapshot

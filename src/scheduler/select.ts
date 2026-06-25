@@ -154,7 +154,8 @@ export function selectForSession(
     // case (which is the only legitimate way to return a degraded selection).
     if (alt && !alt.degraded) {
       const proactive =
-        overSoftThreshold(pinned, cfg) && maxUtil(alt.account) < maxUtil(pinned)
+        overSoftThreshold(pinned, cfg, now) &&
+        maxUtil(alt.account, now) < maxUtil(pinned, now)
       const drain =
         cfg.drainMigrate &&
         weeklyUrgency(alt.account, cfg, now) >=

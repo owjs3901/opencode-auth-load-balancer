@@ -4,7 +4,7 @@ import {
   loadConfig,
   type SchedulerConfig,
 } from './scheduler/config'
-import { isAvailable, scoreAccount } from './scheduler/score'
+import { displayUtil, isAvailable, scoreAccount } from './scheduler/score'
 import type { PoolAccount, PoolFile } from './types'
 
 const PROVIDER_NAMES: Record<string, string> = {
@@ -42,8 +42,8 @@ function toStatus(
   return {
     id: account.id,
     label: account.label,
-    weeklyUtil: account.usage.weekly?.utilization ?? null,
-    hourlyUtil: account.usage.hourly?.utilization ?? null,
+    weeklyUtil: displayUtil(account.usage.weekly, now),
+    hourlyUtil: displayUtil(account.usage.hourly, now),
     weeklyResetAt: account.usage.weekly?.resetAt ?? 0,
     available: isAvailable(account, cfg, now),
     cooldownUntil: account.cooldownUntil,

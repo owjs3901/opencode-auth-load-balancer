@@ -8,6 +8,13 @@ export const AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
 export const TOKEN_URL = 'https://auth.openai.com/oauth/token'
 export const REDIRECT_URI = 'http://localhost:1455/auth/callback'
 
+/**
+ * Bound every OAuth token-endpoint call (exchange/refresh) so a hung network never
+ * holds the per-account refresh lock for its full stale window. Must stay below the
+ * refresh lock's stale timeout (120s) so the lock is released by the abort first.
+ */
+export const OAUTH_HTTP_TIMEOUT_MS = 30_000
+
 export const OAUTH_SCOPES = ['openid', 'profile', 'email', 'offline_access']
 
 /** ChatGPT-OAuth Codex inference endpoint. */

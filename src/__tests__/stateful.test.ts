@@ -13,6 +13,7 @@ import {
   findAccount,
   type FsOps,
   mutatePool,
+  PoolWriteError,
   readPool,
   writeJsonAtomic,
 } from '../pool/store'
@@ -91,23 +92,36 @@ describe('pool store', () => {
     expect(findAccount(pool, 'missing')).toBeUndefined()
   })
 
-  test('writeJsonAtomic falls back to a direct write when rename fails', async () => {
+  test('writeJsonAtomic retries the rename, then throws PoolWriteError and cleans up the temp file', async () => {
+    // Post-fix: the old code fell back to a NON-atomic direct overwrite on rename
+    // failure, which could shred a concurrent writer's update. Now it retries the
+    // rename a bounded number of times and, on sustained failure, removes the temp
+    // file and throws — never overwriting the target directly.
     const writes: string[] = []
+    let renames = 0
+    let unlinked = 0
     const ops: FsOps = {
       mkdir: async () => undefined,
       writeFile: async (path) => {
         writes.push(path)
       },
       rename: async () => {
+        renames += 1
         throw new Error('EPERM')
       },
       unlink: async () => {
+        unlinked += 1
         throw new Error('gone') // rejects -> exercises the shared `ignore`
       },
     }
-    await writeJsonAtomic('/data/pool.json', '{}', ops)
-    expect(writes).toContain('/data/pool.json') // fallback wrote directly to the target
-    expect(writes).toHaveLength(2) // tmp (try) + target (fallback)
+    await expect(writeJsonAtomic('/data/pool.json', '{}', ops)).rejects.toThrow(
+      PoolWriteError,
+    )
+    // Only the tmp file was ever written — never a direct, non-atomic target overwrite.
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).not.toBe('/data/pool.json')
+    expect(renames).toBe(5) // RENAME_RETRIES
+    expect(unlinked).toBe(1) // tmp cleanup attempted
   })
 })
 
@@ -356,6 +370,125 @@ describe('refresh', () => {
     expect(findAccount(await readPool(), a1.id)?.disabledReason).toContain(
       'invalid_grant',
     )
+  })
+
+  test('reload-before-refresh adopts a token another process already rotated (no second spend)', async () => {
+    // Given: our local account is stale, but the pool on disk already holds a FRESH
+    // token (a concurrent process won the refresh race and persisted it). We must
+    // adopt that token, NOT spend our now-stale single-use refresh token again.
+    const a = account({
+      id: 'preempt',
+      access: 'stale',
+      refresh: 'r0',
+      expires: Date.now() - 1,
+      tokenGen: 0,
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({
+        ...a,
+        access: 'fresh-on-disk',
+        refresh: 'r1',
+        expires: Date.now() + 3_600_000,
+        tokenGen: 1,
+      })
+    })
+    let called = 0
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        called += 1
+        return { access: 'x', refresh: 'y', expires: 0 }
+      },
+    })
+    expect(await ensureAccessToken(adapter, a, Date.now())).toBe(
+      'fresh-on-disk',
+    )
+    expect(called).toBe(0) // never spent our stale token
+    expect(a.access).toBe('fresh-on-disk')
+    expect(a.refresh).toBe('r1')
+  })
+
+  test('a refresh superseded mid-flight adopts the winner instead of clobbering it', async () => {
+    // Given: while OUR refresh is in flight, a concurrent process rotates + persists
+    // a newer token (bumping tokenGen). Our commit must NOT overwrite the winner.
+    const a = account({
+      id: 'race',
+      refresh: 'r0',
+      expires: Date.now() - 1,
+      tokenGen: 0,
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        await mutatePool((pool) => {
+          const s = findAccount(pool, 'race')
+          if (s) {
+            s.access = 'winner'
+            s.refresh = 'r-winner'
+            s.expires = Date.now() + 3_600_000
+            s.tokenGen = 1
+          }
+        })
+        return {
+          access: 'mine',
+          refresh: 'r-mine',
+          expires: Date.now() + 3_600_000,
+        }
+      },
+    })
+    expect(await ensureAccessToken(adapter, a, Date.now())).toBe('winner')
+    expect(a.access).toBe('winner')
+    const stored = findAccount(await readPool(), 'race')
+    expect(stored?.refresh).toBe('r-winner') // our 'r-mine' did NOT win
+    expect(stored?.tokenGen).toBe(1)
+  })
+
+  test('invalid_grant on a token superseded by a concurrent refresh ADOPTS, never disables', async () => {
+    // The core race fix: the LOSER of a single-use-token race gets invalid_grant, but
+    // the on-disk token has already advanced — so it adopts the winner rather than
+    // permanently disabling a perfectly valid account (the "re-login required" bug).
+    const a = account({
+      id: 'race-ig',
+      refresh: 'r0',
+      expires: Date.now() - 1,
+      tokenGen: 0,
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        await mutatePool((pool) => {
+          const s = findAccount(pool, 'race-ig')
+          if (s) {
+            s.access = 'winner'
+            s.refresh = 'r-winner'
+            s.expires = Date.now() + 3_600_000
+            s.tokenGen = 1
+          }
+        })
+        throw new Error('invalid_grant')
+      },
+    })
+    expect(await ensureAccessToken(adapter, a, Date.now())).toBe('winner')
+    expect(a.disabledReason).toBeNull()
+    expect(
+      findAccount(await readPool(), 'race-ig')?.disabledReason ?? null,
+    ).toBeNull()
+  })
+
+  test('invalid_grant for an account not in the pool still rethrows and marks the local object', async () => {
+    const a = account({ id: 'lonely', expires: Date.now() - 1 }) // never pushed
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        throw new Error('invalid_grant')
+      },
+    })
+    await expect(ensureAccessToken(adapter, a, Date.now())).rejects.toThrow(
+      'invalid_grant',
+    )
+    expect(a.disabledReason).toContain('invalid_grant')
   })
 })
 

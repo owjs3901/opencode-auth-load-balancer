@@ -24,6 +24,7 @@ function makeAccount(
     access: tokens.access,
     refresh: tokens.refresh,
     expires: tokens.expires,
+    tokenGen: 0,
     accountId: tokens.accountId ?? null,
     usage: emptyUsage(),
     cooldownUntil: 0,

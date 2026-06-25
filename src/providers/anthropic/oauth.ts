@@ -5,6 +5,7 @@ import {
   AUTHORIZE_URLS,
   CLIENT_ID,
   CODE_CALLBACK_URL,
+  OAUTH_HTTP_TIMEOUT_MS,
   OAUTH_SCOPES,
   TOKEN_URL,
 } from './constants'
@@ -98,6 +99,7 @@ export async function exchange(
       redirect_uri: redirectUri,
       code_verifier: verifier,
     }),
+    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
   })
 
   if (!result.ok) {
@@ -131,6 +133,7 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
       refresh_token: refreshToken,
       client_id: CLIENT_ID,
     }),
+    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
   })
 
   if (!response.ok) {

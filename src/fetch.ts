@@ -1,4 +1,5 @@
-import { findAccount, mutatePool, readPool } from './pool/store'
+import { LockTimeoutError } from './pool/lock'
+import { findAccount, mutatePool, PoolWriteError, readPool } from './pool/store'
 import { mergeHeaders } from './providers/headers'
 import type { FetchInput, ProviderAdapter } from './providers/types'
 import { ensureAccessToken } from './refresh'
@@ -22,6 +23,27 @@ function log(message: string): void {
   if (DEBUG) console.error(`[auth-lb] ${message}`)
 }
 
+/**
+ * Run a post-response bookkeeping write that must NEVER fail the request it follows.
+ * Usage/cooldown/session writes are best-effort: if the cross-process pool lock times
+ * out or an atomic write fails, skip silently (the next request self-corrects) rather
+ * than discarding an already-served response. Non-infrastructure errors still propagate.
+ */
+export async function bestEffort(
+  what: string,
+  op: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await op()
+  } catch (error) {
+    if (error instanceof LockTimeoutError || error instanceof PoolWriteError) {
+      log(`bookkeeping skipped (${what}): ${error.message}`)
+      return
+    }
+    throw error
+  }
+}
+
 async function recordUsage(
   adapter: ProviderAdapter,
   accountId: string,
@@ -29,18 +51,20 @@ async function recordUsage(
   now: number,
 ): Promise<void> {
   const partial = adapter.parseUsageHeaders(res.headers, now)
-  await mutatePool((pool) => {
-    const account = findAccount(pool, accountId)
-    if (!account) return
-    if (partial) {
-      if (partial.hourly !== undefined) account.usage.hourly = partial.hourly
-      if (partial.weekly !== undefined) account.usage.weekly = partial.weekly
-      if (partial.status !== undefined) account.usage.status = partial.status
-      account.usage.capturedAt = now
-    }
-    account.lastUsedAt = now
-    pool.lastSelected[adapter.id] = accountId
-  })
+  await bestEffort('usage', () =>
+    mutatePool((pool) => {
+      const account = findAccount(pool, accountId)
+      if (!account) return
+      if (partial) {
+        if (partial.hourly !== undefined) account.usage.hourly = partial.hourly
+        if (partial.weekly !== undefined) account.usage.weekly = partial.weekly
+        if (partial.status !== undefined) account.usage.status = partial.status
+        account.usage.capturedAt = now
+      }
+      account.lastUsedAt = now
+      pool.lastSelected[adapter.id] = accountId
+    }),
+  )
 }
 
 async function applyCooldown(
@@ -67,10 +91,13 @@ async function applyCooldown(
       if (Number.isFinite(httpDate) && httpDate > now) until = httpDate
     }
   }
-  await mutatePool((pool) => {
-    const account = findAccount(pool, accountId)
-    if (account) account.cooldownUntil = Math.max(account.cooldownUntil, until)
-  })
+  await bestEffort('cooldown', () =>
+    mutatePool((pool) => {
+      const account = findAccount(pool, accountId)
+      if (account)
+        account.cooldownUntil = Math.max(account.cooldownUntil, until)
+    }),
+  )
 }
 
 /** Pin a session to an account (preserving prompt cache) and prune stale assignments. */
@@ -81,17 +108,39 @@ async function assignSession(
   ttlMs: number,
 ): Promise<void> {
   if (!sessionKey) return
-  await mutatePool((pool) => {
-    pool.sessions[sessionKey] = { accountId, updatedAt: now }
-    for (const [key, value] of Object.entries(pool.sessions)) {
-      if (now - value.updatedAt > ttlMs) delete pool.sessions[key]
-    }
-  })
+  const key = sessionKey
+  await bestEffort('session', () =>
+    mutatePool((pool) => {
+      pool.sessions[key] = { accountId, updatedAt: now }
+      for (const [k, value] of Object.entries(pool.sessions)) {
+        if (now - value.updatedAt > ttlMs) delete pool.sessions[k]
+      }
+    }),
+  )
 }
 
 export interface FetchHooks {
   /** Called with the account that successfully served a request (for toasts/logs). */
   onUse?: (providerID: string, account: PoolAccount) => void
+}
+
+/**
+ * Build a provider-shaped 401 for the "pool has no usable account" case. We must
+ * NOT fall through to the global fetch here: opencode handed auth control to this
+ * plugin via `apiKey: ''`, so the SDK's default `x-api-key: ''` is the only thing on
+ * the request — passing it through yields a misleading "x-api-key header is required"
+ * upstream. A clean 401 surfaces the real cause (add or re-login an account) instead.
+ */
+function noUsableAccountResponse(providerID: string): Response {
+  const message = `No usable ${providerID} account in the auth-load-balancer pool. Run "opencode auth login" to add or re-login an account.`
+  const body =
+    providerID === 'anthropic'
+      ? { type: 'error', error: { type: 'authentication_error', message } }
+      : { error: { type: 'authentication_error', message } }
+  return new Response(JSON.stringify(body), {
+    status: 401,
+    headers: { 'content-type': 'application/json' },
+  })
 }
 
 /**
@@ -137,8 +186,9 @@ export function createLoadBalancedFetch(
         // Exhausted every candidate this request, or none exist for this provider.
         if (tried.size > 0) break
         if (lastError) throw lastError
-        // No pooled accounts: defer to default fetch so the provider's own auth works.
-        return fetch(input as Parameters<typeof fetch>[0], init)
+        // No usable account: return a clean 401 rather than leaking the SDK's empty
+        // x-api-key through the global fetch (see noUsableAccountResponse).
+        return noUsableAccountResponse(adapter.id)
       }
 
       const { account, degraded, sticky } = selection
@@ -188,6 +238,15 @@ export function createLoadBalancedFetch(
         return adapter.transformResponse(res)
       } catch (error) {
         lastError = error
+        // A client-side abort (opencode restarting, or the user cancelling the turn) is
+        // NOT the account's fault: cooling it down would sideline a healthy account for
+        // AUTH_COOLDOWN_MS, and rotating would spend a fresh account re-sending an
+        // already-abandoned request. When several requests are in flight at shutdown this
+        // otherwise cools EVERY account at once. Propagate the abort untouched instead.
+        const aborted =
+          init?.signal?.aborted === true ||
+          (error instanceof Error && error.name === 'AbortError')
+        if (aborted) throw error
         if (!account.disabledReason)
           await applyCooldown(account.id, AUTH_COOLDOWN_MS, null)
         log(

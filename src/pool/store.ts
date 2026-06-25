@@ -3,10 +3,46 @@ import { dirname } from 'node:path'
 
 import type { PoolAccount, PoolFile } from '../types'
 import { ignore } from '../util'
+import { type LockOptions, withLock as withFileLock } from './lock'
 import { poolFilePath } from './paths'
 
 function emptyPool(): PoolFile {
   return { version: 1, accounts: [], lastSelected: {}, sessions: {} }
+}
+
+/**
+ * The pool-file write lock is held only across one JSON read-modify-write (ms),
+ * so a generous timeout still never blocks a real request. It serializes pool
+ * mutations across opencode processes (the in-process `chain` below only covers
+ * one process); without it two instances can lost-update usage/cooldowns.
+ */
+const POOL_WRITE_LOCK: LockOptions = {
+  staleMs: 30_000,
+  timeoutMs: 30_000,
+  retryMs: 25,
+  heartbeatMs: 5_000,
+}
+
+function poolLockDir(): string {
+  return `${poolFilePath()}.lock`
+}
+
+const RENAME_RETRIES = 5
+const RENAME_RETRY_MS = 20
+
+/** Thrown when the pool file cannot be written atomically after retries. */
+export class PoolWriteError extends Error {
+  constructor(
+    readonly path: string,
+    readonly reason: unknown,
+  ) {
+    super(`Failed to write pool file atomically: ${path}`)
+    this.name = 'PoolWriteError'
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /**
@@ -55,8 +91,11 @@ const realFsOps: FsOps = { mkdir, writeFile, rename, unlink }
 
 /**
  * Write JSON atomically: temp file + rename (atomic on POSIX and modern Windows).
- * If the rename fails — e.g. a concurrent process holds the target open (Windows
- * EPERM) — fall back to a direct overwrite.
+ * If the rename fails — e.g. a concurrent process briefly holds the target open
+ * (Windows EPERM) — retry a few times, then clean up the temp file and throw. We
+ * never fall back to a direct overwrite: that sacrifices atomicity and can shred a
+ * concurrent writer's update. Mutations already run under the cross-process pool
+ * lock, so a sustained rename failure is a real disk fault worth surfacing.
  */
 export async function writeJsonAtomic(
   path: string,
@@ -65,13 +104,19 @@ export async function writeJsonAtomic(
 ): Promise<void> {
   await ops.mkdir(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
-  try {
-    await ops.writeFile(tmp, payload, { mode: 0o600 })
-    await ops.rename(tmp, path)
-  } catch {
-    await ops.writeFile(path, payload, { mode: 0o600 })
-    await ops.unlink(tmp).catch(ignore)
+  await ops.writeFile(tmp, payload, { mode: 0o600 })
+  let lastError: unknown = null
+  for (let attempt = 0; attempt < RENAME_RETRIES; attempt++) {
+    try {
+      await ops.rename(tmp, path)
+      return
+    } catch (error) {
+      lastError = error
+      await sleep(RENAME_RETRY_MS)
+    }
   }
+  await ops.unlink(tmp).catch(ignore)
+  throw new PoolWriteError(path, lastError)
 }
 
 async function writeRaw(pool: PoolFile): Promise<void> {
@@ -90,12 +135,17 @@ export async function readPool(): Promise<PoolFile> {
 export async function mutatePool<T>(
   fn: (pool: PoolFile) => T | Promise<T>,
 ): Promise<T> {
-  return withLock(async () => {
-    const pool = await readRaw()
-    const result = await fn(pool)
-    await writeRaw(pool)
-    return result
-  })
+  // In-process chain first (cheap, collapses same-process callers), then the
+  // cross-process file lock around the actual read-modify-write so two opencode
+  // instances can't interleave their mutations.
+  return withLock(() =>
+    withFileLock(poolLockDir(), POOL_WRITE_LOCK, async () => {
+      const pool = await readRaw()
+      const result = await fn(pool)
+      await writeRaw(pool)
+      return result
+    }),
+  )
 }
 
 /** Find an account by id within a pool object. */
@@ -104,4 +154,11 @@ export function findAccount(
   id: string,
 ): PoolAccount | undefined {
   return pool.accounts.find((a) => a.id === id)
+}
+
+/** Read a single account by id from the on-disk pool (serialized read). */
+export async function readPoolAccount(
+  id: string,
+): Promise<PoolAccount | undefined> {
+  return findAccount(await readPool(), id)
 }

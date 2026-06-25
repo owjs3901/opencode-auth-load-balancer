@@ -120,18 +120,59 @@ function clamp01(n: number): number {
   return Math.min(1, Math.max(0, n))
 }
 
-export function utilOf(window: ScoreWindow | null): number {
-  return window ? clamp01(window.utilization) : 0
+/**
+ * A window is EXPIRED once `now` has passed its `resetAt`: the rate-limit window it
+ * described has rolled over, so its stored utilization is STALE and no longer applies (a
+ * 5h window that read 100% an hour ago has full headroom again, even before we re-poll).
+ * `resetAt === 0` means the reset time is UNKNOWN — NOT expired — so an account with no
+ * reset metadata keeps its reported utilization (matching the conservative "unknown
+ * reset" handling in `weeklyUrgency` / `scoreAccount`) until real numbers arrive.
+ */
+function isWindowExpired(window: ScoreWindow, now: number): boolean {
+  return window.resetAt > 0 && window.resetAt <= now
 }
 
-/** The busiest window's utilization (whichever of 5h / weekly is higher). */
-export function maxUtil(account: ScoreAccount): number {
-  return Math.max(utilOf(account.usage.hourly), utilOf(account.usage.weekly))
+/**
+ * Effective utilization of a window RIGHT NOW (0..1). A missing window — or one that has
+ * already reset (see `isWindowExpired`) — contributes 0, so a stale 100% left over from
+ * an elapsed window never makes an account look busy or exhausted (which would exclude it
+ * from selection, so it would never be picked, never re-polled, and stay "full" forever).
+ */
+export function utilOf(window: ScoreWindow | null, now: number): number {
+  if (!window || isWindowExpired(window, now)) return 0
+  return clamp01(window.utilization)
 }
 
-/** An account is exhausted when ANY window is at/over the exhaustion threshold. */
-export function isExhausted(account: ScoreAccount, cfg: ScoreConfig): boolean {
-  return maxUtil(account) >= cfg.exhaustedAt
+/**
+ * Effective utilization for DISPLAY: `null` when there is no window (dashboards render
+ * "-"), `0` once the window has reset (the stale stored value is discarded → "0%"),
+ * otherwise the stored utilization. Mirrors `utilOf`'s expiry rule but keeps the
+ * unknown-vs-zero distinction the dashboards need ("-" for no data, "0%" for a freshly
+ * reset window with full headroom).
+ */
+export function displayUtil(
+  window: ScoreWindow | null,
+  now: number,
+): number | null {
+  if (!window) return null
+  return isWindowExpired(window, now) ? 0 : clamp01(window.utilization)
+}
+
+/** The busiest window's utilization right now (whichever of 5h / weekly is higher). */
+export function maxUtil(account: ScoreAccount, now: number): number {
+  return Math.max(
+    utilOf(account.usage.hourly, now),
+    utilOf(account.usage.weekly, now),
+  )
+}
+
+/** An account is exhausted when ANY still-live window is at/over the exhaustion threshold. */
+export function isExhausted(
+  account: ScoreAccount,
+  cfg: ScoreConfig,
+  now: number,
+): boolean {
+  return maxUtil(account, now) >= cfg.exhaustedAt
 }
 
 /**
@@ -144,10 +185,11 @@ export function isExhausted(account: ScoreAccount, cfg: ScoreConfig): boolean {
 export function overSoftThreshold(
   account: ScoreAccount,
   cfg: ScoreConfig,
+  now: number,
 ): boolean {
   return (
-    utilOf(account.usage.weekly) >= cfg.weeklyDrainTarget ||
-    utilOf(account.usage.hourly) >= cfg.migrateAt
+    utilOf(account.usage.weekly, now) >= cfg.weeklyDrainTarget ||
+    utilOf(account.usage.hourly, now) >= cfg.migrateAt
   )
 }
 
@@ -159,7 +201,7 @@ export function isAvailable(
 ): boolean {
   if (account.disabledReason) return false
   if (account.cooldownUntil > now) return false
-  if (isExhausted(account, cfg)) return false
+  if (isExhausted(account, cfg, now)) return false
   return true
 }
 
@@ -186,7 +228,7 @@ export function weeklyUrgency(
 ): number {
   const drainable = Math.max(
     0,
-    cfg.weeklyDrainTarget - utilOf(account.usage.weekly),
+    cfg.weeklyDrainTarget - utilOf(account.usage.weekly, now),
   )
   const resetAt = account.usage.weekly?.resetAt ?? 0
   const ms = resetAt > now ? resetAt - now : cfg.weekWindowMs
@@ -210,7 +252,7 @@ export function scoreAccount(
   now: number,
 ): number {
   const urgency = weeklyUrgency(account, cfg, now)
-  const hourlyUtil = utilOf(account.usage.hourly)
+  const hourlyUtil = utilOf(account.usage.hourly, now)
   const resetAt = account.usage.hourly?.resetAt ?? 0
   const msToReset = resetAt > now ? resetAt - now : HOURLY_WINDOW_MS
   const resetFactor = clamp01(msToReset / HOURLY_WINDOW_MS)

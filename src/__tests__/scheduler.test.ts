@@ -178,7 +178,7 @@ describe('exclusion', () => {
   test('an account exhausted in the weekly window is excluded', () => {
     const exhausted = account('ex', { weekly: win(1.0, 30 * HOUR) })
     const ok = account('ok', { weekly: win(0.9, 30 * HOUR) })
-    expect(isExhausted(exhausted, DEFAULT_CONFIG)).toBe(true)
+    expect(isExhausted(exhausted, DEFAULT_CONFIG, NOW)).toBe(true)
     expect(pick([exhausted, ok])).toBe('ok')
   })
 
@@ -214,6 +214,46 @@ describe('exclusion', () => {
     const a = account('a', { weekly: win(0.1, 30 * HOUR) })
     const b = account('b', { weekly: win(0.6, 30 * HOUR) })
     expect(pick([a, b], new Set(['a']))).toBe('b')
+  })
+})
+
+describe('stale (already-reset) windows count as fresh headroom, not exhaustion', () => {
+  test('a 5h window stuck at 100% whose reset already passed is available again', () => {
+    // owjs3901's real shape: the 5h window read 100% but its reset is in the PAST (the
+    // window rolled over), while weekly is still live at 48%. The elapsed 5h must count as
+    // full headroom — otherwise the account is excluded, never picked, never re-polled, and
+    // stays "full" forever even though it has not been used.
+    const reset5h = account('reset5h', {
+      hourly: win(1.0, -HOUR), // resetAt = NOW - HOUR: already elapsed
+      weekly: win(0.48, 14 * HOUR),
+    })
+    expect(isExhausted(reset5h, DEFAULT_CONFIG, NOW)).toBe(false)
+    expect(isAvailable(reset5h, DEFAULT_CONFIG, NOW)).toBe(true)
+  })
+
+  test('the elapsed-5h account outranks a genuinely busier one and is picked', () => {
+    const reset5h = account('reset5h', {
+      hourly: win(1.0, -HOUR),
+      weekly: win(0.48, 14 * HOUR),
+    })
+    const busy = account('busy', { weekly: win(0.9, 14 * HOUR) })
+    expect(pick([reset5h, busy])).toBe('reset5h')
+  })
+
+  test('an account whose weekly window already reset is no longer exhausted', () => {
+    const resetWk = account('resetWk', { weekly: win(1.0, -DAY) }) // weekly elapsed
+    expect(isExhausted(resetWk, DEFAULT_CONFIG, NOW)).toBe(false)
+    expect(isAvailable(resetWk, DEFAULT_CONFIG, NOW)).toBe(true)
+  })
+
+  test('a 100% window with an UNKNOWN reset (resetAt 0) stays exhausted (not treated as reset)', () => {
+    // resetAt === 0 means "no reset metadata", NOT "the window elapsed": keep the reported
+    // utilization so a genuinely-maxed account with no reset time is still excluded.
+    const unknown = account('unknown', {
+      weekly: { utilization: 1.0, resetAt: 0 },
+    })
+    expect(isExhausted(unknown, DEFAULT_CONFIG, NOW)).toBe(true)
+    expect(isAvailable(unknown, DEFAULT_CONFIG, NOW)).toBe(false)
   })
 })
 

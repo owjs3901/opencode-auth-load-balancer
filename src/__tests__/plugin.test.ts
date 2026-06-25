@@ -8,14 +8,15 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-plugin-'))
 const POOL = join(DIR, 'auth-load-balancer.json')
 
-import { createLoadBalancedFetch } from '../fetch'
+import { bestEffort, createLoadBalancedFetch } from '../fetch'
 import {
   AnthropicLoadBalancerPlugin,
   AuthLoadBalancerStatusPlugin,
   OpenAILoadBalancerPlugin,
 } from '../index'
 import type { ToastClient } from '../notify'
-import { mutatePool, readPool } from '../pool/store'
+import { LockTimeoutError } from '../pool/lock'
+import { mutatePool, PoolWriteError, readPool } from '../pool/store'
 import { primeInUse } from '../prime'
 import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { loadConfig } from '../scheduler/config'
@@ -211,7 +212,10 @@ describe('plugin factory', () => {
 })
 
 describe('load-balanced fetch — edge paths', () => {
-  test('falls back to the default fetch when the pool has no accounts', async () => {
+  test('returns a synthetic 401 (never leaks the empty x-api-key) when the pool has no accounts', async () => {
+    // Pre-fix this path fell through to the global fetch, sending opencode's default
+    // `x-api-key: ''` upstream and yielding a misleading "x-api-key header is required".
+    // Now it returns a clean provider-shaped 401 WITHOUT touching the network.
     let hit = false
     respond = () => {
       hit = true
@@ -222,8 +226,13 @@ describe('load-balanced fetch — edge paths', () => {
       method: 'POST',
       body: '{}',
     })
-    expect(hit).toBe(true)
-    expect(await res.text()).toBe('default')
+    expect(hit).toBe(false) // global fetch never called
+    expect(res.status).toBe(401)
+    const json = (await res.json()) as {
+      error?: { type?: string; message?: string }
+    }
+    expect(json.error?.type).toBe('authentication_error')
+    expect(json.error?.message).toContain('auth-load-balancer pool')
   })
 
   test('honors retry-after when cooling down a rate-limited account', async () => {
@@ -635,6 +644,37 @@ describe('load-balanced fetch — edge paths', () => {
     ).rejects.toThrow()
   })
 
+  test('a client-side abort propagates without cooling down or rotating accounts', async () => {
+    // A request aborted by the caller (opencode restart / user cancels the turn) must NOT
+    // be charged to the account: cooling it down would sideline a healthy account, and
+    // retrying would re-send an abandoned request onto a fresh one. At shutdown this is
+    // what otherwise cools EVERY in-flight account at once. Two accounts + a call counter
+    // pin both invariants: no cooldown AND no rotation (tried exactly once).
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'acctA', label: 'acctA' }))
+      pool.accounts.push(account({ id: 'acctB', label: 'acctB' }))
+    })
+    const controller = new AbortController()
+    controller.abort()
+    let calls = 0
+    respond = () => {
+      calls++
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    await expect(
+      lb('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: '{}',
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow()
+    expect(calls).toBe(1) // tried exactly once — no rotation onto the second account
+    const pool = await readPool()
+    expect(pool.accounts.find((a) => a.id === 'acctA')?.cooldownUntil).toBe(0)
+    expect(pool.accounts.find((a) => a.id === 'acctB')?.cooldownUntil).toBe(0)
+  })
+
   test('assignSession prunes stale session-affinity entries past sessionTtlMs', async () => {
     // The TTL-prune branch in assignSession (`delete pool.sessions[key]` when
     // `now - value.updatedAt > ttlMs`) is line-covered only because the for-loop
@@ -815,5 +855,39 @@ describe('toast on switch + status tool', () => {
       expect(hooks).toBeTypeOf('object')
       expect(hooks).not.toBeNull()
     }
+  })
+})
+
+describe('bestEffort bookkeeping', () => {
+  test('runs the op and resolves on success', async () => {
+    let ran = false
+    await bestEffort('x', async () => {
+      ran = true
+    })
+    expect(ran).toBe(true)
+  })
+
+  test('swallows a LockTimeoutError (a served response is never lost to a bookkeeping lock timeout)', async () => {
+    await expect(
+      bestEffort('x', async () => {
+        throw new LockTimeoutError('/tmp/pool.lock')
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  test('swallows a PoolWriteError', async () => {
+    await expect(
+      bestEffort('x', async () => {
+        throw new PoolWriteError('/tmp/pool.json', new Error('disk full'))
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  test('rethrows a non-infrastructure error (a genuine bug must not be hidden)', async () => {
+    await expect(
+      bestEffort('x', async () => {
+        throw new Error('genuine bug')
+      }),
+    ).rejects.toThrow('genuine bug')
   })
 })

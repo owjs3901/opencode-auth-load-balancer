@@ -263,6 +263,93 @@ describe('load-balanced fetch — edge paths', () => {
     expect(cooled?.cooldownUntil).toBeGreaterThan(now + 25_000)
   })
 
+  test('honors retry-after HTTP-date form (RFC 9110) when cooling down', async () => {
+    const now = Date.now()
+    // 90 minutes ahead — well outside both the 5 min ACCOUNT and 2 min AUTH fallback,
+    // so a pre-fix code path (which only parses delay-seconds) would land near now+5min
+    // and FAIL this assertion. Only the HTTP-date branch can satisfy the ±2s window.
+    const futureMs = now + 90 * 60_000
+    const httpDate = new Date(futureMs).toUTCString()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      pool.accounts.push(
+        account({
+          id: 'B',
+          access: 'tokB',
+          label: 'B',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      if (n === 1)
+        return new Response('limited', {
+          status: 429,
+          headers: { 'retry-after': httpDate },
+        })
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    // HTTP-date has second resolution; toUTCString truncates ms, so the cooled
+    // value lands within one second below futureMs. Allow a ±2 s window.
+    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(futureMs - 2_000)
+    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(futureMs + 2_000)
+  })
+
+  test('falls back to default cooldown when retry-after is unparseable', async () => {
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      pool.accounts.push(
+        account({
+          id: 'B',
+          access: 'tokB',
+          label: 'B',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      if (n === 1)
+        return new Response('limited', {
+          status: 429,
+          headers: { 'retry-after': 'garbage' },
+        })
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
+    const expected = now + 5 * 60_000
+    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+  })
+
   test("rejects when the only account's request throws", async () => {
     await mutatePool((pool) => {
       pool.accounts.push(account({ id: 'solo' }))

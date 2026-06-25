@@ -48,11 +48,18 @@ async function applyCooldown(
   fallbackMs: number,
   res: Response | null,
 ): Promise<void> {
-  let until = Date.now() + fallbackMs
+  const now = Date.now()
+  let until = now + fallbackMs
   const retryAfter = res?.headers.get('retry-after')
   if (retryAfter) {
     const secs = Number(retryAfter)
-    if (Number.isFinite(secs) && secs > 0) until = Date.now() + secs * 1000
+    if (Number.isFinite(secs) && secs > 0) {
+      until = now + secs * 1000
+    } else {
+      // RFC 9110 §10.2.3: Retry-After MAY be HTTP-date instead of delay-seconds.
+      const httpDate = Date.parse(retryAfter)
+      if (Number.isFinite(httpDate) && httpDate > now) until = httpDate
+    }
   }
   await mutatePool((pool) => {
     const account = findAccount(pool, accountId)

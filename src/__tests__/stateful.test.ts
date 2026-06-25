@@ -198,6 +198,49 @@ describe('refresh', () => {
     ])
     expect(called).toBe(1)
   })
+
+  test("singleflight updates EVERY concurrent caller's account, not just the one that started the refresh", async () => {
+    // Production fan-out: two parallel requests each call readPool() and
+    // therefore hold DIFFERENT PoolAccount objects with the same id. The
+    // singleflight short-circuit must mutate both — otherwise the reuser
+    // sends the OLD token and the upstream 401's a perfectly fresh account.
+    const a1 = account({
+      id: 'shared',
+      access: 'old',
+      refresh: 'r-old',
+      expires: Date.now() - 1,
+    })
+    const a2 = { ...a1 } // distinct object, same id, same stale token
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a1 })
+    })
+    let called = 0
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        called += 1
+        await new Promise((r) => setTimeout(r, 10))
+        return {
+          access: 'fresh',
+          refresh: 'r-new',
+          expires: Date.now() + 3_600_000,
+          accountId: 'acc_x',
+        }
+      },
+    })
+    const [t1, t2] = await Promise.all([
+      ensureAccessToken(adapter, a1, Date.now()),
+      ensureAccessToken(adapter, a2, Date.now()),
+    ])
+    expect(called).toBe(1)
+    expect(t1).toBe('fresh')
+    expect(t2).toBe('fresh')
+    expect(a1.access).toBe('fresh')
+    expect(a2.access).toBe('fresh') // would be 'old' against pre-fix code
+    expect(a1.refresh).toBe('r-new')
+    expect(a2.refresh).toBe('r-new')
+    expect(a1.accountId).toBe('acc_x')
+    expect(a2.accountId).toBe('acc_x')
+  })
 })
 
 describe('accounts', () => {

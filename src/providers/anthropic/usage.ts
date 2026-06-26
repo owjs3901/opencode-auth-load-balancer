@@ -78,6 +78,13 @@ interface UsageEndpointResponse {
 /** Decode resets_at which Anthropic has shipped as ISO string, epoch seconds, or epoch ms. */
 function parseResetAt(value: string | number): number {
   if (typeof value === 'number') {
+    // Symmetric with parseUsageHeaders() (above), the OpenAI endpointWindow
+    // helper, and applyCooldown (fetch.ts): `JSON.parse('1e500')` yields
+    // Infinity (and similarly for ±Infinity / NaN). Without this guard
+    // `Infinity > 1e12` is true and we'd commit Infinity straight to
+    // pool.usage.{hourly,weekly}.resetAt — silently breaking isWindowExpired,
+    // weeklyUrgency (drainable / Infinity = 0 urgency), and relTime rendering.
+    if (!Number.isFinite(value)) return 0
     return value > 1e12 ? value : value * 1000 // ms vs seconds heuristic
   }
   const asNum = Number(value)

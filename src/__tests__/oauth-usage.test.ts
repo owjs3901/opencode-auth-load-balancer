@@ -263,6 +263,36 @@ describe('anthropic usage', () => {
     expect(u?.weekly?.resetAt).toBe(0)
   })
 
+  test('fetchUsage falls back to zero resetAt when endpoint resets_at is non-finite (JSON Infinity)', async () => {
+    // Regression lock symmetric with the OpenAI endpoint reset_at overflow test
+    // below (~line 490), the Anthropic parseUsageHeaders overflow test (~line
+    // 200), and the applyCooldown 1e308 retry-after test (plugin.test.ts:363).
+    // `JSON.parse('1e500')` yields Infinity in V8/Bun; pre-fix the number
+    // branch of parseResetAt short-circuited the ms-vs-seconds heuristic
+    // (`Infinity > 1e12` is true) and committed Infinity to
+    // pool.usage.{hourly,weekly}.resetAt, silently breaking isWindowExpired
+    // (Infinity never <= now), weeklyUrgency (drainable / Infinity = 0 → the
+    // account sinks to 0 urgency forever), and relTime rendering until the
+    // next disk roundtrip (JSON.stringify(Infinity) === 'null' caps the
+    // on-disk blast radius, but the live in-memory snapshot stays corrupt).
+    //
+    // The body is a RAW JSON string, NOT JSON.stringify of a JS object:
+    // `JSON.stringify({ resets_at: 1e500 })` collapses Infinity to `null`
+    // (Infinity isn't valid JSON), which would land in the existing
+    // string/Date.parse branch and miss the regression entirely — same trick
+    // the OpenAI overflow test (~line 469) uses, for the same reason.
+    respond = () =>
+      new Response(
+        '{"five_hour":{"utilization":10,"resets_at":1e500},"seven_day":{"utilization":20,"resets_at":1e500}}',
+        { status: 200 },
+      )
+    const u = await aFetchUsage(acct('anthropic', null), 0)
+    expect(u?.hourly?.resetAt).toBe(0)
+    expect(u?.weekly?.resetAt).toBe(0)
+    expect(Number.isFinite(u?.hourly?.resetAt ?? Infinity)).toBe(true)
+    expect(Number.isFinite(u?.weekly?.resetAt ?? Infinity)).toBe(true)
+  })
+
   test('fetchUsage rejects endpoint windows with missing or non-finite utilization', async () => {
     // Missing utilization (undefined after JSON.parse): the pre-fix code
     // silently produced { utilization: 0 } and the scheduler then ranked the

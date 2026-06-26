@@ -433,6 +433,64 @@ describe('refresh', () => {
     )
   })
 
+  test('singleflight: a non-invalid_grant refresh error leaves disabledReason null on EVERY concurrent caller', async () => {
+    // Symmetric FALSE-branch lock for the TRUE-branch test above
+    // ("singleflight propagates invalid_grant disabledReason to EVERY
+    // concurrent caller's account, not just the one that started the
+    // refresh"). That test pins the TRUE arm of
+    // `if (isInvalidGrant(error))` in BOTH the creator's catch
+    // (refresh.ts:218) AND the reuser's catch (refresh.ts:186); this
+    // pins the FALSE arm on BOTH — when the in-flight refresh rejects
+    // with a non-invalid_grant error (refresh lock timeout, AbortError
+    // from OAUTH_HTTP_TIMEOUT_MS, transient 5xx, DNS blip), NEITHER
+    // caller may permanently disable the account. A regression that
+    // flips the condition to `if (!isInvalidGrant(error))` would brick
+    // a healthy account on every transient blip — exactly the
+    // "re-login required" failure mode the status-anchored
+    // isInvalidGrant check exists to prevent (already locked for the
+    // creator path by the "HTTP 400 in a 5xx body" / "invalid_grant in
+    // a 5xx body" tests; this is the missing reuser counterpart).
+    const a1 = account({
+      id: 'shared-5xx',
+      access: 'old',
+      refresh: 'r-5xx',
+      expires: Date.now() - 1,
+    })
+    const a2 = { ...a1 } // distinct object, same id, same stale state
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a1 })
+    })
+    let called = 0
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        called += 1
+        await new Promise((r) => setTimeout(r, 10))
+        // Status-anchored 503: isInvalidGrant returns false (not 400/401)
+        // even though the body coincidentally contains "invalid_grant" —
+        // mirrors the existing "5xx body coincidentally contains" tests
+        // for full symmetry with the creator's FALSE-branch coverage.
+        throw new Error(
+          'Token refresh failed: 503 — Bad Gateway. Past log line: invalid_grant cleared at 12:30.',
+        )
+      },
+    })
+    const results = await Promise.allSettled([
+      ensureAccessToken(adapter, a1, Date.now()),
+      ensureAccessToken(adapter, a2, Date.now()),
+    ])
+    expect(called).toBe(1) // singleflight collapsed both callers
+    expect(results[0]?.status).toBe('rejected')
+    expect(results[1]?.status).toBe('rejected')
+    // KEY ASSERTIONS — these break if `if (isInvalidGrant(error))` is
+    // flipped in EITHER the creator's catch (refresh.ts:218) or the
+    // reuser's catch (refresh.ts:186).
+    expect(a1.disabledReason).toBeNull() // creator path
+    expect(a2.disabledReason).toBeNull() // reuser path — previously unbound
+    expect(
+      findAccount(await readPool(), a1.id)?.disabledReason ?? null,
+    ).toBeNull()
+  })
+
   test('reload-before-refresh adopts a token another process already rotated (no second spend)', async () => {
     // Given: our local account is stale, but the pool on disk already holds a FRESH
     // token (a concurrent process won the refresh race and persisted it). We must

@@ -207,6 +207,25 @@ describe('createStrippedStream', () => {
     const res = new Response(null, { status: 204 })
     expect(createStrippedStream(res)).toBe(res)
   })
+  test('forwards downstream cancel to the upstream reader', async () => {
+    // Pre-fix: `new ReadableStream({ pull })` has no `cancel`, so cancelling
+    // the wrapped stream leaves the underlying reader's lock held — the fetch
+    // socket is never released. This sentinel fails on a no-op cancel and
+    // passes once the cancel is forwarded.
+    let cancelledWith: unknown = null
+    const upstream = new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode('{"name":"mcp_Read"}'))
+      },
+      cancel(reason) {
+        cancelledWith = reason
+      },
+    })
+    const res = new Response(upstream, { status: 200 })
+    const out = createStrippedStream(res)
+    await out.body!.cancel('aborted-by-test')
+    expect(cancelledWith).toBe('aborted-by-test')
+  })
 })
 
 describe('cch billing header', () => {

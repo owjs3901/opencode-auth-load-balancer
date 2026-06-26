@@ -1,3 +1,4 @@
+import { ignore } from '../../util'
 import type { FetchInput } from '../types'
 import { buildBillingHeaderValue } from './cch'
 import {
@@ -239,6 +240,13 @@ export function createStrippedStream(response: Response): Response {
       }
       const text = stripToolPrefix(decoder.decode(value, { stream: true }))
       controller.enqueue(encoder.encode(text))
+    },
+    cancel(reason) {
+      // Without this, a downstream cancel (opencode aborting the turn, the
+      // session ending, the user pressing Esc mid-stream) leaves the upstream
+      // reader's lock held — the fetch socket stays open until GC or upstream
+      // timeout. Forwarding it releases the connection promptly.
+      void reader.cancel(reason).catch(ignore)
     },
   })
 

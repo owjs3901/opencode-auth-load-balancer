@@ -490,6 +490,59 @@ describe('refresh', () => {
     )
     expect(a.disabledReason).toContain('invalid_grant')
   })
+
+  test('successful refresh against an account deleted from the pool mid-refresh: in-memory tokens are used, no crash, no pool resurrection', async () => {
+    // Race scenario: while OUR OAuth refresh is in flight, a concurrent
+    // process (or the TUI's deleteFromPool dialog in
+    // tui/auth-load-balancer-tui.view.tsx) removes the account from the pool.
+    // commitRefresh must (a) NOT crash on the missing `stored` (subsequent
+    // `stored.access = next.access` on undefined would throw), (b) return the
+    // freshly-rotated tokens so the in-flight request can still finish using
+    // them, (c) NOT mark the account disabled (it's gone — re-login state
+    // would be misleading), and (d) NOT resurrect the deleted account on disk.
+    //
+    // Symmetric with "invalid_grant for an account not in the pool still
+    // rethrows and marks the local object" — that pins resolveInvalidGrant's
+    // missing-account branch (refresh.ts:131-132); this pins commitRefresh's
+    // (refresh.ts:106-107). Without it, a regression (e.g. removing the
+    // `if (!stored) return next` guard so `stored.access = ...` blew up on
+    // undefined, or replacing it with `throw new Error('gone')`) would slip
+    // past the 100% coverage gate — the LINE is "covered" by the condition
+    // check alone, even when the fallback `return next` path never actually
+    // executes.
+    const a = account({
+      id: 'race-delete',
+      expires: Date.now() - 1,
+      tokenGen: 0,
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        // Mid-refresh: a concurrent process / the TUI delete dialog removes
+        // the account between when runRefresh.readPoolAccount() loaded it and
+        // when commitRefresh re-reads it under the pool write lock.
+        await mutatePool((pool) => {
+          pool.accounts = pool.accounts.filter((p) => p.id !== 'race-delete')
+        })
+        return {
+          access: 'fresh',
+          refresh: 'r-fresh',
+          expires: Date.now() + 3_600_000,
+        }
+      },
+    })
+    // (b) returns the freshly-rotated token so the in-flight request can finish
+    expect(await ensureAccessToken(adapter, a, Date.now())).toBe('fresh')
+    // (b) local account object updated with the new tokens (in-process use)
+    expect(a.access).toBe('fresh')
+    expect(a.refresh).toBe('r-fresh')
+    // (c) NOT disabled — the account is gone, not revoked
+    expect(a.disabledReason).toBeNull()
+    // (d) pool stays deleted — no resurrection of a user-removed account
+    expect((await readPool()).accounts).toHaveLength(0)
+  })
 })
 
 describe('accounts', () => {

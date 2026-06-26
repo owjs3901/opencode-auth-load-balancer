@@ -683,6 +683,52 @@ describe('accounts', () => {
     expect((await readPool()).accounts).toHaveLength(2)
   })
 
+  test('addAccount default label avoids colliding with a surviving label after a middle-of-list delete', async () => {
+    // Regression: the TUI sidebar's "Delete — remove from pool" option
+    // (tui/auth-load-balancer-tui.view.tsx:115 deleteFromPool) lets the user
+    // remove ANY account row, not just the last one. Pre-fix, addAccount
+    // derived its default label from `pool.accounts.filter(...).length + 1`,
+    // so after deleting a non-last row the next default-label add would
+    // collide with a surviving label (e.g. delete anthropic-2 from
+    // {-1, -2, -3} -> next add becomes anthropic-3, duplicating the existing
+    // anthropic-3). Two same-labeled rows then break auth_lb_rename
+    // (Array.find picks the first match silently) and the switch toast
+    // (src/notify.ts shows the same label for either row).
+    const a1 = await addAccount('anthropic', {
+      access: 'a1',
+      refresh: 'r1',
+      expires: 1,
+    })
+    await addAccount('anthropic', {
+      access: 'a2',
+      refresh: 'r2',
+      expires: 1,
+    })
+    const a3 = await addAccount('anthropic', {
+      access: 'a3',
+      refresh: 'r3',
+      expires: 1,
+    })
+    expect(a1.label).toBe('anthropic-1')
+    expect(a3.label).toBe('anthropic-3')
+    // Mimic the TUI's deleteFromPool removing anthropic-2 (the middle row).
+    await mutatePool((pool) => {
+      pool.accounts = pool.accounts.filter((a) => a.label !== 'anthropic-2')
+    })
+    // The next default-label add must NOT collide with the surviving
+    // anthropic-3; it must reuse the lowest unused suffix.
+    const fresh = await addAccount('anthropic', {
+      access: 'a4',
+      refresh: 'r4',
+      expires: 1,
+    })
+    expect(fresh.label).toBe('anthropic-2')
+    const labels = (await readPool()).accounts
+      .filter((a) => a.providerID === 'anthropic')
+      .map((a) => a.label)
+    expect(new Set(labels).size).toBe(labels.length) // no duplicate labels
+  })
+
   test('bootstrap imports an existing opencode oauth credential once', async () => {
     await bootstrapFromOpencodeAuth('anthropic', async () => ({
       type: 'oauth',

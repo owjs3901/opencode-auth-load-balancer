@@ -54,12 +54,16 @@ export async function addAccount(
       existing.disabledReason = null
       return existing
     }
-    const count = pool.accounts.filter(
-      (a) => a.providerID === providerID,
-    ).length
+    const used = new Set(
+      pool.accounts
+        .filter((a) => a.providerID === providerID)
+        .map((a) => a.label),
+    )
+    let n = 1
+    while (used.has(`${providerID}-${n}`)) n++
     const account = makeAccount(
       providerID,
-      label ?? `${providerID}-${count + 1}`,
+      label ?? `${providerID}-${n}`,
       tokens,
     )
     pool.accounts.push(account)

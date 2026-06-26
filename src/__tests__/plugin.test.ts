@@ -556,6 +556,58 @@ describe('load-balanced fetch — edge paths', () => {
     expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
   })
 
+  test('on API 401 (cls=auth) cools the account for AUTH_COOLDOWN_MS and rotates to the next account', async () => {
+    // Regression lock for the 'auth' branch of `if (cls === 'account' || cls === 'auth')`
+    // in fetch.ts. Line+function coverage hit the inner ternary `cls === 'auth' ?
+    // AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS` only via the 'account' side in the existing
+    // 429 retry-after tests; classifyError(401)=='auth' is unit-tested in isolation
+    // (stateful.test.ts) but never wired through the load-balanced fetch loop. A
+    // regression that (a) collapsed the ternary to a single constant, (b) flipped the
+    // condition so AUTH and ACCOUNT cooldowns swapped, or (c) dropped the
+    // `|| cls === 'auth'` clause entirely (turning 401 into a returned response with
+    // transformResponse wrapping an auth-error stream and breaking rotation) would
+    // still pass every existing test.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      pool.accounts.push(
+        account({
+          id: 'B',
+          access: 'tokB',
+          label: 'B',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      if (n === 1) return new Response('unauthorized', { status: 401 })
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    // Rotation happened: the second account (B) served the request.
+    expect(res.status).toBe(200)
+    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    // AUTH_COOLDOWN_MS = 2 * 60 * 1000 (2 min). Allow ±2 s of clock drift.
+    const expectedAuth = now + 2 * 60_000
+    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expectedAuth - 2_000)
+    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expectedAuth + 2_000)
+    // Locks the AUTH-vs-ACCOUNT distinction: ACCOUNT_COOLDOWN_MS is 5 min, so a
+    // regression that swapped the two constants would cool A out to ~5 min and
+    // fail this strict upper bound.
+    expect(cooled?.cooldownUntil).toBeLessThan(now + 4 * 60_000)
+  })
+
   test('cheapSwitchMaxBytes gate counts UTF-8 bytes (not UTF-16 code units) for non-ASCII bodies', async () => {
     // Regression lock: before the fix, the cost gate used `bodyStr.length` (UTF-16
     // code units), so a 10-character Korean body (which is 30 UTF-8 bytes on the

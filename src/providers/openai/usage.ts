@@ -17,9 +17,17 @@ function windowFromPercent(
   const percent = Number(percentRaw)
   if (!Number.isFinite(percent)) return null
   const resetSec = Number(resetSecRaw)
+  // Mirror applyCooldown's overflow guard (fetch.ts): `1e308` is finite but
+  // `1e308 * 1000` overflows to +Infinity, which would commit Infinity to
+  // pool.usage.{hourly,weekly}.resetAt — silently breaking isWindowExpired,
+  // weeklyUrgency, and relTime rendering. Lock the product to a finite ms.
+  const resetMs = resetSec * 1000
   return {
     utilization: clamp01(percent / 100),
-    resetAt: Number.isFinite(resetSec) && resetSec > 0 ? resetSec * 1000 : 0,
+    resetAt:
+      Number.isFinite(resetSec) && resetSec > 0 && Number.isFinite(resetMs)
+        ? resetMs
+        : 0,
   }
 }
 
@@ -80,9 +88,14 @@ function endpointWindow(
   )
     return null
   const resetSec = typeof w.reset_at === 'number' ? w.reset_at : 0
+  // Mirror applyCooldown's overflow guard (fetch.ts): JSON `1e308` is finite
+  // but `1e308 * 1000` overflows to +Infinity, which would commit Infinity to
+  // pool.usage.{hourly,weekly}.resetAt — silently breaking isWindowExpired,
+  // weeklyUrgency, and relTime rendering. Lock the product to a finite ms.
+  const resetMs = resetSec * 1000
   return {
     utilization: clamp01(w.used_percent / 100),
-    resetAt: resetSec > 0 ? resetSec * 1000 : 0,
+    resetAt: resetSec > 0 && Number.isFinite(resetMs) ? resetMs : 0,
   }
 }
 

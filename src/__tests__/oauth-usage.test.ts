@@ -197,6 +197,30 @@ describe('anthropic usage', () => {
     ).toBe(0)
   })
 
+  test('parseUsageHeaders: falls back to zero resetAt when seconds-times-1000 overflows', () => {
+    // Regression lock symmetric with applyCooldown's `1e308` retry-after test
+    // (plugin.test.ts:363). `Number('1e308') = 1e308` is finite, but
+    // `1e308 * 1000` exceeds Number.MAX_VALUE (~1.798e308) and collapses to
+    // +Infinity. Pre-fix the inner `window()` helper committed `Infinity` to
+    // pool.usage.{hourly,weekly}.resetAt, which then silently broke
+    // isWindowExpired (never expires), weeklyUrgency (Infinity → 0 score,
+    // permanently sidelining the account), and relTime rendering
+    // ('InfinitydNaNh' in the TUI / CLI / auth_lb_status tool).
+    const u = aParse(
+      new Headers({
+        'anthropic-ratelimit-unified-5h-utilization': '0.10',
+        'anthropic-ratelimit-unified-5h-reset': '1e308',
+        'anthropic-ratelimit-unified-7d-utilization': '0.50',
+        'anthropic-ratelimit-unified-7d-reset': '1e308',
+      }),
+      0,
+    )
+    expect(u?.hourly?.resetAt).toBe(0)
+    expect(u?.weekly?.resetAt).toBe(0)
+    expect(Number.isFinite(u?.hourly?.resetAt ?? Infinity)).toBe(true)
+    expect(Number.isFinite(u?.weekly?.resetAt ?? Infinity)).toBe(true)
+  })
+
   test('fetchUsage maps percent and decodes ISO + epoch-seconds resets', async () => {
     respond = () =>
       new Response(
@@ -356,6 +380,26 @@ describe('openai usage', () => {
     ).toBe(0)
   })
 
+  test('parseUsageHeaders: falls back to zero resetAt when seconds-times-1000 overflows', () => {
+    // Regression lock symmetric with applyCooldown's `1e308` retry-after test
+    // (plugin.test.ts:363) and the Anthropic header overflow test above:
+    // `windowFromPercent` must reject a reset value whose seconds form is finite
+    // but whose *1000 overflows to +Infinity, so the pool never stores Infinity.
+    const u = oParse(
+      new Headers({
+        'x-codex-primary-used-percent': '12.5',
+        'x-codex-primary-reset-at': '1e308',
+        'x-codex-secondary-used-percent': '40',
+        'x-codex-secondary-reset-at': '1e308',
+      }),
+      0,
+    )
+    expect(u?.hourly?.resetAt).toBe(0)
+    expect(u?.weekly?.resetAt).toBe(0)
+    expect(Number.isFinite(u?.hourly?.resetAt ?? Infinity)).toBe(true)
+    expect(Number.isFinite(u?.weekly?.resetAt ?? Infinity)).toBe(true)
+  })
+
   test('fetchUsage maps primary/secondary and sends the account header', async () => {
     let seen: RequestInit | undefined
     respond = (_u, init) => {
@@ -441,5 +485,28 @@ describe('openai usage', () => {
     expect(await oFetchUsage(acct('openai', 'a'), 0)).toBeNull()
     respond = () => new Response('notjson', { status: 200 })
     expect(await oFetchUsage(acct('openai', 'a'), 0)).toBeNull()
+  })
+
+  test('fetchUsage falls back to zero resetAt when endpoint reset_at overflows on *1000', async () => {
+    // Regression lock symmetric with applyCooldown's `1e308` retry-after test
+    // (plugin.test.ts:363) and the two header-helper tests above. The endpoint
+    // helper applied `resetSec * 1000` without re-checking finiteness, so a
+    // JSON `reset_at: 1e308` (finite as a number, but its *1000 overflows)
+    // landed on the pool as `Infinity` — same scheduler corruption.
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          rate_limit: {
+            primary_window: { used_percent: 12, reset_at: 1e308 },
+            secondary_window: { used_percent: 40, reset_at: 1e308 },
+          },
+        }),
+        { status: 200 },
+      )
+    const u = await oFetchUsage(acct('openai', 'a'), 0)
+    expect(u?.hourly?.resetAt).toBe(0)
+    expect(u?.weekly?.resetAt).toBe(0)
+    expect(Number.isFinite(u?.hourly?.resetAt ?? Infinity)).toBe(true)
+    expect(Number.isFinite(u?.weekly?.resetAt ?? Infinity)).toBe(true)
   })
 })

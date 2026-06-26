@@ -40,9 +40,17 @@ export function parseUsageHeaders(
     const util = Number(utilRaw)
     if (!Number.isFinite(util)) return null
     const resetSec = Number(resetRaw)
+    // Mirror applyCooldown's overflow guard (fetch.ts): `1e308` is finite but
+    // `1e308 * 1000` overflows to +Infinity, which would commit Infinity to
+    // pool.usage.{hourly,weekly}.resetAt — silently breaking isWindowExpired,
+    // weeklyUrgency, and relTime rendering. Lock the product to a finite ms.
+    const resetMs = resetSec * 1000
     return {
       utilization: clamp01(util),
-      resetAt: Number.isFinite(resetSec) && resetSec > 0 ? resetSec * 1000 : 0,
+      resetAt:
+        Number.isFinite(resetSec) && resetSec > 0 && Number.isFinite(resetMs)
+          ? resetMs
+          : 0,
     }
   }
 

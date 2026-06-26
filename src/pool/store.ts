@@ -102,9 +102,26 @@ export async function writeJsonAtomic(
   payload: string,
   ops: FsOps = realFsOps,
 ): Promise<void> {
-  await ops.mkdir(dirname(path), { recursive: true })
+  // mkdir and writeFile failures must also surface as PoolWriteError, otherwise
+  // `bestEffort` (which only swallows LockTimeoutError | PoolWriteError) lets a
+  // raw fs error escape and kill an already-served request. EACCES/ENOSPC/EROFS,
+  // and Windows EBUSY/EPERM when a virus scanner holds the file or dir, all hit
+  // these two paths. The rename-failure branch below already wraps the same way.
+  try {
+    await ops.mkdir(dirname(path), { recursive: true })
+  } catch (error) {
+    throw new PoolWriteError(path, error)
+  }
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
-  await ops.writeFile(tmp, payload, { mode: 0o600 })
+  try {
+    await ops.writeFile(tmp, payload, { mode: 0o600 })
+  } catch (error) {
+    // Mirror the rename-failure cleanup: most fs implementations do not leave a
+    // partial tmp on a failed writeFile, but unlink is harmless when absent and
+    // locks the invariant against a regression that drops the cleanup.
+    await ops.unlink(tmp).catch(ignore)
+    throw new PoolWriteError(path, error)
+  }
   let lastError: unknown = null
   for (let attempt = 0; attempt < RENAME_RETRIES; attempt++) {
     try {

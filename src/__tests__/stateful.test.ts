@@ -123,6 +123,67 @@ describe('pool store', () => {
     expect(renames).toBe(5) // RENAME_RETRIES
     expect(unlinked).toBe(1) // tmp cleanup attempted
   })
+
+  test('writeJsonAtomic wraps a mkdir failure in PoolWriteError', async () => {
+    // Symmetric to the rename-failure test above: the same Windows EPERM/EACCES
+    // family (virus scanner / locked dir / EROFS) can hit mkdir too. `bestEffort`
+    // only swallows LockTimeoutError | PoolWriteError, so a raw fs error escaping
+    // here would kill an already-served request — exactly the failure mode
+    // bestEffort exists to prevent. Lock the wrapping so a regression that drops
+    // the try/catch is caught immediately.
+    let writes = 0
+    let renames = 0
+    let unlinked = 0
+    const ops: FsOps = {
+      mkdir: async () => {
+        throw new Error('EACCES')
+      },
+      writeFile: async () => {
+        writes += 1
+      },
+      rename: async () => {
+        renames += 1
+      },
+      unlink: async () => {
+        unlinked += 1
+      },
+    }
+    await expect(writeJsonAtomic('/data/pool.json', '{}', ops)).rejects.toThrow(
+      PoolWriteError,
+    )
+    // mkdir failed before any write/rename was attempted, so no tmp file exists
+    // and no cleanup is required on this branch.
+    expect(writes).toBe(0)
+    expect(renames).toBe(0)
+    expect(unlinked).toBe(0)
+  })
+
+  test('writeJsonAtomic wraps a writeFile failure in PoolWriteError and attempts tmp cleanup', async () => {
+    // Symmetric to the rename-failure test: ENOSPC / EROFS / Windows EPERM on
+    // writeFile must also surface as PoolWriteError so bestEffort swallows it.
+    // The cleanup-count assertion mirrors the rename branch and locks the
+    // invariant that a failed writeFile still attempts to remove any partial tmp.
+    let renames = 0
+    let unlinked = 0
+    const ops: FsOps = {
+      mkdir: async () => undefined,
+      writeFile: async () => {
+        throw new Error('ENOSPC')
+      },
+      rename: async () => {
+        renames += 1
+      },
+      unlink: async () => {
+        unlinked += 1
+      },
+    }
+    await expect(writeJsonAtomic('/data/pool.json', '{}', ops)).rejects.toThrow(
+      PoolWriteError,
+    )
+    // writeFile failed, so rename was never attempted; tmp cleanup was attempted.
+    expect(renames).toBe(0)
+    expect(unlinked).toBe(1)
+  })
 })
 
 describe('refresh', () => {

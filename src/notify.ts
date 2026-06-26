@@ -1,3 +1,4 @@
+import { displayUtil } from './scheduler/score'
 import { providerName } from './status'
 import type { PoolAccount } from './types'
 import { ignore } from './util'
@@ -35,7 +36,8 @@ export async function notifyOnSwitch(
 ): Promise<void> {
   if (lastToasted.get(providerID) === account.id) return
   lastToasted.set(providerID, account.id)
-  const message = `▶ ${account.label}  ·  weekly ${pct(account.usage.weekly?.utilization)} · 5h ${pct(account.usage.hourly?.utilization)}`
+  const now = Date.now()
+  const message = `▶ ${account.label}  ·  weekly ${pct(displayUtil(account.usage.weekly, now))} · 5h ${pct(displayUtil(account.usage.hourly, now))}`
   await client.tui
     .showToast({
       body: {

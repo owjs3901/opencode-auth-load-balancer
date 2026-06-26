@@ -513,4 +513,22 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
     expect(sel?.sticky).toBe(true)
     expect(sel?.degraded).toBe(false)
   })
+
+  test('does NOT migrate when pinned weekly is between migrateAt (0.95) and weeklyDrainTarget (0.98)', () => {
+    // Boundary lock: the WEEKLY window migrates at weeklyDrainTarget (~0.98)
+    // because weekly quota is perishable — drain nearly full before reset. The
+    // shorter 5h window migrates EARLIER at migrateAt (~0.95) for hard-limit
+    // safety. A pinned account whose weekly sits in the GAP (above 0.95, below
+    // 0.98) must STAY pinned: it still has perishable quota worth draining and
+    // is nowhere near the hard 100% wall. A regression that used migrateAt for
+    // BOTH windows would migrate here, spreading weekly quota across accounts
+    // and wasting it. The existing weekly tests pin only 0.99 (above 0.98 ->
+    // migrate) and 0.9 (below 0.95 -> sticky); this fills the gap between them.
+    const a = account('a', { weekly: win(0.2, 5 * DAY) })
+    const b = account('b', { weekly: win(0.96, 5 * DAY) }) // pinned, in the gap
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1')
+    expect(sel?.account.id).toBe('b')
+    expect(sel?.sticky).toBe(true)
+    expect(sel?.degraded).toBe(false)
+  })
 })

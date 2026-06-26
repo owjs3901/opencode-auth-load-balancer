@@ -135,6 +135,16 @@ describe('rewriteRequestBody', () => {
     })
     const out = JSON.parse(rewriteRequestBody(body))
     expect(out.instructions).toBe('You are a helpful assistant.')
+    // Lock: stray system messages whose content yields NO extractable text must
+    // STILL be removed from `input` — the function's docstring promises to "Lift
+    // any system messages out of the input array". Pre-fix the `if
+    // (systemTexts.length > 0)` gate guarded BOTH the instructions concat AND the
+    // `obj.input = remaining` assignment, so a request with ONLY empty-text
+    // systems left them in `input` alongside the user message, leaking stray
+    // system entries to the Codex backend.
+    expect(
+      (out.input as { role?: string }[]).some((i) => i.role === 'system'),
+    ).toBe(false)
   })
 
   test('returns the original body on invalid JSON', () => {

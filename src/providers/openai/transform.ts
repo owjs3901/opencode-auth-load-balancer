@@ -90,8 +90,8 @@ function applyInstructions(obj: Record<string, unknown>): void {
     }
     if (systemTexts.length > 0) {
       instructions = [instructions, ...systemTexts].filter(Boolean).join('\n\n')
-      obj.input = remaining
     }
+    obj.input = remaining
   }
 
   obj.instructions = instructions.trim() || 'You are a helpful assistant.'

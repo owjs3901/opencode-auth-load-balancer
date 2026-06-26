@@ -1,5 +1,5 @@
 import { mkdtempSync } from 'node:fs'
-import { mkdir, stat, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -137,5 +137,28 @@ describe('file lock', () => {
         heartbeatMs: 5_000,
       }),
     ).rejects.toBeInstanceOf(LockTimeoutError)
+  })
+
+  test('release does NOT rm the lockDir when the owner meta is missing (race vs a concurrent reclaim mid-tryClaim)', async () => {
+    // Regression lock for src/pool/lock.ts makeHandle.release. Pre-fix the
+    // guard `if (current && current.meta.ownerId !== ownerId) return` treated
+    // `current === null` (readMeta failed: ENOENT / mid-write) as "we still
+    // own it, safe to rm" — and fired during the tiny window between a
+    // stale-reclaim's `rm + mkdir` and its `writeFile(meta)`, wiping the NEW
+    // owner's freshly-mkdir'd lockDir. The new owner's pending `writeFile`
+    // then threw ENOENT, which propagates uncaught through acquireLock and
+    // fails the caller's pool mutation / OAuth refresh — exactly the
+    // cross-process critical section the `tokenGen` race tests in
+    // stateful.test.ts rely on. Post-fix `if (!current || …)` keeps the
+    // lockDir intact when ownership cannot be confirmed.
+    const dir = lockPath('release-null-meta')
+    const handle = await acquireLock(dir, FAST)
+    // Simulate the race by removing our meta file (the exact disk state a
+    // concurrent reclaim mid-tryClaim produces between its rm+mkdir and its
+    // writeFile(meta)). We do NOT pre-fill any new meta — the point is
+    // precisely that readMeta returns null here.
+    await rm(join(dir, 'owner.json'))
+    await handle.release()
+    expect(await dirExists(dir)).toBe(true)
   })
 })

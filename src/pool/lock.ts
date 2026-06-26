@@ -111,9 +111,16 @@ function makeHandle(
       released = true
       stopHeartbeat()
       const current = await readMeta(lockDir)
-      // If we were reclaimed as stale and another process now owns the lock,
-      // leave its directory intact rather than deleting a live holder's lock.
-      if (current && current.meta.ownerId !== ownerId) return
+      // Only rm when we can POSITIVELY confirm we are still the owner. When
+      // ownership cannot be confirmed — either because another process now
+      // owns the lock, OR because `readMeta` returned null (meta missing /
+      // unreadable, the exact state during a concurrent reclaim's
+      // `rm + mkdir` → `writeFile(meta)` window in tryClaim) — leave the dir
+      // intact. Wiping a freshly-mkdir'd lockDir there would make the new
+      // owner's pending writeFile throw ENOENT and bubble up uncaught,
+      // breaking the cross-process critical section. The next acquirer's
+      // stale check reclaims a stranded dir naturally.
+      if (!current || current.meta.ownerId !== ownerId) return
       await rm(lockDir, { recursive: true, force: true }).catch(ignore)
     },
   }

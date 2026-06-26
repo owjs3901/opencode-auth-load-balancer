@@ -1,6 +1,6 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
 import { ignore } from '../../util'
-import { USAGE_URL, USAGE_USER_AGENT } from './constants'
+import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 import { extractAccountId } from './jwt'
 
 function clamp01(n: number): number {
@@ -119,7 +119,10 @@ export async function fetchUsage(
 
   let response: Response
   try {
-    response = await fetch(USAGE_URL, { headers })
+    response = await fetch(USAGE_URL, {
+      headers,
+      signal: AbortSignal.timeout(USAGE_HTTP_TIMEOUT_MS),
+    })
   } catch {
     return null
   }

@@ -15,6 +15,15 @@ export const REDIRECT_URI = 'http://localhost:1455/auth/callback'
  */
 export const OAUTH_HTTP_TIMEOUT_MS = 30_000
 
+/**
+ * Bound every usage-endpoint poll so a hung usage server never accumulates
+ * fire-and-forget sockets. `fetchUsage` is called fire-and-forget from
+ * `refreshUsageInBackground`; the `lastPoll` throttle prevents same-account
+ * re-poll within SEED_TTL_MS but does NOT cancel an in-flight hung fetch.
+ * Symmetric with `OAUTH_HTTP_TIMEOUT_MS` (30 s).
+ */
+export const USAGE_HTTP_TIMEOUT_MS = 30_000
+
 export const OAUTH_SCOPES = ['openid', 'profile', 'email', 'offline_access']
 
 /** ChatGPT-OAuth Codex inference endpoint. */

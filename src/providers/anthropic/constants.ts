@@ -19,6 +19,15 @@ export const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
  */
 export const OAUTH_HTTP_TIMEOUT_MS = 30_000
 
+/**
+ * Bound every usage-endpoint poll so a hung usage server never accumulates
+ * fire-and-forget sockets. `fetchUsage` is called fire-and-forget from
+ * `refreshUsageInBackground`; the `lastPoll` throttle prevents same-account
+ * re-poll within SEED_TTL_MS but does NOT cancel an in-flight hung fetch.
+ * Symmetric with `OAUTH_HTTP_TIMEOUT_MS` (30 s).
+ */
+export const USAGE_HTTP_TIMEOUT_MS = 30_000
+
 /** Dedicated usage endpoint — returns 5h + 7d utilization without consuming quota. */
 export const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 

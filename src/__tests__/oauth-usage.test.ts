@@ -334,6 +334,32 @@ describe('anthropic usage', () => {
     respond = () => new Response('notjson', { status: 200 })
     expect(await aFetchUsage(acct('anthropic', null), 0)).toBeNull()
   })
+
+  test('fetchUsage bounds the usage poll with an AbortSignal (no socket leak on a hung server)', async () => {
+    // Regression lock symmetric with the OpenAI fetchUsage signal test below.
+    // `fetchUsage` is invoked fire-and-forget by refreshUsageInBackground from
+    // (a) auth.loader startup seeding and (b) every request via fetch.ts. The
+    // `lastPoll` per-account throttle prevents same-account re-poll within
+    // SEED_TTL_MS but does NOT cancel an in-flight hung fetch. Without an
+    // AbortSignal, a TCP-black-holed /api/oauth/usage holds a socket open
+    // until the OS keepalive eventually closes it (Linux default ≈ 2 h), and
+    // on EVERY new lastPoll window the call is re-attempted → hung fetches
+    // accumulate per account over a sustained upstream stall. Symmetric with
+    // the OAUTH_HTTP_TIMEOUT_MS bound already on exchange/refresh.
+    let seen: RequestInit | undefined
+    respond = (_u, init) => {
+      seen = init
+      return new Response(
+        JSON.stringify({
+          five_hour: { utilization: 10, resets_at: 1900000000 },
+          seven_day: { utilization: 20, resets_at: 1900000000 },
+        }),
+        { status: 200 },
+      )
+    }
+    await aFetchUsage(acct('anthropic', null), 0)
+    expect(seen?.signal).toBeInstanceOf(AbortSignal)
+  })
 })
 
 describe('openai oauth', () => {
@@ -538,5 +564,33 @@ describe('openai usage', () => {
     expect(u?.weekly?.resetAt).toBe(0)
     expect(Number.isFinite(u?.hourly?.resetAt ?? Infinity)).toBe(true)
     expect(Number.isFinite(u?.weekly?.resetAt ?? Infinity)).toBe(true)
+  })
+
+  test('fetchUsage bounds the usage poll with an AbortSignal (no socket leak on a hung server)', async () => {
+    // Regression lock symmetric with the Anthropic fetchUsage signal test above.
+    // `fetchUsage` is invoked fire-and-forget by refreshUsageInBackground from
+    // (a) auth.loader startup seeding and (b) every request via fetch.ts. The
+    // `lastPoll` per-account throttle prevents same-account re-poll within
+    // SEED_TTL_MS but does NOT cancel an in-flight hung fetch. Without an
+    // AbortSignal, a TCP-black-holed /wham/usage holds a socket open until the
+    // OS keepalive eventually closes it (Linux default ≈ 2 h), and on EVERY
+    // new lastPoll window the call is re-attempted → hung fetches accumulate
+    // per account over a sustained upstream stall. Symmetric with the
+    // OAUTH_HTTP_TIMEOUT_MS bound already on exchange/refresh.
+    let seen: RequestInit | undefined
+    respond = (_u, init) => {
+      seen = init
+      return new Response(
+        JSON.stringify({
+          rate_limit: {
+            primary_window: { used_percent: 12, reset_at: 1900000000 },
+            secondary_window: { used_percent: 40, reset_at: 1900000000 },
+          },
+        }),
+        { status: 200 },
+      )
+    }
+    await oFetchUsage(acct('openai', 'acc_9'), 0)
+    expect(seen?.signal).toBeInstanceOf(AbortSignal)
   })
 })

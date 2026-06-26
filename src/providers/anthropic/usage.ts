@@ -5,7 +5,7 @@ import type {
   UsageWindow,
 } from '../../types'
 import { ignore } from '../../util'
-import { USAGE_URL, USAGE_USER_AGENT } from './constants'
+import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 
 function clamp01(n: number): number {
   if (!Number.isFinite(n)) return 0
@@ -126,6 +126,7 @@ export async function fetchUsage(
         'user-agent': USAGE_USER_AGENT,
         'content-type': 'application/json',
       },
+      signal: AbortSignal.timeout(USAGE_HTTP_TIMEOUT_MS),
     })
   } catch {
     return null

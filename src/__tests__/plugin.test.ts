@@ -608,6 +608,63 @@ describe('load-balanced fetch — edge paths', () => {
     expect(cooled?.cooldownUntil).toBeLessThan(now + 4 * 60_000)
   })
 
+  test('a 5xx service-class response is returned untouched (no rotation, no cooldown)', async () => {
+    // Regression lock: cls === 'service' is the ONLY classifyError outcome never
+    // exercised end-to-end through createLoadBalancedFetch. The other three branches
+    // ('account', 'auth', 'ok') each have a dedicated test in this file; 'service'
+    // is unit-tested only via classifyError(503) in isolation (stateful.test.ts).
+    // A regression that:
+    //   - adds `|| cls === 'service'` to the rotation gate (rotating on transient
+    //     5xx, draining the pool during a provider outage),
+    //   - hoists `applyCooldown` out of the gate (cooling on every transient hiccup),
+    //   - reclassifies 5xx as 'account' / 'auth',
+    //   - or removes the 'service' arm of classifyError so 5xx falls through to
+    //     a future 'ok' branch that might gain body-inspection / usage-only logic
+    // would pass every existing test today while silently breaking the contract
+    // that transient upstream issues are propagated to the caller (whose SDK has
+    // its own retry policy) without sidelining accounts. The session pin is
+    // asserted too: a 5xx pinned to the served account means the next turn retries
+    // on the SAME account, preserving prompt cache.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      pool.accounts.push(
+        account({
+          id: 'B',
+          access: 'tokB',
+          label: 'B',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    let calls = 0
+    respond = () => {
+      calls += 1
+      return new Response('upstream down', { status: 503 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+      headers: { [SESSION_HEADER]: 'svc' },
+    })
+    // The 5xx is returned untouched to the caller (status preserved, no rotation).
+    expect(res.status).toBe(503)
+    // Only ONE upstream call — locks "no rotation onto B".
+    expect(calls).toBe(1)
+    // No cooldown stamp on either account — locks "no applyCooldown on service".
+    const pool = await readPool()
+    expect(pool.accounts.find((a) => a.id === 'A')?.cooldownUntil).toBe(0)
+    expect(pool.accounts.find((a) => a.id === 'B')?.cooldownUntil).toBe(0)
+    // Session IS pinned (the next turn retries on A, preserving prompt cache).
+    expect(pool.sessions['s:svc']?.accountId).toBe('A')
+  })
+
   test('cheapSwitchMaxBytes gate counts UTF-8 bytes (not UTF-16 code units) for non-ASCII bodies', async () => {
     // Regression lock: before the fix, the cost gate used `bodyStr.length` (UTF-16
     // code units), so a 10-character Korean body (which is 30 UTF-8 bytes on the

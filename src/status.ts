@@ -153,14 +153,3 @@ export function renderStatus(
   }
   return lines.join('\n').trimEnd()
 }
-
-/** One-line "provider: account" summary of what's in use (for toasts / logs). */
-export function summarizeCurrent(providers: ProviderStatus[]): string {
-  if (providers.length === 0) return 'no accounts'
-  return providers
-    .map((p) => {
-      const current = p.accounts.find((a) => a.current)
-      return `${providerName(p.providerID)}: ${current ? current.label : '—'}`
-    })
-    .join(' | ')
-}

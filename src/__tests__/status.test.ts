@@ -8,12 +8,7 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-status-'))
 
 import { mutatePool } from '../pool/store'
-import {
-  buildStatus,
-  readStatus,
-  renderStatus,
-  summarizeCurrent,
-} from '../status'
+import { buildStatus, readStatus, renderStatus } from '../status'
 import type { PoolAccount, PoolFile, UsageWindow } from '../types'
 
 const NOW = 1_000_000_000_000
@@ -142,15 +137,6 @@ describe('renderStatus', () => {
 
   test('reports when no accounts are registered', () => {
     expect(renderStatus([], NOW)).toContain('no accounts registered')
-  })
-})
-
-describe('summarizeCurrent', () => {
-  test('summarizes the in-use account per provider (em dash when none)', () => {
-    expect(summarizeCurrent(sampleProviders())).toBe('Claude: a1 | other: —')
-  })
-  test('reports no accounts for an empty model', () => {
-    expect(summarizeCurrent([])).toBe('no accounts')
   })
 })
 

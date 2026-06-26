@@ -206,7 +206,10 @@ describe('anthropic end-to-end', () => {
     ])
     // Pin this session to B (the higher-utilization account) up front.
     await mutatePool((pool) => {
-      pool.sessions['s:fixed'] = { accountId: 'B', updatedAt: Date.now() }
+      pool.sessions['anthropic:s:fixed'] = {
+        accountId: 'B',
+        updatedAt: Date.now(),
+      }
     })
 
     const calls = mockFetch(

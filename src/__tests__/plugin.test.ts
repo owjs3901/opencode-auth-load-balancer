@@ -19,6 +19,7 @@ import { LockTimeoutError } from '../pool/lock'
 import { mutatePool, PoolWriteError, readPool } from '../pool/store'
 import { primeInUse } from '../prime'
 import { anthropicAdapter } from '../providers/anthropic/adapter'
+import { openaiAdapter } from '../providers/openai/adapter'
 import { loadConfig } from '../scheduler/config'
 import { SESSION_HEADER } from '../session'
 import type { PoolAccount } from '../types'
@@ -662,7 +663,7 @@ describe('load-balanced fetch — edge paths', () => {
     expect(pool.accounts.find((a) => a.id === 'A')?.cooldownUntil).toBe(0)
     expect(pool.accounts.find((a) => a.id === 'B')?.cooldownUntil).toBe(0)
     // Session IS pinned (the next turn retries on A, preserving prompt cache).
-    expect(pool.sessions['s:svc']?.accountId).toBe('A')
+    expect(pool.sessions['anthropic:s:svc']?.accountId).toBe('A')
   })
 
   test('cheapSwitchMaxBytes gate counts UTF-8 bytes (not UTF-16 code units) for non-ASCII bodies', async () => {
@@ -701,7 +702,7 @@ describe('load-balanced fetch — edge paths', () => {
           },
         }),
       )
-      pool.sessions['s:cjk'] = { accountId: 'B', updatedAt: now }
+      pool.sessions['anthropic:s:cjk'] = { accountId: 'B', updatedAt: now }
     })
     // 10 Hangul code points => 10 UTF-16 units, 30 UTF-8 bytes. Pin the invariant
     // here so a future tweak to the literal can't silently invalidate the test.
@@ -812,7 +813,104 @@ describe('load-balanced fetch — edge paths', () => {
     const pool = await readPool()
     expect(pool.sessions['s:stale']).toBeUndefined()
     expect(pool.sessions['s:fresh']).toBeDefined()
-    expect(pool.sessions['s:new']).toBeDefined()
+    expect(pool.sessions['anthropic:s:new']).toBeDefined()
+  })
+
+  test('cross-provider session keys are namespaced — anthropic and openai pins coexist without overwrite', async () => {
+    // Regression lock for cross-provider session-affinity collision.
+    // opencode supports model switching mid-conversation: a single session can
+    // alternate between Claude (anthropic) and Codex (openai). Pre-fix,
+    // deriveSessionKey returned the SAME `s:<sessionID>` for BOTH providers, so
+    // `pool.sessions['s:<sessionID>']` was overwritten by whichever provider ran
+    // most recently. findPinned's providerID check (src/scheduler/select.ts)
+    // prevented serving the WRONG account on lookup (it returns null when the
+    // pinned account's providerID doesn't match the asking provider), but
+    // could NOT undo the overwrite — so the original provider's prompt-cache
+    // affinity was silently dropped on its next turn, re-billing full context
+    // onto a fresh account. Post-fix the session key is namespaced by
+    // `${adapter.id}:${baseKey}`, so the two providers occupy disjoint key
+    // spaces and never collide. A regression that drops the namespace prefix
+    // (or namespaces with anything non-injective per providerID) would
+    // resurrect the bug: this test fails on the coexistence assertion below.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA', label: 'A' }))
+      pool.accounts.push(
+        account({
+          id: 'O',
+          providerID: 'openai',
+          access: 'tokO',
+          label: 'O',
+          accountId: 'acc_O',
+          usage: {
+            hourly: null,
+            weekly: {
+              utilization: 0.1,
+              resetAt: now + 30 * 60 * 60 * 1000,
+            },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+
+    const seen: { auth: string | null }[] = []
+    respond = (_url, init) => {
+      seen.push({
+        auth: new Headers(init?.headers as HeadersInit | undefined).get(
+          'authorization',
+        ),
+      })
+      return new Response('ok', { status: 200 })
+    }
+    const lbAnthropic = createLoadBalancedFetch(anthropicAdapter)
+    const lbOpenai = createLoadBalancedFetch(openaiAdapter)
+
+    // 1. anthropic request with SESSION_HEADER 'shared' -> A served.
+    //    Post-fix this pins `anthropic:s:shared = A`.
+    const r1 = await lbAnthropic('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+      headers: { [SESSION_HEADER]: 'shared' },
+    })
+    expect(r1.status).toBe(200)
+
+    // 2. openai request with the SAME SESSION_HEADER -> O served.
+    //    Pre-fix this OVERWRITES `s:shared` from A to O. Post-fix it writes a
+    //    SEPARATE key `openai:s:shared = O`, leaving A's pin intact.
+    const r2 = await lbOpenai('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      body: JSON.stringify({
+        input: [{ type: 'message', role: 'user', content: 'hi' }],
+      }),
+      headers: { [SESSION_HEADER]: 'shared' },
+    })
+    expect(r2.status).toBe(200)
+
+    // 3. anthropic request with the SAME SESSION_HEADER -> A served (still pinned).
+    const r3 = await lbAnthropic('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+      headers: { [SESSION_HEADER]: 'shared' },
+    })
+    expect(r3.status).toBe(200)
+
+    // Each call hit its provider's account exactly once with the expected token.
+    expect(seen).toHaveLength(3)
+    expect(seen[0]?.auth).toBe('Bearer tokA')
+    expect(seen[1]?.auth).toBe('Bearer tokO')
+    expect(seen[2]?.auth).toBe('Bearer tokA')
+
+    // LOCKING ASSERTION: BOTH provider pins coexist in pool.sessions under
+    // disjoint namespaced keys. Pre-fix only one key existed (`s:shared`), and
+    // it pointed at whichever provider ran most recently (here, A — because the
+    // last write overwrites). Post-fix both keys exist independently.
+    const pool = await readPool()
+    expect(pool.sessions['anthropic:s:shared']?.accountId).toBe('A')
+    expect(pool.sessions['openai:s:shared']?.accountId).toBe('O')
+    // The legacy provider-agnostic key is NEVER written post-fix.
+    expect(pool.sessions['s:shared']).toBeUndefined()
   })
 })
 

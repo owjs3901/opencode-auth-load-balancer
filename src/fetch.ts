@@ -162,7 +162,15 @@ export function createLoadBalancedFetch(
 
   return (async (input: FetchInput, init?: RequestInit): Promise<Response> => {
     const bodyStr = typeof init?.body === 'string' ? init.body : undefined
-    const sessionKey = deriveSessionKey(mergeHeaders(input, init), bodyStr)
+    // Namespace the session-affinity key by providerID so a single opencode
+    // session that alternates between providers (e.g. Claude on one turn, Codex
+    // on the next) keeps a SEPARATE pin per provider. Without the namespace
+    // both providers derive the same `s:<sessionID>` key, the second turn's
+    // write overwrites the first provider's pin, and the original provider's
+    // next turn loses its prompt-cache affinity. `deriveSessionKey` itself
+    // stays provider-agnostic; the prefix is layered above it at the call site.
+    const baseKey = deriveSessionKey(mergeHeaders(input, init), bodyStr)
+    const sessionKey = baseKey ? `${adapter.id}:${baseKey}` : null
     const tried = new Set<string>()
     let lastError: unknown = null
 

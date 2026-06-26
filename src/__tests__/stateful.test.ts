@@ -643,6 +643,52 @@ describe('usage-refresh', () => {
     expect(fetched).toBe(0) // fresh -> not polled
   })
 
+  test('does NOT overwrite stored usage when fetchUsage returns null on a stale account', async () => {
+    // Regression lock for the `if (snapshot)` guard in usage-refresh.ts. The
+    // sibling 'skips fresh accounts and a null usage result' test sets
+    // capturedAt = Date.now() on the seeded account, so the stale gate
+    // (capturedAt === 0 || now - capturedAt > SEED_TTL_MS) is FALSE and the
+    // loop `continue`s BEFORE reaching fetchUsage — `fetched === 0` there is
+    // achieved by SKIP, not by null-result handling. Line coverage on the
+    // `if (snapshot) {` line still hits 100% via the sibling 'seeds usage for
+    // a stale account' test (where snapshot is non-null), but the FALSE
+    // branch — "do not overwrite stored usage when fetchUsage returns null
+    // for a STALE account" — is otherwise unbound. A regression that
+    // simplified `if (snapshot) { ...stored.usage = snapshot... }` to
+    // `stored.usage = snapshot` would silently zero hourly/weekly/status on
+    // every transient null (Codex endpoint missing rate_limit, Anthropic
+    // endpoint JSON parse failure, network blip → fetchUsage returns null),
+    // demoting the account in weeklyUrgency until the next real response
+    // re-seeds it via parseUsageHeaders.
+    const stored: UsageSnapshot = {
+      hourly: { utilization: 0.42, resetAt: Date.now() + 2 * 60 * 60 * 1000 },
+      weekly: { utilization: 0.71, resetAt: Date.now() + 30 * 60 * 60 * 1000 },
+      status: 'warning',
+      capturedAt: 0, // STALE -> NOT skipped by the fresh gate
+    }
+    const a = account({ usage: stored })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    let fetched = 0
+    const adapter = fakeAdapter({
+      fetchUsage: async () => {
+        fetched += 1
+        return null
+      },
+    })
+    await refreshUsageInBackground(adapter, Date.now())
+    // Distinguishes this test from the fresh-skip sibling: fetchUsage WAS
+    // actually called (we passed the stale gate), and the existing stored
+    // snapshot is still intact — the null guard absorbed the transient null.
+    expect(fetched).toBe(1)
+    const reread = findAccount(await readPool(), a.id)
+    expect(reread?.usage.hourly?.utilization).toBeCloseTo(0.42, 5)
+    expect(reread?.usage.weekly?.utilization).toBeCloseTo(0.71, 5)
+    expect(reread?.usage.status).toBe('warning')
+    expect(reread?.usage.capturedAt).toBe(0)
+  })
+
   test('swallows errors from the refresh/usage path', async () => {
     const a = account({
       expires: Date.now() - 1,

@@ -324,6 +324,33 @@ describe('anthropic usage', () => {
     expect(u?.weekly).toBeNull()
   })
 
+  test('fetchUsage treats resets_at:null as "no reset" (regression: parseResetAt(null) used to throw)', async () => {
+    // Regression lock: pre-fix, parseResetAt(null) hit `value.trim()` and threw
+    // TypeError ("Cannot read properties of null (reading 'trim')") because
+    // Number(null) === 0 is finite and the `&& value.trim() !== ''` guard
+    // executed null.trim(). The throw escaped endpointWindow → fetchUsage and
+    // was silenced by refreshUsageInBackground's outer try/catch — silently
+    // dropping the entire usage snapshot for the poll. Symmetric with the
+    // OpenAI sibling endpointWindow (openai/usage.ts:90), which defaults any
+    // non-number reset_at to 0. Note the propagation amplifier: in fetchUsage
+    // `hourly: endpointWindow(json.five_hour)` runs BEFORE the weekly call in
+    // the return object literal, so a single null on the 5h side previously
+    // took the 7d snapshot with it (the second call never ran).
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          five_hour: { utilization: 10, resets_at: null },
+          seven_day: { utilization: 20, resets_at: null },
+        }),
+        { status: 200 },
+      )
+    const u = await aFetchUsage(acct('anthropic', null), 0)
+    expect(u?.hourly?.utilization).toBeCloseTo(0.1, 5)
+    expect(u?.hourly?.resetAt).toBe(0)
+    expect(u?.weekly?.utilization).toBeCloseTo(0.2, 5)
+    expect(u?.weekly?.resetAt).toBe(0)
+  })
+
   test('fetchUsage returns null on non-ok, throw, and invalid JSON', async () => {
     respond = () => new Response('x', { status: 429 })
     expect(await aFetchUsage(acct('anthropic', null), 0)).toBeNull()

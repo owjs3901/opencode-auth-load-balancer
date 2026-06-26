@@ -76,7 +76,21 @@ interface UsageEndpointResponse {
 }
 
 /** Decode resets_at which Anthropic has shipped as ISO string, epoch seconds, or epoch ms. */
-function parseResetAt(value: string | number): number {
+function parseResetAt(value: string | number | null | undefined): number {
+  // Defensive nullish guard. The endpoint contract documents `string | number`,
+  // but `response.json()` legally yields `null` for a nullable field, and the
+  // pre-fix code then threw `TypeError` here: `typeof null !== 'number'` skips
+  // the number branch, `Number(null) === 0` is finite, and the
+  // `&& value.trim() !== ''` guard then executed `null.trim()`. The throw
+  // escaped `endpointWindow` → `fetchUsage` and was silenced by
+  // `refreshUsageInBackground`'s outer `try { ... } catch { /* ignore */ }`,
+  // dropping the entire usage snapshot (the return-object literal in
+  // `fetchUsage` runs `hourly: endpointWindow(...)` first, so a single null on
+  // the 5h side also lost the 7d window). Symmetric with the OpenAI sibling
+  // `endpointWindow` (openai/usage.ts), which already maps any non-number
+  // `reset_at` to 0. `undefined` was already safe (`Number(undefined) === NaN`
+  // short-circuits the `&&`), but the same early return is the clean fix.
+  if (value == null) return 0
   if (typeof value === 'number') {
     // Symmetric with parseUsageHeaders() (above), the OpenAI endpointWindow
     // helper, and applyCooldown (fetch.ts): `JSON.parse('1e500')` yields

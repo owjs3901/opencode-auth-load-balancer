@@ -226,6 +226,44 @@ describe('createStrippedStream', () => {
     await out.body!.cancel('aborted-by-test')
     expect(cancelledWith).toBe('aborted-by-test')
   })
+  test('strips a tool prefix that straddles a chunk boundary', async () => {
+    // Pre-fix: the `pull` callback in `createStrippedStream` (transform.ts
+    // ~line 241) ran `stripToolPrefix` on each chunk in isolation, and the
+    // regex `/"name"\s*:\s*"mcp_([^"]+)"/g` needs the full
+    // `"name":"mcp_<name>"` literal — including the closing `"` — in ONE
+    // call. The existing single-chunk test above never exercised that:
+    // `new Response('{"name":"mcp_Read"}')` is delivered as one chunk, so
+    // the pattern is always whole in the regex's view. But the HTTP transport
+    // is free to fragment the body anywhere — short HTTP/1.1 chunked frames,
+    // mid-event TCP boundaries, or gzip de-stream re-fragmentation can all
+    // split this field. When that hits, the un-stripped `mcp_Bash` leaks
+    // straight to the opencode SDK and breaks tool dispatch (the SDK can't
+    // unwrap the prefix, so the call never reaches the tool). This test
+    // locks the tail-buffer fix by feeding two chunks split mid-pattern.
+    // The 80-byte 'A' padding around each chunk also drives stripped >
+    // TAIL_MAX on both pulls, which exercises the mid-stream emit branch
+    // (slice + enqueue) alongside the cross-chunk tail-buffer behavior.
+    // 'A' is used (not 'x') because 'prefix' and 'suffix' each already
+    // contain an 'x' — split('x') would over-count the padding.
+    const enc = new TextEncoder()
+    const PAD = 'A'.repeat(80)
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode(PAD + 'prefix-noise...{"name":"mcp_'))
+        c.enqueue(enc.encode('Bash"}...suffix-noise' + PAD))
+        c.close()
+      },
+    })
+    const res = new Response(upstream, { status: 200 })
+    const out = await createStrippedStream(res).text()
+    expect(out).not.toContain('mcp_')
+    expect(out).toContain('"name": "bash"')
+    expect(out).toContain('prefix-noise...')
+    expect(out).toContain('...suffix-noise')
+    // All 160 'A' padding bytes are preserved verbatim (none of the
+    // surrounding non-pattern bytes are dropped by the tail buffer).
+    expect(out.split('A').length - 1).toBe(160)
+  })
 })
 
 describe('cch billing header', () => {

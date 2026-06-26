@@ -231,15 +231,43 @@ export function createStrippedStream(response: Response): Response {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
 
+  // Longer than any "name":"mcp_<name>" literal opencode produces today
+  // (incl. mcp_StructuredOutput at 28 chars). The regex requires the closing
+  // `"` — so a tail of this many chars at each chunk boundary guarantees a
+  // straddled pattern lands fully buffered for the next iteration's strip.
+  const TAIL_MAX = 64
+  let tail = ''
+
   const stream = new ReadableStream({
     async pull(controller) {
-      const { done, value } = await reader.read()
-      if (done) {
-        controller.close()
-        return
+      // Pull MUST emit or close on every invocation: per the WHATWG Streams
+      // spec, when pull resolves without enqueueing/closing, the controller
+      // only re-calls it if `pullAgain` was set during the pull — which only
+      // happens if a NEW read request arrives mid-pull. With one consumer
+      // (the SSE reader), the pending read request that triggered THIS pull
+      // does not re-arm pullAgain, so a no-op return would deadlock the
+      // stream. Hence the read loop: keep draining the upstream until we
+      // either have enough buffered to emit (stripped > TAIL_MAX) or the
+      // upstream signals done.
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) {
+          if (tail) controller.enqueue(encoder.encode(tail))
+          tail = ''
+          controller.close()
+          return
+        }
+        const stripped = stripToolPrefix(
+          tail + decoder.decode(value, { stream: true }),
+        )
+        if (stripped.length > TAIL_MAX) {
+          const emit = stripped.slice(0, stripped.length - TAIL_MAX)
+          tail = stripped.slice(stripped.length - TAIL_MAX)
+          controller.enqueue(encoder.encode(emit))
+          return
+        }
+        tail = stripped
       }
-      const text = stripToolPrefix(decoder.decode(value, { stream: true }))
-      controller.enqueue(encoder.encode(text))
     },
     cancel(reason) {
       // Without this, a downstream cancel (opencode aborting the turn, the

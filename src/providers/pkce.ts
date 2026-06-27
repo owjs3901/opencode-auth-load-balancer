@@ -1,11 +1,9 @@
 /**
  * Shared PKCE (RFC 7636) helper used by both the Anthropic and OpenAI OAuth
- * flows. The two provider folders re-export `generatePKCE` from here so each
- * import path (`../providers/anthropic/pkce`, `../providers/openai/pkce`) keeps
- * resolving — the per-provider files were byte-identical except that anthropic
- * also returned `method: 'S256'`. The unified shape always includes
- * `method: 'S256'`; the openai consumer simply ignores it, and the anthropic
- * `oauth.ts` hard-codes the literal `'S256'` into the URL params anyway.
+ * flows. The per-provider files were byte-identical except that anthropic also
+ * returned `method: 'S256'`. The unified shape always includes `method: 'S256'`;
+ * the openai consumer simply ignores it, and the anthropic `oauth.ts` hard-codes
+ * the literal `'S256'` into the URL params anyway.
  */
 
 function base64UrlEncode(bytes: Uint8Array): string {

@@ -11,6 +11,19 @@ export type FetchInput = string | URL | Request
  */
 export type ErrorClass = 'account' | 'auth' | 'service' | 'ok'
 
+/**
+ * Shared HTTP-status → ErrorClass mapping. Both Anthropic and OpenAI adapters
+ * delegate to this single source of truth so a future status (e.g. 408, 425)
+ * being added in one provider but missed in the other cannot silently diverge
+ * rotation behavior between Claude and Codex.
+ */
+export function classifyHttpStatus(status: number): ErrorClass {
+  if (status === 429 || status === 402) return 'account'
+  if (status === 401 || status === 403) return 'auth'
+  if (status >= 500) return 'service'
+  return 'ok'
+}
+
 export interface AuthorizeRequest {
   url: string
   verifier: string

@@ -1,12 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
 import { extractAccountId } from '../providers/openai/jwt'
-import { generatePKCE } from '../providers/openai/pkce'
 import {
   applyAuth,
   rewriteRequestBody,
   rewriteUrl,
 } from '../providers/openai/transform'
+import { generatePKCE } from '../providers/pkce'
 import type { PoolAccount } from '../types'
 
 function acct(accountId: string | null): PoolAccount {

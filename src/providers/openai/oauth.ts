@@ -1,6 +1,7 @@
 import type { TokenSet } from '../../types'
 import { ignore } from '../../util'
 import { generateState, parseCallbackInput } from '../oauth-callback'
+import { generatePKCE } from '../pkce'
 import type { AuthorizeRequest } from '../types'
 import {
   AUTHORIZE_URL,
@@ -12,7 +13,6 @@ import {
   TOKEN_URL,
 } from './constants'
 import { extractAccountId } from './jwt'
-import { generatePKCE } from './pkce'
 
 interface TokenResponse {
   access_token: string

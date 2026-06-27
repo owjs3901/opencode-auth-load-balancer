@@ -7,7 +7,6 @@ import {
   extractFirstUserMessageText,
 } from '../providers/anthropic/cch'
 import { CLAUDE_CODE_IDENTITY } from '../providers/anthropic/constants'
-import { generatePKCE } from '../providers/anthropic/pkce'
 import {
   createStrippedStream,
   mergeBetaHeaders,
@@ -16,6 +15,7 @@ import {
   setOAuthHeaders,
   stripToolPrefix,
 } from '../providers/anthropic/transform'
+import { generatePKCE } from '../providers/pkce'
 
 afterEach(() => {
   delete process.env.ANTHROPIC_BASE_URL

@@ -1,9 +1,10 @@
 import type { PoolAccount, TokenSet, UsageSnapshot } from '../../types'
-import type {
-  AuthorizeRequest,
-  ErrorClass,
-  FetchInput,
-  ProviderAdapter,
+import {
+  type AuthorizeRequest,
+  classifyHttpStatus,
+  type ErrorClass,
+  type FetchInput,
+  type ProviderAdapter,
 } from '../types'
 import { PROVIDER_ID } from './constants'
 import {
@@ -69,9 +70,6 @@ export const openaiAdapter: ProviderAdapter = {
   },
 
   classifyError(status: number): ErrorClass {
-    if (status === 429 || status === 402) return 'account'
-    if (status === 401 || status === 403) return 'auth'
-    if (status >= 500) return 'service'
-    return 'ok'
+    return classifyHttpStatus(status)
   },
 }

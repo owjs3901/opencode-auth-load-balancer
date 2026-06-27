@@ -78,15 +78,24 @@ export function buildStatus(
           score: available
             ? scoreAccount(a, cfg, now)
             : Number.NEGATIVE_INFINITY,
+          // Pre-compute the unavailable-fallback tie-breaker so the comparator
+          // touches each accessor at most once instead of re-reading
+          // `a.usage.weekly?.utilization ?? 0` four times per sort pair. The
+          // sibling TUI ranking at `tui/auth-load-balancer-tui.view.tsx` uses
+          // the same shape (`weeklyUtil` field hoisted into the .map()), so
+          // both ranking pipelines stay structurally symmetric. We use the
+          // raw stored value (not `utilOf`/`displayUtil`) on purpose: this
+          // branch only runs for already-unavailable accounts, and the local
+          // `weeklyUtil` helper in `src/scheduler/select.ts` uses the same
+          // raw expression — keeping the "least-bad cooling-down account"
+          // distinguishable even if its window just rolled over.
+          weeklyUtil: a.usage.weekly?.utilization ?? 0,
         }
       })
       .sort((x, y) => {
         if (x.available !== y.available) return x.available ? -1 : 1
         if (x.available) return y.score - x.score
-        return (
-          (x.a.usage.weekly?.utilization ?? 0) -
-          (y.a.usage.weekly?.utilization ?? 0)
-        )
+        return x.weeklyUtil - y.weeklyUtil
       })
     const accounts = ranked.map(({ a, available }, i) => {
       const status = toStatus(a, now, a.id === currentAccountId, available)

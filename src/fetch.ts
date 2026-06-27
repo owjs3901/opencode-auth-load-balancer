@@ -162,6 +162,14 @@ export function createLoadBalancedFetch(
 
   return (async (input: FetchInput, init?: RequestInit): Promise<Response> => {
     const bodyStr = typeof init?.body === 'string' ? init.body : undefined
+    // Merge the user's request headers ONCE per request and reuse the result
+    // throughout the retry loop (clone via `new Headers(baseHeaders)` per
+    // attempt so each attempt's `applyAuth` mutation stays isolated). Before
+    // this hoist, `mergeHeaders(input, init)` was called 1 + MAX_ATTEMPTS
+    // times per request (once for deriveSessionKey, once per retry attempt)
+    // and `headers.delete(SESSION_HEADER)` ran defensively on every attempt
+    // even though the value to strip is deterministic from input/init.
+    const baseHeaders = mergeHeaders(input, init)
     // Namespace the session-affinity key by providerID so a single opencode
     // session that alternates between providers (e.g. Claude on one turn, Codex
     // on the next) keeps a SEPARATE pin per provider. Without the namespace
@@ -169,8 +177,12 @@ export function createLoadBalancedFetch(
     // write overwrites the first provider's pin, and the original provider's
     // next turn loses its prompt-cache affinity. `deriveSessionKey` itself
     // stays provider-agnostic; the prefix is layered above it at the call site.
-    const baseKey = deriveSessionKey(mergeHeaders(input, init), bodyStr)
+    const baseKey = deriveSessionKey(baseHeaders, bodyStr)
     const sessionKey = baseKey ? `${adapter.id}:${baseKey}` : null
+    // Strip the internal routing header ONCE — it must never reach upstream.
+    // The clone in the loop inherits the absence, so retry attempts cannot
+    // accidentally re-introduce it.
+    baseHeaders.delete(SESSION_HEADER)
     const tried = new Set<string>()
     let lastError: unknown = null
 
@@ -213,8 +225,11 @@ export function createLoadBalancedFetch(
       try {
         await ensureAccessToken(adapter, account, now)
 
-        const headers = mergeHeaders(input, init)
-        headers.delete(SESSION_HEADER) // internal routing header; never sent upstream
+        // Clone the pre-computed base so each attempt's `applyAuth` mutation
+        // (the per-account Bearer token) stays isolated from sibling attempts
+        // and from the captured base. `SESSION_HEADER` was already stripped
+        // from `baseHeaders` above, so the clone inherits the absence.
+        const headers = new Headers(baseHeaders)
         adapter.applyAuth(headers, account)
 
         let body = init?.body

@@ -32,6 +32,20 @@ function toTokenSet(json: TokenResponse, previousRefresh: string): TokenSet {
   }
 }
 
+/**
+ * POST a form-encoded body to TOKEN_URL with the shared Codex OAuth shell.
+ * Centralized so `exchange` and `refresh` can never drift on headers or
+ * timeout — only their URLSearchParams bodies differ.
+ */
+async function postToken(body: URLSearchParams): Promise<Response> {
+  return fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
+  })
+}
+
 /** Begin the ChatGPT PKCE authorization flow. */
 export async function authorize(): Promise<AuthorizeRequest> {
   const pkce = await generatePKCE()
@@ -80,12 +94,7 @@ export async function exchange(
     code_verifier: verifier,
   })
 
-  const res = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
-  })
+  const res = await postToken(body)
   if (!res.ok) {
     await res.body?.cancel().catch(ignore)
     return null
@@ -103,12 +112,7 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
     client_id: CLIENT_ID,
   })
 
-  const res = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
-  })
+  const res = await postToken(body)
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`Token refresh failed: ${res.status} — ${text}`)

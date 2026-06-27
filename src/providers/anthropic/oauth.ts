@@ -18,6 +18,24 @@ interface TokenResponse {
   expires_in: number
 }
 
+/**
+ * POST a JSON body to TOKEN_URL with the shared Claude OAuth shell.
+ * Centralized so `exchange` and `refresh` can never drift on headers, UA, or
+ * timeout — only their body objects differ.
+ */
+async function postToken(body: object): Promise<Response> {
+  return fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/plain, */*',
+      'User-Agent': 'axios/1.13.6',
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
+  })
+}
+
 /** Begin the PKCE authorization flow for the given login mode. */
 export async function authorize(
   mode: 'max' | 'console',
@@ -54,22 +72,13 @@ export async function exchange(
   if (!callback) return null
   if (expectedState && callback.state !== expectedState) return null
 
-  const result = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/plain, */*',
-      'User-Agent': 'axios/1.13.6',
-    },
-    body: JSON.stringify({
-      code: callback.code,
-      state: callback.state,
-      grant_type: 'authorization_code',
-      client_id: CLIENT_ID,
-      redirect_uri: redirectUri,
-      code_verifier: verifier,
-    }),
-    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
+  const result = await postToken({
+    code: callback.code,
+    state: callback.state,
+    grant_type: 'authorization_code',
+    client_id: CLIENT_ID,
+    redirect_uri: redirectUri,
+    code_verifier: verifier,
   })
 
   if (!result.ok) {
@@ -91,19 +100,10 @@ export async function exchange(
 
 /** Refresh an access token. Throws on failure; message includes the HTTP status. */
 export async function refresh(refreshToken: string): Promise<TokenSet> {
-  const response = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json, text/plain, */*',
-      'User-Agent': 'axios/1.13.6',
-    },
-    body: JSON.stringify({
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-    }),
-    signal: AbortSignal.timeout(OAUTH_HTTP_TIMEOUT_MS),
+  const response = await postToken({
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    client_id: CLIENT_ID,
   })
 
   if (!response.ok) {

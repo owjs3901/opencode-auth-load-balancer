@@ -16,7 +16,6 @@ import { extractAccountId } from './jwt'
 
 /** Set OAuth auth + Codex headers; drop the SDK's dummy key/x-api-key. */
 export function applyAuth(headers: Headers, account: PoolAccount): void {
-  headers.delete('authorization')
   headers.delete('x-api-key')
   headers.set('authorization', `Bearer ${account.access}`)
   const accountId = account.accountId ?? extractAccountId(account.access)

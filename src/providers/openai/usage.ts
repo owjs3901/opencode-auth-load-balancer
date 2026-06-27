@@ -1,12 +1,7 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
-import { ignore } from '../../util'
+import { clamp01, ignore } from '../../util'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 import { extractAccountId } from './jwt'
-
-function clamp01(n: number): number {
-  if (!Number.isFinite(n)) return 0
-  return Math.min(1, Math.max(0, n))
-}
 
 /** Build a window from a percent (0..100) + reset epoch seconds. */
 function windowFromPercent(

@@ -174,6 +174,14 @@ export function createLoadBalancedFetch(
     const tried = new Set<string>()
     let lastError: unknown = null
 
+    // `bodyStr` is captured from the enclosing closure and never reassigned, so its
+    // UTF-8 byte length is fixed per request. Hoist it out of the retry loop so it
+    // is computed ONCE (not up to MAX_ATTEMPTS times) and the "this is the request
+    // body's size" intent is explicit at the call site. The CJK cost-gate
+    // regression lock in plugin.test.ts exercises this value on both the
+    // gate-held and gate-passed branches.
+    const requestBytes = bodyStr ? Buffer.byteLength(bodyStr, 'utf8') : 0
+
     // Cold-start / staleness seeding (throttled, fire-and-forget — no added latency).
     void refreshUsageInBackground(adapter, Date.now()).catch(ignore)
 
@@ -188,7 +196,7 @@ export function createLoadBalancedFetch(
         now,
         cfg,
         tried,
-        bodyStr ? Buffer.byteLength(bodyStr, 'utf8') : 0,
+        requestBytes,
       )
       if (!selection) {
         // Exhausted every candidate this request, or none exist for this provider.

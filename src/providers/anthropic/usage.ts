@@ -4,13 +4,8 @@ import type {
   UsageStatus,
   UsageWindow,
 } from '../../types'
-import { ignore } from '../../util'
+import { clamp01, ignore } from '../../util'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
-
-function clamp01(n: number): number {
-  if (!Number.isFinite(n)) return 0
-  return Math.min(1, Math.max(0, n))
-}
 
 function mapStatus(raw: string | null): UsageStatus | null {
   if (!raw) return null

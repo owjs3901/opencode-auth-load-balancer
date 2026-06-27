@@ -1,5 +1,5 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
-import { clamp01, ignore } from '../../util'
+import { clamp01, ignore, secondsToMs } from '../../util'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 import { extractAccountId } from './jwt'
 
@@ -11,18 +11,10 @@ function windowFromPercent(
   if (percentRaw === null) return null
   const percent = Number(percentRaw)
   if (!Number.isFinite(percent)) return null
-  const resetSec = Number(resetSecRaw)
-  // Mirror applyCooldown's overflow guard (fetch.ts): `1e308` is finite but
-  // `1e308 * 1000` overflows to +Infinity, which would commit Infinity to
-  // pool.usage.{hourly,weekly}.resetAt — silently breaking isWindowExpired,
-  // weeklyUrgency, and relTime rendering. Lock the product to a finite ms.
-  const resetMs = resetSec * 1000
+  // secondsToMs absorbs the non-finite / overflow guard (util.ts).
   return {
     utilization: clamp01(percent / 100),
-    resetAt:
-      Number.isFinite(resetSec) && resetSec > 0 && Number.isFinite(resetMs)
-        ? resetMs
-        : 0,
+    resetAt: secondsToMs(Number(resetSecRaw)),
   }
 }
 
@@ -82,15 +74,12 @@ function endpointWindow(
     !Number.isFinite(w.used_percent)
   )
     return null
+  // secondsToMs absorbs the non-finite / overflow guard (util.ts); a missing /
+  // non-number reset_at coerces to 0 → secondsToMs(0) → 0.
   const resetSec = typeof w.reset_at === 'number' ? w.reset_at : 0
-  // Mirror applyCooldown's overflow guard (fetch.ts): JSON `1e308` is finite
-  // but `1e308 * 1000` overflows to +Infinity, which would commit Infinity to
-  // pool.usage.{hourly,weekly}.resetAt — silently breaking isWindowExpired,
-  // weeklyUrgency, and relTime rendering. Lock the product to a finite ms.
-  const resetMs = resetSec * 1000
   return {
     utilization: clamp01(w.used_percent / 100),
-    resetAt: resetSec > 0 && Number.isFinite(resetMs) ? resetMs : 0,
+    resetAt: secondsToMs(resetSec),
   }
 }
 

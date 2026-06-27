@@ -170,6 +170,7 @@ All knobs are environment variables with sane defaults.
 | `OPENCODE_AUTH_LB_WEEK_WINDOW_MS` | `604800000` | Baseline horizon used when a weekly reset time is unknown. |
 | `OPENCODE_AUTH_LB_EXHAUSTED_AT` | `0.999` | Hard exhaustion: at/above this utilization an account is excluded. |
 | `OPENCODE_AUTH_LB_MIGRATE_AT` | `0.95` | Soft threshold to proactively leave a pinned account (before 100%). |
+| `OPENCODE_AUTH_LB_WEEKLY_DRAIN_TARGET` | `0.98` | Soft threshold for the WEEKLY window: scoring treats weekly quota as "fully drained" past this utilization, and a pinned session proactively migrates once its weekly util crosses it. The 5h window uses `MIGRATE_AT` (~0.95); the weekly window uses this (~0.98). Must be in (`MIGRATE_AT`, `EXHAUSTED_AT`]. |
 | `OPENCODE_AUTH_LB_CHEAP_SWITCH_MAX_BYTES` | `0` | For non-forced switches, only switch when the request body ≤ this many bytes (`0` = always). Avoids re-sending a huge context onto a fresh account. |
 | `OPENCODE_AUTH_LB_DRAIN_MIGRATE` | `false` | Allow switching a healthy session to drain another account whose weekly window is about to reset. |
 | `OPENCODE_AUTH_LB_DRAIN_MIGRATE_MARGIN` | `1.5` | Urgency factor required to justify a drain switch. |

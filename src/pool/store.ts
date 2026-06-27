@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 import type { PoolAccount, PoolFile } from '../types'
-import { ignore } from '../util'
+import { ignore, sleep } from '../util'
 import { type LockOptions, withLock as withFileLock } from './lock'
 import { poolFilePath } from './paths'
 
@@ -39,10 +39,6 @@ export class PoolWriteError extends Error {
     super(`Failed to write pool file atomically: ${path}`)
     this.name = 'PoolWriteError'
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /**

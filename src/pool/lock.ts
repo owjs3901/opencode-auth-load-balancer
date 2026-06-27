@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { ignore } from '../util'
+import { ignore, sleep } from '../util'
 
 /**
  * Cross-process advisory file lock.
@@ -50,10 +50,6 @@ export class LockTimeoutError extends Error {
     super(`Timed out acquiring lock: ${lockDir}`)
     this.name = 'LockTimeoutError'
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function metaFile(lockDir: string): string {

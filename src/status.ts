@@ -105,8 +105,15 @@ export async function readStatus(
   return buildStatus(await readPool(), now, cfg)
 }
 
-function pct(u: number | null): string {
-  return u === null ? '-' : `${Math.round(u * 100)}%`
+/**
+ * Render a utilization as `"45%"` (or `"-"` for null/undefined). Shared with
+ * `notify.ts` so the dashboard, the `auth_lb_status` tool, and the switch
+ * toast cannot silently disagree on the same account's percentage rounding.
+ * The TUI view at `tui/auth-load-balancer-tui.view.tsx` keeps its own copy
+ * (the TUI runtime cannot import `src/`).
+ */
+export function pct(u: number | null | undefined): string {
+  return typeof u === 'number' ? `${Math.round(u * 100)}%` : '-'
 }
 
 function relTime(at: number, now: number): string {

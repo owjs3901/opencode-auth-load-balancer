@@ -1,5 +1,6 @@
 import type { TokenSet } from '../../types'
 import { ignore } from '../../util'
+import { generateState, parseCallbackInput } from '../oauth-callback'
 import type { AuthorizeRequest } from '../types'
 import {
   AUTHORIZE_URL,
@@ -12,29 +13,6 @@ import {
 } from './constants'
 import { extractAccountId } from './jwt'
 import { generatePKCE } from './pkce'
-
-function generateState(): string {
-  return crypto.randomUUID().replace(/-/g, '')
-}
-
-function parseCallbackInput(
-  input: string,
-): { code: string; state: string } | null {
-  const trimmed = input.trim()
-  try {
-    const url = new URL(trimmed)
-    const code = url.searchParams.get('code')
-    const state = url.searchParams.get('state')
-    if (code && state) return { code, state }
-  } catch {
-    // not a URL — fall through
-  }
-  const params = new URLSearchParams(trimmed)
-  const code = params.get('code')
-  const state = params.get('state')
-  if (code && state) return { code, state }
-  return null
-}
 
 interface TokenResponse {
   access_token: string

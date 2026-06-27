@@ -1,5 +1,5 @@
 import { displayUtil } from './scheduler/score'
-import { providerName } from './status'
+import { pct, providerName } from './status'
 import type { PoolAccount } from './types'
 import { ignore } from './util'
 
@@ -19,10 +19,6 @@ export interface ToastClient {
 
 /** Last account toasted per provider, so we only notify on an actual switch. */
 const lastToasted = new Map<string, string>()
-
-function pct(u: number | null | undefined): string {
-  return typeof u === 'number' ? `${Math.round(u * 100)}%` : '-'
-}
 
 /**
  * Toast (once) when a provider's in-use account changes — the user's "which account

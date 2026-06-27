@@ -1,5 +1,6 @@
 import type { TokenSet } from '../../types'
 import { ignore } from '../../util'
+import { generateState, parseCallbackInput } from '../oauth-callback'
 import type { AuthorizeRequest } from '../types'
 import {
   AUTHORIZE_URLS,
@@ -10,37 +11,6 @@ import {
   TOKEN_URL,
 } from './constants'
 import { generatePKCE } from './pkce'
-
-function generateState(): string {
-  return crypto.randomUUID().replace(/-/g, '')
-}
-
-function parseCallbackInput(
-  input: string,
-): { code: string; state: string } | null {
-  const trimmed = input.trim()
-
-  try {
-    const url = new URL(trimmed)
-    const code = url.searchParams.get('code')
-    const state = url.searchParams.get('state')
-    if (code && state) return { code, state }
-  } catch {
-    // Fall through to legacy/manual formats.
-  }
-
-  const hashSplits = trimmed.split('#')
-  if (hashSplits.length === 2 && hashSplits[0] && hashSplits[1]) {
-    return { code: hashSplits[0], state: hashSplits[1] }
-  }
-
-  const params = new URLSearchParams(trimmed)
-  const code = params.get('code')
-  const state = params.get('state')
-  if (code && state) return { code, state }
-
-  return null
-}
 
 interface TokenResponse {
   access_token: string
@@ -80,7 +50,7 @@ export async function exchange(
   redirectUri: string,
   expectedState?: string,
 ): Promise<TokenSet | null> {
-  const callback = parseCallbackInput(input)
+  const callback = parseCallbackInput(input, { allowHashFormat: true })
   if (!callback) return null
   if (expectedState && callback.state !== expectedState) return null
 

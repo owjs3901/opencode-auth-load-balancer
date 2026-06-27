@@ -106,10 +106,7 @@ async function commitRefresh(
     const stored = findAccount(pool, accountId)
     if (!stored) return next
     if (!sameGeneration(stored, attempt)) return tokensOf(stored)
-    stored.access = next.access
-    stored.refresh = next.refresh
-    stored.expires = next.expires
-    if (next.accountId) stored.accountId = next.accountId
+    applyTokensTo(stored, next)
     stored.tokenGen = attempt.gen + 1
     stored.disabledReason = null
     return next

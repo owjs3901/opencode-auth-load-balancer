@@ -1,7 +1,7 @@
 /**
  * Pure account-scoring core — the SINGLE SOURCE OF TRUTH for how the load balancer
- * ranks accounts. Imported by both the server scheduler (score.ts / config.ts) AND the
- * standalone TUI view, which loads a byte-identical copy installed alongside it
+ * ranks accounts. Imported by the server scheduler AND the standalone TUI view, which
+ * loads a byte-identical copy installed alongside it
  * (`tui/auth-load-balancer-scoring.ts`, kept in sync by a build step + a test). Keeping
  * the formula in one place means the dashboard's ranking can never silently drift from
  * what the scheduler actually picks (which it once did, as duplicated copies).

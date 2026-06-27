@@ -1,4 +1,4 @@
-import { displayUtil } from './scheduler/score'
+import { displayUtil } from './scheduler/score-core'
 import { pct, providerName } from './status'
 import type { PoolAccount } from './types'
 import { ignore } from './util'

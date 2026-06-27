@@ -6,7 +6,7 @@ import {
   overSoftThreshold,
   scoreAccount,
   weeklyUrgency,
-} from './score'
+} from './score-core'
 
 export interface Selection {
   account: PoolAccount

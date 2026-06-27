@@ -4,7 +4,7 @@ import {
   loadConfig,
   type SchedulerConfig,
 } from './scheduler/config'
-import { displayUtil, isAvailable, scoreAccount } from './scheduler/score'
+import { displayUtil, isAvailable, scoreAccount } from './scheduler/score-core'
 import type { PoolAccount, PoolFile } from './types'
 
 const PROVIDER_NAMES: Record<string, string> = {
@@ -36,8 +36,8 @@ export interface ProviderStatus {
 function toStatus(
   account: PoolAccount,
   now: number,
-  cfg: SchedulerConfig,
   current: boolean,
+  available: boolean,
 ): AccountStatus {
   return {
     id: account.id,
@@ -45,7 +45,7 @@ function toStatus(
     weeklyUtil: displayUtil(account.usage.weekly, now),
     hourlyUtil: displayUtil(account.usage.hourly, now),
     weeklyResetAt: account.usage.weekly?.resetAt ?? 0,
-    available: isAvailable(account, cfg, now),
+    available,
     cooldownUntil: account.cooldownUntil,
     disabledReason: account.disabledReason,
     current,
@@ -88,8 +88,8 @@ export function buildStatus(
           (y.a.usage.weekly?.utilization ?? 0)
         )
       })
-    const accounts = ranked.map(({ a }, i) => {
-      const status = toStatus(a, now, cfg, a.id === currentAccountId)
+    const accounts = ranked.map(({ a, available }, i) => {
+      const status = toStatus(a, now, a.id === currentAccountId, available)
       status.rank = i + 1
       return status
     })

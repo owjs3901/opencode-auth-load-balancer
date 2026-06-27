@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 
 import { DEFAULT_CONFIG } from '../scheduler/config'
-import { isAvailable, isExhausted, weeklyUrgency } from '../scheduler/score'
+import {
+  isAvailable,
+  isExhausted,
+  weeklyUrgency,
+} from '../scheduler/score-core'
 import { selectAccount, selectForSession } from '../scheduler/select'
 import type {
   PoolAccount,

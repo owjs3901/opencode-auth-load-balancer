@@ -19,7 +19,7 @@
  * (auth-load-balancer-scoring.ts) — so the displayed order can never drift from what the
  * scheduler actually picks.
  */
-import { readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
@@ -85,22 +85,32 @@ interface PoolFileRaw {
   sessions?: Record<string, { accountId?: string }>
 }
 
-/** Read-modify-write the pool file atomically (temp + rename, fallback overwrite). */
+/** Read-modify-write the pool file atomically (temp + rename — never a direct overwrite). */
 function mutatePoolFile(fn: (pool: PoolFileRaw) => void): void {
+  let tmp: string | undefined
   try {
     const path = poolFile()
     const pool = JSON.parse(readFileSync(path, 'utf8')) as PoolFileRaw
     fn(pool)
     const payload = JSON.stringify(pool, null, 2)
-    const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
-    try {
-      writeFileSync(tmp, payload, { mode: 0o600 })
-      renameSync(tmp, path)
-    } catch {
-      writeFileSync(path, payload, { mode: 0o600 })
-    }
+    tmp = `${path}.${process.pid}.${Date.now()}.tmp`
+    writeFileSync(tmp, payload, { mode: 0o600 })
+    renameSync(tmp, path)
+    tmp = undefined
   } catch {
-    /* server may briefly hold the file; the user can retry */
+    // Atomic temp+rename failed (e.g. the server briefly holds the file on
+    // Windows). NEVER fall back to a direct overwrite — that would shred a
+    // concurrent server write of usage/cooldown/session/tokenGen state
+    // (see src/pool/store.ts writeJsonAtomic, which was deliberately changed
+    // away from that fallback in iteration #0046). Mirror its cleanup so a
+    // sustained failure doesn't leave a stray .tmp behind; the user can retry.
+    if (tmp) {
+      try {
+        unlinkSync(tmp)
+      } catch {
+        /* ignore — best-effort cleanup */
+      }
+    }
   }
 }
 

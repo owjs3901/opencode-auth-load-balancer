@@ -136,8 +136,18 @@ export function selectForSession(
     return selectAccount(pool.accounts, providerID, now, cfg, exclude)
   }
 
-  // Consider a non-forced migration only when switching is cheap.
-  if (isCheapMoment(requestBytes, cfg)) {
+  // Consider a non-forced migration only when switching is cheap AND a
+  // migration branch is actually reachable. The inner `proactive` check
+  // requires `overSoftThreshold(pinned)` and the drain branch requires
+  // `cfg.drainMigrate` — so when both are false (the steady-state default-
+  // config "follow-up turn in a healthy session" path, by far the dominant
+  // case), `alt` is computed and immediately discarded. Gating the
+  // `selectAccount` call on the same predicates skips a full O(N) pool scan
+  // (and a `scoreAccount`/`weeklyUrgency` call per candidate) on every such
+  // request. Behavior is unchanged when either predicate is true.
+  const migrationReachable =
+    overSoftThreshold(pinned, cfg, now) || cfg.drainMigrate
+  if (migrationReachable && isCheapMoment(requestBytes, cfg)) {
     const alt = selectAccount(
       pool.accounts,
       providerID,

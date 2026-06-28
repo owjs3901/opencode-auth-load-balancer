@@ -729,6 +729,69 @@ describe('accounts', () => {
     expect(new Set(labels).size).toBe(labels.length) // no duplicate labels
   })
 
+  test('addAccount does NOT dedup two empty-refresh exchanges into the same row', async () => {
+    // Regression: the dedup match was `a.providerID === providerID && a.refresh
+    // === tokens.refresh`, treating two empty-refresh exchanges as the SAME
+    // account. RFC 6749 §5.1 lets the OAuth server omit `refresh_token` at
+    // exchange time, and BOTH adapters commit to writing `''` in that case
+    // (anthropic/oauth.ts: `refresh: json.refresh_token || ''`; openai/oauth.ts:
+    // `toTokenSet(json, '')`). Pre-fix, the second empty-refresh add silently
+    // overwrote the first pool row's tokens onto the same id/label, and the
+    // user lost one of the two accounts they thought they just registered. Post-
+    // fix, an empty refresh is never a dedup match (it is the OPPOSITE of a
+    // stable identifier) and the two adds produce two distinct pool entries
+    // with distinct ids AND distinct default labels. The providerID branch in
+    // the new gate is covered by adding one entry per provider — anthropic and
+    // openai — so a future regression that drops `tokens.refresh ?` for ONE
+    // provider can't slip past.
+    const a1 = await addAccount('anthropic', {
+      access: 'a1',
+      refresh: '',
+      expires: 1,
+    })
+    const a2 = await addAccount('anthropic', {
+      access: 'a2',
+      refresh: '',
+      expires: 1,
+    })
+    expect(a2.id).not.toBe(a1.id) // distinct accounts, not a silent overwrite
+    expect(a2.label).not.toBe(a1.label)
+    expect(a1.label).toBe('anthropic-1')
+    expect(a2.label).toBe('anthropic-2')
+    // Symmetric for the openai providerID branch — same provider gate, same fix.
+    const o1 = await addAccount('openai', {
+      access: 'o1',
+      refresh: '',
+      expires: 1,
+    })
+    const o2 = await addAccount('openai', {
+      access: 'o2',
+      refresh: '',
+      expires: 1,
+    })
+    expect(o2.id).not.toBe(o1.id)
+    expect(o2.label).not.toBe(o1.label)
+    const pool = await readPool()
+    expect(pool.accounts).toHaveLength(4)
+    // Existing dedup behavior for NON-empty refresh tokens must still hold —
+    // a follow-up exchange with a real refresh token still folds onto the
+    // matching row (covered explicitly by the sibling 'addAccount appends and
+    // de-dupes by refresh token' test, plus this positive assertion).
+    const again = await addAccount('anthropic', {
+      access: 'a1-rotated',
+      refresh: 'r-real',
+      expires: 1,
+    })
+    expect((await readPool()).accounts).toHaveLength(5) // first real-refresh add
+    const folded = await addAccount('anthropic', {
+      access: 'a1-rotated-2',
+      refresh: 'r-real',
+      expires: 1,
+    })
+    expect(folded.id).toBe(again.id) // dedup still works for real refresh tokens
+    expect((await readPool()).accounts).toHaveLength(5) // no new row added
+  })
+
   test('bootstrap imports an existing opencode oauth credential once', async () => {
     await bootstrapFromOpencodeAuth('anthropic', async () => ({
       type: 'oauth',

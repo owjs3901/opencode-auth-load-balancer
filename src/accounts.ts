@@ -44,9 +44,23 @@ export async function addAccount(
   label?: string,
 ): Promise<PoolAccount> {
   return mutatePool((pool) => {
-    const existing = pool.accounts.find(
-      (a) => a.providerID === providerID && a.refresh === tokens.refresh,
-    )
+    // Dedup intent: "same account re-authorized" → fold the new tokens onto
+    // the existing pool row instead of creating a duplicate. The signal is a
+    // matching refresh token (the only stable, per-account identifier OAuth
+    // gives us up front). RFC 6749 §5.1 lets the server OMIT `refresh_token`
+    // at exchange time, and BOTH adapters commit to writing `''` in that case
+    // (anthropic/oauth.ts: `refresh: json.refresh_token || ''`; openai/oauth.ts:
+    // `toTokenSet(json, '')`). An empty refresh is therefore the OPPOSITE of a
+    // stable identifier — it means "we don't have one" — so it must NOT match.
+    // Without this guard, the second empty-refresh exchange (e.g. two ChatGPT
+    // logins where the server skipped issuing a refresh_token) silently
+    // overwrites the first pool row, and the user loses one of the two
+    // accounts they thought they just registered.
+    const existing = tokens.refresh
+      ? pool.accounts.find(
+          (a) => a.providerID === providerID && a.refresh === tokens.refresh,
+        )
+      : undefined
     if (existing) {
       existing.access = tokens.access
       existing.refresh = tokens.refresh

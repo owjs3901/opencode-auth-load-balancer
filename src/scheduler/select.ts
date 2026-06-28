@@ -145,8 +145,13 @@ export function selectForSession(
   // `selectAccount` call on the same predicates skips a full O(N) pool scan
   // (and a `scoreAccount`/`weeklyUrgency` call per candidate) on every such
   // request. Behavior is unchanged when either predicate is true.
-  const migrationReachable =
-    overSoftThreshold(pinned, cfg, now) || cfg.drainMigrate
+  // `pinnedOverSoft` is the named fact "the pin is over its soft threshold",
+  // used both as the migration gate and as the proactive predicate; computing
+  // `overSoftThreshold` once avoids re-reading `account.usage.{weekly,hourly}`
+  // and re-running `utilOf` (which itself re-checks window expiry) on the
+  // cheap-moment hot path.
+  const pinnedOverSoft = overSoftThreshold(pinned, cfg, now)
+  const migrationReachable = pinnedOverSoft || cfg.drainMigrate
   if (migrationReachable && isCheapMoment(requestBytes, cfg)) {
     const alt = selectAccount(
       pool.accounts,
@@ -164,8 +169,7 @@ export function selectForSession(
     // case (which is the only legitimate way to return a degraded selection).
     if (alt && !alt.degraded) {
       const proactive =
-        overSoftThreshold(pinned, cfg, now) &&
-        maxUtil(alt.account, now) < maxUtil(pinned, now)
+        pinnedOverSoft && maxUtil(alt.account, now) < maxUtil(pinned, now)
       if (proactive) {
         return { account: alt.account, degraded: false, sticky: false }
       }

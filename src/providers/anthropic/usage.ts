@@ -15,6 +15,27 @@ function mapStatus(raw: string | null): UsageStatus | null {
 }
 
 /**
+ * Build a single UsageWindow from the raw utilization + reset header strings.
+ * Lifted from inside `parseUsageHeaders` so we don't reallocate a closure per
+ * response on the inference hot path; symmetric with `openai/usage.ts`'s
+ * module-level `windowFromPercent` helper. Captures NOTHING from its caller —
+ * `clamp01` and `secondsToMs` are module-imported.
+ */
+function parseHeaderWindow(
+  utilRaw: string | null,
+  resetRaw: string | null,
+): UsageWindow | null {
+  if (utilRaw === null) return null
+  const util = Number(utilRaw)
+  if (!Number.isFinite(util)) return null
+  // secondsToMs absorbs the non-finite / overflow guard (util.ts).
+  return {
+    utilization: clamp01(util),
+    resetAt: secondsToMs(Number(resetRaw)),
+  }
+}
+
+/**
  * Parse usage from /v1/messages response headers (free, on every response).
  * Header utilization is a 0..1 FRACTION; reset is epoch SECONDS.
  */
@@ -27,23 +48,15 @@ export function parseUsageHeaders(
   const status = headers.get('anthropic-ratelimit-unified-status')
   if (h5 === null && h7 === null && status === null) return null
 
-  const window = (
-    utilRaw: string | null,
-    resetRaw: string | null,
-  ): UsageWindow | null => {
-    if (utilRaw === null) return null
-    const util = Number(utilRaw)
-    if (!Number.isFinite(util)) return null
-    // secondsToMs absorbs the non-finite / overflow guard (util.ts).
-    return {
-      utilization: clamp01(util),
-      resetAt: secondsToMs(Number(resetRaw)),
-    }
-  }
-
   const out: Partial<UsageSnapshot> = { capturedAt: now }
-  const hourly = window(h5, headers.get('anthropic-ratelimit-unified-5h-reset'))
-  const weekly = window(h7, headers.get('anthropic-ratelimit-unified-7d-reset'))
+  const hourly = parseHeaderWindow(
+    h5,
+    headers.get('anthropic-ratelimit-unified-5h-reset'),
+  )
+  const weekly = parseHeaderWindow(
+    h7,
+    headers.get('anthropic-ratelimit-unified-7d-reset'),
+  )
   if (hourly) out.hourly = hourly
   if (weekly) out.weekly = weekly
   const mapped = mapStatus(status)

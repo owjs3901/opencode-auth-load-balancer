@@ -38,6 +38,7 @@ function toStatus(
   now: number,
   current: boolean,
   available: boolean,
+  rank: number,
 ): AccountStatus {
   return {
     id: account.id,
@@ -49,7 +50,7 @@ function toStatus(
     cooldownUntil: account.cooldownUntil,
     disabledReason: account.disabledReason,
     current,
-    rank: 0,
+    rank,
   }
 }
 
@@ -97,11 +98,9 @@ export function buildStatus(
         if (x.available) return y.score - x.score
         return x.weeklyUtil - y.weeklyUtil
       })
-    const accounts = ranked.map(({ a, available }, i) => {
-      const status = toStatus(a, now, a.id === currentAccountId, available)
-      status.rank = i + 1
-      return status
-    })
+    const accounts = ranked.map(({ a, available }, i) =>
+      toStatus(a, now, a.id === currentAccountId, available, i + 1),
+    )
     return { providerID, currentAccountId, accounts }
   })
 }

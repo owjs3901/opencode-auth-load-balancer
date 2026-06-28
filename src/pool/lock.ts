@@ -76,7 +76,20 @@ async function tryClaim(lockDir: string, meta: LockMeta): Promise<boolean> {
   } catch {
     return false
   }
-  await writeFile(metaFile(lockDir), JSON.stringify(meta), { mode: 0o600 })
+  // If meta write fails after mkdir succeeded (disk full, EACCES, EROFS, or a
+  // Windows AV/backup tool holding the dir handle), the propagating error would
+  // otherwise leave a dir-with-no-owner-meta behind. With no meta file every
+  // future acquirer reads null from readMeta(), declines to reclaim (the stale
+  // gate in acquireLock requires non-null meta), and spins until timeoutMs hits
+  // — bricking the pool/refresh paths until manual cleanup. Cleaning up
+  // symmetrically with writeJsonAtomic's tmp-file unlink keeps the failure
+  // path reclaimable.
+  try {
+    await writeFile(metaFile(lockDir), JSON.stringify(meta), { mode: 0o600 })
+  } catch (error) {
+    await rm(lockDir, { recursive: true, force: true }).catch(ignore)
+    throw error
+  }
   return true
 }
 

@@ -57,7 +57,7 @@ export const CLAUDE_CODE_VERSION = '2.1.87'
 export const CLAUDE_CODE_ENTRYPOINT = 'sdk-cli'
 
 /** User-Agent for /v1/messages (matches the reference plugin's validated value). */
-export const USER_AGENT = 'claude-cli/2.1.87 (external, cli)'
+export const USER_AGENT = `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`
 
 /**
  * User-Agent for the /api/oauth/usage endpoint. This endpoint hard-rejects

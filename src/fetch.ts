@@ -213,7 +213,6 @@ export function createLoadBalancedFetch(
       if (!selection) {
         // Exhausted every candidate this request, or none exist for this provider.
         if (tried.size > 0) break
-        if (lastError) throw lastError
         // No usable account: return a clean 401 rather than leaking the SDK's empty
         // x-api-key through the global fetch (see noUsableAccountResponse).
         return noUsableAccountResponse(adapter.id)

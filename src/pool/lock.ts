@@ -98,10 +98,15 @@ function startHeartbeat(
   meta: LockMeta,
   heartbeatMs: number,
 ): () => void {
+  // `meta` is `readonly` for the lifetime of the lock, so the serialized payload
+  // is fixed. Stringify ONCE up front rather than re-running `JSON.stringify` on
+  // every tick — and mirrors the sibling `tryClaim` site, which already
+  // stringifies once outside any loop. Intent ("write a fixed payload to refresh
+  // mtime") becomes explicit at the call site instead of hiding inside a
+  // per-tick stringification.
+  const payload = JSON.stringify(meta)
   const timer = setInterval(() => {
-    void writeFile(metaFile(lockDir), JSON.stringify(meta), {
-      mode: 0o600,
-    }).catch(ignore)
+    void writeFile(metaFile(lockDir), payload, { mode: 0o600 }).catch(ignore)
   }, heartbeatMs)
   // A heartbeat must never keep the process alive on its own.
   timer.unref?.()

@@ -194,6 +194,22 @@ export function createLoadBalancedFetch(
     // gate-held and gate-passed branches.
     const requestBytes = bodyStr ? Buffer.byteLength(bodyStr, 'utf8') : 0
 
+    // `transformBody` / `transformUrl` are deterministic in `bodyStr` / `input`,
+    // which are captured once and never reassigned across attempts. Both
+    // transforms also catch their own parse errors (Anthropic
+    // `rewriteRequestBody` / `rewriteUrl` and OpenAI siblings each `try {…}
+    // catch { return body|input }`), so the hoist cannot introduce a new throw
+    // path. Before this hoist each retry attempt re-ran the full transform pass
+    // — on Anthropic that meant `JSON.parse` + CCH SHA-256 + identity prepend +
+    // tool-name prefixing + `JSON.stringify` + a `new URL(...)` clone + a
+    // `resolveBaseUrl()` re-read of `ANTHROPIC_BASE_URL`; on OpenAI it meant
+    // `JSON.parse` + `applyInstructions` + `include` Set merge + `JSON.stringify`
+    // + `new URL(...)` + `/responses` rewrite. With this hoist that work runs
+    // once per request, not up to MAX_ATTEMPTS times during a 429/401 rotation.
+    const transformedBody =
+      bodyStr !== undefined ? adapter.transformBody(bodyStr) : init?.body
+    const transformedUrl = adapter.transformUrl(input)
+
     // Cold-start / staleness seeding (throttled, fire-and-forget — no added latency).
     void refreshUsageInBackground(adapter, Date.now()).catch(ignore)
 
@@ -231,17 +247,13 @@ export function createLoadBalancedFetch(
         const headers = new Headers(baseHeaders)
         adapter.applyAuth(headers, account)
 
-        let body = init?.body
-        if (typeof body === 'string') body = adapter.transformBody(body)
-
-        const url = adapter.transformUrl(input)
         log(
           `-> ${adapter.id} via ${account.label}${sticky ? ' (sticky)' : ''}${degraded ? ' (degraded)' : ''}`,
         )
 
-        const res = await fetch(url as Parameters<typeof fetch>[0], {
+        const res = await fetch(transformedUrl as Parameters<typeof fetch>[0], {
           ...init,
-          body,
+          body: transformedBody,
           headers,
         })
         await recordUsage(adapter, account.id, res, Date.now())

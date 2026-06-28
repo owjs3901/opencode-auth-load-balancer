@@ -156,20 +156,29 @@ export function selectForSession(
       const proactive =
         overSoftThreshold(pinned, cfg, now) &&
         maxUtil(alt.account, now) < maxUtil(pinned, now)
-      // `altUrgency > 0` guard: when BOTH the pin AND the alt are past
-      // `weeklyDrainTarget`, each `weeklyUrgency` collapses to 0 (its
-      // `drainable = max(0, weeklyDrainTarget - util)` term zeroes out). Without
-      // the guard, `0 >= 0 * margin` is true, firing a useless drain switch — no
-      // perishable quota to chase, just a lost prompt cache on the pin. The
-      // unchanged `>=` margin keeps behavior at non-zero urgencies byte-identical
-      // (locked by the drainMigrate tests in scheduler.test.ts).
-      const altUrgency = weeklyUrgency(alt.account, cfg, now)
-      const drain =
-        cfg.drainMigrate &&
-        altUrgency > 0 &&
-        altUrgency >= weeklyUrgency(pinned, cfg, now) * cfg.drainMigrateMargin
-      if (proactive || drain) {
+      if (proactive) {
         return { account: alt.account, degraded: false, sticky: false }
+      }
+      // Drain branch is opt-in (`drainMigrate` defaults to false). Gating the
+      // whole block on `cfg.drainMigrate` skips the `weeklyUrgency(alt)` /
+      // `weeklyUrgency(pinned)` calls on every cheap-moment request in the
+      // common default-config path, where their result is unused. Behavior is
+      // unchanged when `drainMigrate=true`.
+      if (cfg.drainMigrate) {
+        // `altUrgency > 0` guard: when BOTH the pin AND the alt are past
+        // `weeklyDrainTarget`, each `weeklyUrgency` collapses to 0 (its
+        // `drainable = max(0, weeklyDrainTarget - util)` term zeroes out). Without
+        // the guard, `0 >= 0 * margin` is true, firing a useless drain switch — no
+        // perishable quota to chase, just a lost prompt cache on the pin. The
+        // unchanged `>=` margin keeps behavior at non-zero urgencies byte-identical
+        // (locked by the drainMigrate tests in scheduler.test.ts).
+        const altUrgency = weeklyUrgency(alt.account, cfg, now)
+        if (
+          altUrgency > 0 &&
+          altUrgency >= weeklyUrgency(pinned, cfg, now) * cfg.drainMigrateMargin
+        ) {
+          return { account: alt.account, degraded: false, sticky: false }
+        }
       }
     }
   }

@@ -36,12 +36,11 @@ interface LoaderProvider {
 /** Subscription plans are flat-rate; zero out per-token cost so opencode shows $0. */
 function zeroOutCost(provider: LoaderProvider): void {
   for (const model of Object.values(provider.models)) {
-    const cost: ModelCost = {
+    model.cost = {
       input: 0,
       output: 0,
       cache: { read: 0, write: 0 },
     }
-    model.cost = cost
   }
 }
 

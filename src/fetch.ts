@@ -312,7 +312,7 @@ export function createLoadBalancedFetch(
         // the next attempt and folding them would couple unrelated effects.
         const cls = adapter.classifyError(res.status)
         if (cls === 'account' || cls === 'auth') {
-          await recordUsage(adapter, account.id, res, Date.now())
+          await recordUsage(adapter, account.id, res, now)
           const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
           await applyCooldown(account.id, ms, res)
           lastError = new Error(

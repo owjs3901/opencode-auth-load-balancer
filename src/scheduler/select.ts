@@ -49,12 +49,18 @@ export function selectAccount(
   const degraded = available.length === 0
   const candidates = degraded ? pool : available
 
+  // `degraded` is loop-invariant (fixed at line 49), so pick the scoring
+  // function ONCE rather than re-branching the ternary per candidate on this
+  // per-request hot path. The degraded fallback ranks by least weekly
+  // utilization; the normal path uses the full urgency scorer.
+  const scoreOf = degraded
+    ? (account: PoolAccount) => -weeklyUtil(account)
+    : (account: PoolAccount) => scoreAccount(account, cfg, now)
+
   let best: PoolAccount | null = null
   let bestScore = Number.NEGATIVE_INFINITY
   for (const account of candidates) {
-    const score = degraded
-      ? -weeklyUtil(account)
-      : scoreAccount(account, cfg, now)
+    const score = scoreOf(account)
     if (score > bestScore) {
       bestScore = score
       best = account
@@ -73,6 +79,10 @@ function findPinned(
 ): PoolAccount | null {
   const assigned = pool.sessions[sessionKey]
   if (!assigned || exclude.has(assigned.accountId)) return null
+  // Account ids are globally unique uuids, so `a.id === assigned.accountId`
+  // already pins a single account; the `&& a.providerID === providerID`
+  // conjunct is a deliberate guard against a stale CROSS-PROVIDER pin (e.g. an
+  // older session-key scheme) — keep it, it is not redundant.
   return (
     pool.accounts.find(
       (a) => a.id === assigned.accountId && a.providerID === providerID,

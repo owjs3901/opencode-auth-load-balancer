@@ -7,6 +7,10 @@ import type { PoolAccount } from '../../types'
  */
 function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   const parts = jwt.split('.')
+  // We read only the payload segment (`parts[1]`); the header and signature are
+  // intentionally ignored (see doc above — no signature verification). The guard
+  // is deliberately lenient (`< 2`, not `=== 3`) so a token shape with extra
+  // segments still decodes; the `try/catch` below rejects anything non-JSON.
   if (parts.length < 2 || !parts[1]) return null
   try {
     const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')

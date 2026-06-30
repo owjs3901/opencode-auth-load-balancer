@@ -30,9 +30,8 @@ function textOf(content: unknown): string {
  */
 function firstUserFromList(list: unknown): string | null {
   if (!Array.isArray(list)) return null
-  const user = (list as { role?: string; content?: unknown }[]).find(
-    (m) => m && m.role === 'user',
-  )
+  const messages = list as { role?: string; content?: unknown }[]
+  const user = messages.find((m) => m && m.role === 'user')
   return user ? textOf(user.content) : null
 }
 

@@ -99,20 +99,57 @@ async function applyCooldown(
   )
 }
 
-/** Pin a session to an account (preserving prompt cache) and prune stale assignments. */
-async function assignSession(
-  sessionKey: string | null,
+/**
+ * Fold the success path's two pool writes (`recordUsage` + session pin / TTL prune)
+ * into ONE atomic `mutatePool` callback. Each `mutatePool` acquires the in-process
+ * mutex AND the cross-process pool file lock, then reads + atomically rewrites
+ * `auth-load-balancer.json` — doing it twice per successful request (the dominant
+ * code path in production) doubled the post-response I/O lock cycles for no
+ * benefit, since the two effects touch disjoint pool fields and are commutative.
+ *
+ * Semantics are preserved exactly:
+ *  - `findAccount` returns null (account deleted mid-write) -> skip usage AND
+ *    `lastSelected` (matches `recordUsage`'s `if (!account) return` guard) but
+ *    still update the session pin (matches the old `assignSession`'s behavior,
+ *    which never consulted the account list).
+ *  - `sessionKey === null` -> skip the session pin entirely (matches
+ *    `assignSession`'s `if (!sessionKey) return` short-circuit).
+ *  - `bestEffort` still swallows `LockTimeoutError` / `PoolWriteError` so a
+ *    bookkeeping failure never fails an already-served response.
+ *
+ * The failure path keeps using the standalone `recordUsage` + `applyCooldown`
+ * pair (recordUsage now lives inside the rotation branch so we don't pay it on
+ * a request that succeeds first try).
+ */
+async function recordSuccess(
+  adapter: ProviderAdapter,
   accountId: string,
+  res: Response,
+  sessionKey: string | null,
   now: number,
   ttlMs: number,
 ): Promise<void> {
-  if (!sessionKey) return
-  const key = sessionKey
-  await bestEffort('session', () =>
+  const partial = adapter.parseUsageHeaders(res.headers, now)
+  await bestEffort('record-success', () =>
     mutatePool((pool) => {
-      pool.sessions[key] = { accountId, updatedAt: now }
-      for (const [k, value] of Object.entries(pool.sessions)) {
-        if (now - value.updatedAt > ttlMs) delete pool.sessions[k]
+      const account = findAccount(pool, accountId)
+      if (account) {
+        if (partial) {
+          if (partial.hourly !== undefined)
+            account.usage.hourly = partial.hourly
+          if (partial.weekly !== undefined)
+            account.usage.weekly = partial.weekly
+          if (partial.status !== undefined)
+            account.usage.status = partial.status
+          account.usage.capturedAt = now
+        }
+        pool.lastSelected[adapter.id] = accountId
+      }
+      if (sessionKey) {
+        pool.sessions[sessionKey] = { accountId, updatedAt: now }
+        for (const [k, value] of Object.entries(pool.sessions)) {
+          if (now - value.updatedAt > ttlMs) delete pool.sessions[k]
+        }
       }
     }),
   )
@@ -191,7 +228,15 @@ export function createLoadBalancedFetch(
     // body's size" intent is explicit at the call site. The CJK cost-gate
     // regression lock in plugin.test.ts exercises this value on both the
     // gate-held and gate-passed branches.
-    const requestBytes = bodyStr ? Buffer.byteLength(bodyStr, 'utf8') : 0
+    // Also skip the UTF-8 walk entirely when the cost gate is disabled
+    // (`cheapSwitchMaxBytes <= 0`, the default): `isCheapMoment` short-circuits
+    // on that condition BEFORE reading `requestBytes` (see select.ts), so the
+    // value is unused and a full UTF-8 walk of a 100+ KB request body would be
+    // pure waste on every request in the default config.
+    const requestBytes =
+      cfg.cheapSwitchMaxBytes > 0 && bodyStr
+        ? Buffer.byteLength(bodyStr, 'utf8')
+        : 0
 
     // `transformBody` / `transformUrl` are deterministic in `bodyStr` / `input`,
     // which are captured once and never reassigned across attempts. Both
@@ -255,10 +300,15 @@ export function createLoadBalancedFetch(
           body: transformedBody,
           headers,
         })
-        await recordUsage(adapter, account.id, res, Date.now())
 
+        // Split usage recording across the two outcomes so the dominant
+        // success path needs only ONE pool write (combined with the session
+        // pin via `recordSuccess`) instead of two. On rotation we still record
+        // usage + apply cooldown as separate writes — both are needed before
+        // the next attempt and folding them would couple unrelated effects.
         const cls = adapter.classifyError(res.status)
         if (cls === 'account' || cls === 'auth') {
+          await recordUsage(adapter, account.id, res, Date.now())
           const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
           await applyCooldown(account.id, ms, res)
           lastError = new Error(
@@ -270,9 +320,11 @@ export function createLoadBalancedFetch(
         }
 
         hooks.onUse?.(adapter.id, account)
-        await assignSession(
-          sessionKey,
+        await recordSuccess(
+          adapter,
           account.id,
+          res,
+          sessionKey,
           Date.now(),
           cfg.sessionTtlMs,
         )

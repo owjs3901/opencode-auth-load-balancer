@@ -95,10 +95,12 @@ export function buildStatus(
     if (list) list.push(a)
     else byProvider.set(a.providerID, [a])
   }
-  const providerIds = [...byProvider.keys()].sort()
-  return providerIds.map((providerID) => {
+  const sorted = [...byProvider.entries()].sort((a, b) =>
+    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0,
+  )
+  return sorted.map(([providerID, providerAccounts]) => {
     const currentAccountId = pool.lastSelected[providerID] ?? null
-    const ranked = (byProvider.get(providerID) ?? [])
+    const ranked = providerAccounts
       .map((a) => {
         const available = isAvailable(a, cfg, now)
         return {

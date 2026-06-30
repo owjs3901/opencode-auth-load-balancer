@@ -10,15 +10,16 @@ export const SESSION_HEADER = 'x-allb-session'
 function textOf(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
-  return content
-    .map((b) =>
+  let out = ''
+  for (const b of content) {
+    if (
       b &&
       typeof b === 'object' &&
       typeof (b as { text?: unknown }).text === 'string'
-        ? (b as { text: string }).text
-        : '',
     )
-    .join('')
+      out += (b as { text: string }).text
+  }
+  return out
 }
 
 /** Extract the first user message text from an Anthropic or OpenAI-Responses body. */

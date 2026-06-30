@@ -49,16 +49,17 @@ export function rewriteUrl(input: FetchInput): FetchInput {
 function extractText(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
-  return content
-    .map((block) =>
+  let out = ''
+  for (const block of content) {
+    const t =
       block &&
       typeof block === 'object' &&
       typeof (block as { text?: unknown }).text === 'string'
         ? (block as { text: string }).text
-        : '',
-    )
-    .filter(Boolean)
-    .join('\n')
+        : ''
+    if (t) out = out ? out + '\n' + t : t
+  }
+  return out
 }
 
 interface InputItem {

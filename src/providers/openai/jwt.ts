@@ -1,3 +1,5 @@
+import type { PoolAccount } from '../../types'
+
 /**
  * Decode a JWT payload WITHOUT signature verification. We only read first-party
  * claims (account id) from a token the OAuth server just issued to us, so there
@@ -39,4 +41,9 @@ export function extractAccountId(idToken: string): string | undefined {
   }
 
   return undefined
+}
+
+/** Stored ChatGPT account id, or one decoded from the access-token JWT. */
+export function resolveAccountId(account: PoolAccount): string | undefined {
+  return account.accountId ?? extractAccountId(account.access)
 }

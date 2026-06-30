@@ -1,7 +1,7 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
 import { clamp01, ignore, secondsToMs } from '../../util'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
-import { extractAccountId } from './jwt'
+import { resolveAccountId } from './jwt'
 
 /** Build a window from a percent (0..100) + reset epoch seconds. */
 function windowFromPercent(
@@ -98,7 +98,7 @@ export async function fetchUsage(
     'user-agent': USAGE_USER_AGENT,
     accept: 'application/json',
   }
-  const accountId = account.accountId ?? extractAccountId(account.access)
+  const accountId = resolveAccountId(account)
   if (accountId) headers['chatgpt-account-id'] = accountId
 
   let response: Response

@@ -38,6 +38,25 @@ export interface ProviderStatus {
   accounts: AccountStatus[]
 }
 
+/**
+ * The weekly reset time to display, or `0` when there is none to show.
+ *
+ * Mirrors `displayUtil`'s expiry rule (inlined here rather than imported, to
+ * avoid exporting a new score-core symbol, which would break the byte-identical
+ * TUI scoring sync): once a weekly window has reset (`resetAt > 0 && resetAt <=
+ * now`) its stored values are stale, so the dashboard shows `0%` util — return
+ * `0` here too so the `resets` column matches that `0%` instead of printing the
+ * elapsed window's old reset time. `resetAt === 0` (unknown) is NOT expired.
+ */
+function weeklyResetForDisplay(
+  weekly: PoolAccount['usage']['weekly'],
+  now: number,
+): number {
+  if (!weekly) return 0
+  const expired = weekly.resetAt > 0 && weekly.resetAt <= now
+  return expired ? 0 : weekly.resetAt
+}
+
 function toStatus(
   account: PoolAccount,
   now: number,
@@ -46,19 +65,12 @@ function toStatus(
   rank: number,
 ): AccountStatus {
   const weekly = account.usage.weekly
-  // Mirror `displayUtil`'s expiry rule (inlined to avoid exporting a new
-  // score-core symbol, which would break the byte-identical TUI scoring sync):
-  // once a weekly window has reset (`resetAt > 0 && resetAt <= now`) its stored
-  // values are stale, so the dashboard shows `0%` util — surface `0` here too so
-  // the `resets` column matches that `0%` instead of printing the elapsed
-  // window's old reset time. `resetAt === 0` (unknown) is NOT expired.
-  const weeklyExpired = !!weekly && weekly.resetAt > 0 && weekly.resetAt <= now
   return {
     id: account.id,
     label: account.label,
     weeklyUtil: displayUtil(weekly, now),
     hourlyUtil: displayUtil(account.usage.hourly, now),
-    weeklyResetAt: weekly && !weeklyExpired ? weekly.resetAt : 0,
+    weeklyResetAt: weeklyResetForDisplay(weekly, now),
     available,
     cooldownUntil: account.cooldownUntil,
     disabledReason: account.disabledReason,

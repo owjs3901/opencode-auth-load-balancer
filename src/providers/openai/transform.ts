@@ -77,26 +77,28 @@ function applyInstructions(obj: Record<string, unknown>): void {
     typeof obj.instructions === 'string' ? obj.instructions : ''
 
   if (Array.isArray(obj.input)) {
+    const input = obj.input as InputItem[]
     const systemTexts: string[] = []
-    const remaining: InputItem[] = []
-    let removedSystem = false
-    for (const raw of obj.input as InputItem[]) {
+    // Build `remaining` lazily: stay null until the FIRST system message is
+    // seen (back-filling the items already passed), so the common Codex
+    // follow-up turn (no system message present) pays zero extra allocation
+    // and `obj.input` is left referentially untouched below.
+    let remaining: InputItem[] | null = null
+    let i = 0
+    for (const raw of input) {
       if (raw && raw.type === 'message' && raw.role === 'system') {
-        removedSystem = true
+        if (remaining === null) remaining = input.slice(0, i)
         const text = extractText(raw.content)
         if (text) systemTexts.push(text)
-      } else {
+      } else if (remaining !== null) {
         remaining.push(raw)
       }
+      i++
     }
     if (systemTexts.length > 0) {
       instructions = [instructions, ...systemTexts].filter(Boolean).join('\n\n')
     }
-    // Only replace `obj.input` when a system message was actually removed;
-    // otherwise `remaining` is element-identical to the original, so leaving
-    // `obj.input` untouched avoids a full-array reallocation + copy on the
-    // common Codex follow-up turn (no system message present).
-    if (removedSystem) obj.input = remaining
+    if (remaining !== null) obj.input = remaining
   }
 
   obj.instructions = instructions.trim() || 'You are a helpful assistant.'

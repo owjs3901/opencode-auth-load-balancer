@@ -59,14 +59,15 @@ export function deriveSessionKey(
   if (!body) return null
   try {
     const parsed = JSON.parse(body) as Record<string, unknown>
-    const system =
-      typeof parsed.system === 'string'
-        ? parsed.system
+    const sys = parsed.system
+    const systemText =
+      typeof sys === 'string'
+        ? sys
         : typeof parsed.instructions === 'string'
           ? parsed.instructions
-          : JSON.stringify(parsed.system ?? '')
+          : JSON.stringify(sys ?? '')
     const hash = createHash('sha256')
-      .update(system)
+      .update(systemText)
       .update('\u0000')
       .update(firstUserText(parsed))
       .digest('hex')

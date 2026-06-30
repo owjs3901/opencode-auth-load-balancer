@@ -62,7 +62,9 @@ async function readRaw(): Promise<PoolFile> {
     }
     return {
       version: 1,
-      accounts: parsed.accounts as PoolAccount[],
+      // `Array.isArray` above is the runtime trust boundary; the narrowed
+      // `parsed.accounts` is already `PoolAccount[]`, so no extra cast is needed.
+      accounts: parsed.accounts,
       lastSelected: parsed.lastSelected ?? {},
       sessions: parsed.sessions ?? {},
     }

@@ -32,8 +32,18 @@ export function parseUsageHeaders(
   if (p === null && s === null) return null
 
   const out: Partial<UsageSnapshot> = { capturedAt: now }
-  const hourly = windowFromPercent(p, headers.get('x-codex-primary-reset-at'))
-  const weekly = windowFromPercent(s, headers.get('x-codex-secondary-reset-at'))
+  // Short-circuit before `headers.get('...reset-at')` when the matching
+  // percent header is missing — `windowFromPercent` returns null on a null
+  // percent anyway, so the map lookup was wasted work on every response that
+  // reported only one of the two windows (mirrors the Anthropic sibling).
+  const hourly =
+    p === null
+      ? null
+      : windowFromPercent(p, headers.get('x-codex-primary-reset-at'))
+  const weekly =
+    s === null
+      ? null
+      : windowFromPercent(s, headers.get('x-codex-secondary-reset-at'))
   if (hourly) out.hourly = hourly
   if (weekly) out.weekly = weekly
   return out

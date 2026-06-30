@@ -96,6 +96,11 @@ interface UsageEndpointResponse {
  * shipped both epoch-seconds and epoch-ms; values past 1e12 (≈ 2001 in ms) are
  * already ms, smaller ones are seconds. Shared by the number and numeric-string
  * branches of parseResetAt so the threshold lives in ONE place.
+ *
+ * Deliberately NOT delegated to `util.ts`'s `secondsToMs` (the reciprocal of the
+ * note there): `secondsToMs` ALWAYS multiplies by 1000, so it cannot accept the
+ * already-ms inputs this `> 1e12` heuristic must pass through unchanged. The two
+ * have different semantics (seconds-only vs seconds-or-ms) — do not unify them.
  */
 const msFromLoose = (n: number): number => (n > 1e12 ? n : n * 1000)
 

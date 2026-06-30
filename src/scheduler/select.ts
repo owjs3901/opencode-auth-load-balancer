@@ -16,6 +16,13 @@ export interface Selection {
   sticky: boolean
 }
 
+// Raw stored weekly utilization, NOT `utilOf`/`displayUtil` — the degraded
+// fallback ranks already-unavailable accounts by least-bad weekly use, and must
+// stay distinguishable even when a window just rolled over. This is the
+// reciprocal of the same raw expression in `src/status.ts`'s ranked-fallback
+// tie-breaker (see its comment at the `weeklyUtil:` field): the two are
+// deliberately NOT shared — score-core stays byte-synced with the TUI copy and
+// status.ts can't be imported into this hot path — so keep both inlined.
 function weeklyUtil(account: PoolAccount): number {
   return account.usage.weekly?.utilization ?? 0
 }

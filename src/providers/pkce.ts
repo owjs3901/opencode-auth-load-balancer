@@ -7,9 +7,7 @@
  */
 
 function base64UrlEncode(bytes: Uint8Array): string {
-  let bin = ''
-  for (const byte of bytes) bin += String.fromCharCode(byte)
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+  return Buffer.from(bytes).toString('base64url')
 }
 
 export async function generatePKCE(): Promise<{

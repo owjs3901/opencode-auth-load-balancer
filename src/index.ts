@@ -23,14 +23,25 @@ const PROVIDER_LABELS: Record<string, string> = {
   openai: 'ChatGPT/Codex',
 }
 
+interface ModelCost {
+  input: number
+  output: number
+  cache: { read: number; write: number }
+}
+
 interface LoaderProvider {
-  models: Record<string, { cost: unknown }>
+  models: Record<string, { cost: ModelCost }>
 }
 
 /** Subscription plans are flat-rate; zero out per-token cost so opencode shows $0. */
 function zeroOutCost(provider: LoaderProvider): void {
   for (const model of Object.values(provider.models)) {
-    model.cost = { input: 0, output: 0, cache: { read: 0, write: 0 } }
+    const cost: ModelCost = {
+      input: 0,
+      output: 0,
+      cache: { read: 0, write: 0 },
+    }
+    model.cost = cost
   }
 }
 

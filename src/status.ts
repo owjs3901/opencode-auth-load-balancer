@@ -17,6 +17,18 @@ const PROVIDER_NAMES: Record<string, string> = {
   openai: 'Codex',
 }
 
+/**
+ * Deterministic ASCII order for provider sections by id (`anthropic` before
+ * `openai`). Uses raw `< / >` rather than `localeCompare` to stay
+ * byte-deterministic regardless of host locale.
+ */
+function byProviderId(
+  a: [string, PoolAccount[]],
+  b: [string, PoolAccount[]],
+): number {
+  return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0
+}
+
 interface AccountStatus {
   id: string
   label: string
@@ -94,9 +106,7 @@ export function buildStatus(
     if (list) list.push(a)
     else byProvider.set(a.providerID, [a])
   }
-  const sorted = [...byProvider.entries()].sort((a, b) =>
-    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0,
-  )
+  const sorted = [...byProvider.entries()].sort(byProviderId)
   return sorted.map(([providerID, providerAccounts]) => {
     const currentAccountId = pool.lastSelected[providerID] ?? null
     const ranked = providerAccounts

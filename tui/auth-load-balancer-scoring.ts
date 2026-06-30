@@ -227,9 +227,11 @@ export function weeklyUrgency(
   now: number,
 ): number {
   // Hoist `account.usage.weekly` to a local so the body skips one chained
-  // property indirection per access on the per-candidate hot path (called
-  // by `selectAccount` for every account in the pool on every request and
-  // by `status.ts` on every dashboard render).
+  // property indirection per access on the per-candidate hot path (reached
+  // transitively via `scoreAccount` for every account in the pool — on every
+  // request through `selectAccount` and on every dashboard render through
+  // `status.ts`'s `buildStatus` — and directly from `selectForSession`'s
+  // drain branch).
   const weekly = account.usage.weekly
   const drainable = Math.max(0, cfg.weeklyDrainTarget - utilOf(weekly, now))
   // At/over the weekly drain target `drainable === 0`, so `urgency = 0 / (days*days) = 0`
@@ -269,4 +271,26 @@ export function scoreAccount(
   const resetFactor = clamp01(msToReset / HOURLY_WINDOW_MS)
   const pressure = hourlyUtil * resetFactor
   return urgency * (1 - cfg.hourlyInfluence * pressure)
+}
+
+/**
+ * Sort comparator shared by `src/status.ts` and the TUI sidebar ranking pipeline, so the
+ * dashboard's *ordering* rule can never silently drift from what the server displays —
+ * the same single-source guarantee `scoreAccount` provides for the *formula*. Both
+ * pipelines map each account into `{ available, score, weeklyUtil }` (the per-pipeline
+ * `weeklyUtil` field is computed locally — `src/status.ts` uses the raw stored value to
+ * keep tie-breaking deterministic for cooling-down accounts, the TUI uses `utilOf` to
+ * discard a window that already reset) and pass that shape here:
+ *
+ *   - available accounts come first (they're the only ones the scheduler will pick);
+ *   - among available accounts, higher `score` wins (matches `selectAccount`'s pick);
+ *   - among unavailable accounts, lower `weeklyUtil` wins — the "least bad cooling-down
+ *     account" surfaces first so a forced fall-through stays predictable.
+ */
+export function compareRanked<
+  T extends { available: boolean; score: number; weeklyUtil: number },
+>(x: T, y: T): number {
+  if (x.available !== y.available) return x.available ? -1 : 1
+  if (x.available) return y.score - x.score
+  return x.weeklyUtil - y.weeklyUtil
 }

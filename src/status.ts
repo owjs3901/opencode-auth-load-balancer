@@ -4,7 +4,12 @@ import {
   loadConfig,
   type SchedulerConfig,
 } from './scheduler/config'
-import { displayUtil, isAvailable, scoreAccount } from './scheduler/score-core'
+import {
+  compareRanked,
+  displayUtil,
+  isAvailable,
+  scoreAccount,
+} from './scheduler/score-core'
 import type { PoolAccount, PoolFile } from './types'
 
 const PROVIDER_NAMES: Record<string, string> = {
@@ -40,12 +45,20 @@ function toStatus(
   available: boolean,
   rank: number,
 ): AccountStatus {
+  const weekly = account.usage.weekly
+  // Mirror `displayUtil`'s expiry rule (inlined to avoid exporting a new
+  // score-core symbol, which would break the byte-identical TUI scoring sync):
+  // once a weekly window has reset (`resetAt > 0 && resetAt <= now`) its stored
+  // values are stale, so the dashboard shows `0%` util — surface `0` here too so
+  // the `resets` column matches that `0%` instead of printing the elapsed
+  // window's old reset time. `resetAt === 0` (unknown) is NOT expired.
+  const weeklyExpired = !!weekly && weekly.resetAt > 0 && weekly.resetAt <= now
   return {
     id: account.id,
     label: account.label,
-    weeklyUtil: displayUtil(account.usage.weekly, now),
+    weeklyUtil: displayUtil(weekly, now),
     hourlyUtil: displayUtil(account.usage.hourly, now),
-    weeklyResetAt: account.usage.weekly?.resetAt ?? 0,
+    weeklyResetAt: weekly && !weeklyExpired ? weekly.resetAt : 0,
     available,
     cooldownUntil: account.cooldownUntil,
     disabledReason: account.disabledReason,
@@ -93,11 +106,7 @@ export function buildStatus(
           weeklyUtil: a.usage.weekly?.utilization ?? 0,
         }
       })
-      .sort((x, y) => {
-        if (x.available !== y.available) return x.available ? -1 : 1
-        if (x.available) return y.score - x.score
-        return x.weeklyUtil - y.weeklyUtil
-      })
+      .sort(compareRanked)
     const accounts = ranked.map(({ a, available }, i) =>
       toStatus(a, now, a.id === currentAccountId, available, i + 1),
     )

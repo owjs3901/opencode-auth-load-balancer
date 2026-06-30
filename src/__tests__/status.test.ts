@@ -114,6 +114,31 @@ describe('buildStatus', () => {
     expect(stale.hourlyUtil).toBe(0) // elapsed window -> reset -> 0%
     expect(stale.weeklyUtil).toBe(0.48) // still-live window unchanged
   })
+
+  test('an expired weekly window reports weeklyResetAt 0 to match its 0% util', () => {
+    // The weekly window already reset (resetAt in the past): displayUtil discards
+    // its stale value -> weeklyUtil 0. weeklyResetAt must agree (0, rendered "-")
+    // rather than printing the elapsed window's old reset time alongside "0%".
+    const p = pool([acc({ id: 'expired', weekly: win(0.9, -HOUR) })], {
+      anthropic: 'expired',
+    })
+    const expired = buildStatus(p, NOW)[0]!.accounts.find(
+      (a) => a.id === 'expired',
+    )!
+    expect(expired.weeklyUtil).toBe(0)
+    expect(expired.weeklyResetAt).toBe(0)
+  })
+
+  test('an unknown weekly reset (resetAt 0) is preserved, not expired', () => {
+    // resetAt === 0 means "unknown", not expired: util keeps its stored value and
+    // weeklyResetAt stays 0 (already the unknown sentinel).
+    const p = pool([acc({ id: 'unknown', weekly: win(0.4, 0) })])
+    const unknown = buildStatus(p, NOW)[0]!.accounts.find(
+      (a) => a.id === 'unknown',
+    )!
+    expect(unknown.weeklyUtil).toBe(0.4)
+    expect(unknown.weeklyResetAt).toBe(0)
+  })
 })
 
 describe('renderStatus', () => {

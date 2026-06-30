@@ -93,22 +93,39 @@ export function stripToolPrefix(text: string): string {
   )
 }
 
+/**
+ * `rewriteUrl` calls this on EVERY Anthropic request (sole call site, codegraph
+ * verified), and the result is fully determined by the raw `ANTHROPIC_BASE_URL`
+ * string. Cache the parsed URL keyed by that raw value so the hot path skips a
+ * `new URL(...)` + validation per request whenever the env hasn't changed. The
+ * cache also stores `raw === undefined` so an UNSET env caches a `null` result
+ * (no re-trim per request). Invalidation is the natural consequence of keying
+ * by `raw` — if the env value changes (including being cleared), the next
+ * lookup misses and reseats the cache. `rewriteUrl` only reads
+ * `baseUrl.protocol` / `baseUrl.host` (never mutates), so sharing one cached
+ * `URL` instance across calls is safe.
+ */
+let cachedBase: { raw: string | undefined; url: URL | null } | null = null
 function resolveBaseUrl(): URL | null {
   const raw = process.env.ANTHROPIC_BASE_URL?.trim()
-  if (!raw) return null
-  try {
-    const baseUrl = new URL(raw)
-    if (
-      (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') ||
-      baseUrl.username ||
-      baseUrl.password
-    ) {
-      return null
+  if (cachedBase && cachedBase.raw === raw) return cachedBase.url
+  let url: URL | null = null
+  if (raw) {
+    try {
+      const baseUrl = new URL(raw)
+      if (
+        (baseUrl.protocol === 'http:' || baseUrl.protocol === 'https:') &&
+        !baseUrl.username &&
+        !baseUrl.password
+      ) {
+        url = baseUrl
+      }
+    } catch {
+      /* invalid URL → cached as null */
     }
-    return baseUrl
-  } catch {
-    return null
   }
+  cachedBase = { raw, url }
+  return url
 }
 
 /** Add ?beta=true for /v1/messages, and honor ANTHROPIC_BASE_URL overrides. */
@@ -156,7 +173,12 @@ function sanitizeSystemText(text: string): string {
 
   let result = filtered.join('\n\n')
   for (const rule of TEXT_REPLACEMENTS)
-    result = result.replace(rule.match, rule.replacement)
+    // replaceAll (not replace) so EVERY occurrence of each branded fingerprint
+    // phrase is rewritten — matching the upstream reference's `allOccurrences`
+    // semantics. A system prompt mentioning the branded phrase twice would
+    // otherwise leave the second copy intact and risk a disguised 400.
+    // `rule.match` is a literal string, so this is a safe global literal replace.
+    result = result.replaceAll(rule.match, rule.replacement)
   return result.trim()
 }
 

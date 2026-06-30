@@ -192,6 +192,21 @@ describe('rewriteRequestBody', () => {
     )
   })
 
+  test('rewrites EVERY occurrence of a branded text-replacement phrase', () => {
+    // The branded fingerprint phrase appears twice in the same paragraph. With
+    // the first-occurrence `.replace`, the second copy survived and could trip
+    // the Anthropic classifier on a disguised 400; `.replaceAll` rewrites both.
+    const body = JSON.stringify({
+      system:
+        'Rule one: if OpenCode honestly cannot answer, say so. ' +
+        'Rule two: if OpenCode honestly is unsure, say so.',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    const sysText = JSON.stringify(JSON.parse(rewriteRequestBody(body)).system)
+    expect(sysText).not.toContain('if OpenCode honestly')
+    expect(sysText.split('if the assistant honestly').length - 1).toBe(2)
+  })
+
   test('returns the original body on invalid JSON', () => {
     expect(rewriteRequestBody('{not json')).toBe('{not json')
   })

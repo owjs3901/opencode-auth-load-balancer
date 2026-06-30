@@ -226,11 +226,13 @@ export function weeklyUrgency(
   cfg: ScoreConfig,
   now: number,
 ): number {
-  const drainable = Math.max(
-    0,
-    cfg.weeklyDrainTarget - utilOf(account.usage.weekly, now),
-  )
-  const resetAt = account.usage.weekly?.resetAt ?? 0
+  // Hoist `account.usage.weekly` to a local so the body skips one chained
+  // property indirection per access on the per-candidate hot path (called
+  // by `selectAccount` for every account in the pool on every request and
+  // by `status.ts` on every dashboard render).
+  const weekly = account.usage.weekly
+  const drainable = Math.max(0, cfg.weeklyDrainTarget - utilOf(weekly, now))
+  const resetAt = weekly?.resetAt ?? 0
   const ms = resetAt > now ? resetAt - now : cfg.weekWindowMs
   const days = Math.max(ms, cfg.minResetMs) / DAY_MS + RESET_CUSHION_DAYS
   return drainable / (days * days)
@@ -252,8 +254,11 @@ export function scoreAccount(
   now: number,
 ): number {
   const urgency = weeklyUrgency(account, cfg, now)
-  const hourlyUtil = utilOf(account.usage.hourly, now)
-  const resetAt = account.usage.hourly?.resetAt ?? 0
+  // Hoist `account.usage.hourly` to a local — same rationale as `weekly`
+  // in `weeklyUrgency` above (per-candidate, per-request hot path).
+  const hourly = account.usage.hourly
+  const hourlyUtil = utilOf(hourly, now)
+  const resetAt = hourly?.resetAt ?? 0
   const msToReset = resetAt > now ? resetAt - now : HOURLY_WINDOW_MS
   const resetFactor = clamp01(msToReset / HOURLY_WINDOW_MS)
   const pressure = hourlyUtil * resetFactor

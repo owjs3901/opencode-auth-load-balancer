@@ -48,31 +48,38 @@ export function setOAuthHeaders(headers: Headers, accessToken: string): void {
 }
 
 function prefixToolNames(parsed: Record<string, unknown>): string {
+  // `parsed` is freshly produced by `JSON.parse(body)` in `rewriteRequestBody`
+  // (sole caller, codegraph verified) and never aliased, so mutating its
+  // `tools` / `messages` arrays in place is safe. The PREVIOUS shape allocated
+  // a brand new outer `tools` array (with a fresh shallow-copy per tool, even
+  // when `tool.name` was missing) AND a brand new outer `messages` array
+  // (whose `.map` callback simply returned each `msg` unchanged) per request
+  // on the inference hot path. Only the INNER `msg.content.map` still
+  // allocates — and only conditionally, for the tool_use blocks that need a
+  // renamed clone — because mutating `block.name` would rename the upstream
+  // assistant turn's recorded tool name.
   if (Array.isArray(parsed.tools)) {
-    parsed.tools = parsed.tools.map(
-      (tool: { name?: string; [k: string]: unknown }) => ({
-        ...tool,
-        name: tool.name ? prefixName(tool.name) : tool.name,
-      }),
-    )
+    for (const tool of parsed.tools as {
+      name?: string
+      [k: string]: unknown
+    }[]) {
+      if (tool.name) tool.name = prefixName(tool.name)
+    }
   }
 
   if (Array.isArray(parsed.messages)) {
-    parsed.messages = parsed.messages.map(
-      (msg: {
-        content?: Array<{ type: string; name?: string; [k: string]: unknown }>
-        [k: string]: unknown
-      }) => {
-        if (Array.isArray(msg.content)) {
-          msg.content = msg.content.map((block) =>
-            block.type === 'tool_use' && block.name
-              ? { ...block, name: prefixName(block.name) }
-              : block,
-          )
-        }
-        return msg
-      },
-    )
+    for (const msg of parsed.messages as {
+      content?: Array<{ type: string; name?: string; [k: string]: unknown }>
+      [k: string]: unknown
+    }[]) {
+      if (Array.isArray(msg.content)) {
+        msg.content = msg.content.map((block) =>
+          block.type === 'tool_use' && block.name
+            ? { ...block, name: prefixName(block.name) }
+            : block,
+        )
+      }
+    }
   }
 
   return JSON.stringify(parsed)

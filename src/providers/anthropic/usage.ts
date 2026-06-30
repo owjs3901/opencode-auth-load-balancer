@@ -20,12 +20,17 @@ function mapStatus(raw: string | null): UsageStatus | null {
  * response on the inference hot path; symmetric with `openai/usage.ts`'s
  * module-level `windowFromPercent` helper. Captures NOTHING from its caller —
  * `clamp01` and `secondsToMs` are module-imported.
+ *
+ * `utilRaw` is `string` (NOT `string | null`): `parseUsageHeaders` short-
+ * circuits on a null utilization header BEFORE calling, so the null branch
+ * here would be dead code (and the matching `headers.get(...reset)` call
+ * would have been a wasted map lookup for a value parseHeaderWindow would
+ * immediately discard).
  */
 function parseHeaderWindow(
-  utilRaw: string | null,
+  utilRaw: string,
   resetRaw: string | null,
 ): UsageWindow | null {
-  if (utilRaw === null) return null
   const util = Number(utilRaw)
   if (!Number.isFinite(util)) return null
   // secondsToMs absorbs the non-finite / overflow guard (util.ts).
@@ -49,14 +54,25 @@ export function parseUsageHeaders(
   if (h5 === null && h7 === null && status === null) return null
 
   const out: Partial<UsageSnapshot> = { capturedAt: now }
-  const hourly = parseHeaderWindow(
-    h5,
-    headers.get('anthropic-ratelimit-unified-5h-reset'),
-  )
-  const weekly = parseHeaderWindow(
-    h7,
-    headers.get('anthropic-ratelimit-unified-7d-reset'),
-  )
+  // Short-circuit before `headers.get('...reset')` when the matching
+  // utilization header is missing — `parseHeaderWindow` would only have
+  // discarded the reset value via its now-removed null guard, so the
+  // map lookup was wasted work on every response that reported only one
+  // of the two windows.
+  const hourly =
+    h5 === null
+      ? null
+      : parseHeaderWindow(
+          h5,
+          headers.get('anthropic-ratelimit-unified-5h-reset'),
+        )
+  const weekly =
+    h7 === null
+      ? null
+      : parseHeaderWindow(
+          h7,
+          headers.get('anthropic-ratelimit-unified-7d-reset'),
+        )
   if (hourly) out.hourly = hourly
   if (weekly) out.weekly = weekly
   const mapped = mapStatus(status)

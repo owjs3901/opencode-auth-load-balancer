@@ -91,6 +91,14 @@ interface UsageEndpointResponse {
   seven_day: UsageEndpointWindow | null
 }
 
+/**
+ * Map a finite, already-validated numeric reset value to epoch-ms. Anthropic has
+ * shipped both epoch-seconds and epoch-ms; values past 1e12 (≈ 2001 in ms) are
+ * already ms, smaller ones are seconds. Shared by the number and numeric-string
+ * branches of parseResetAt so the threshold lives in ONE place.
+ */
+const msFromLoose = (n: number): number => (n > 1e12 ? n : n * 1000)
+
 /** Decode resets_at which Anthropic has shipped as ISO string, epoch seconds, or epoch ms. */
 function parseResetAt(value: string | number | null | undefined): number {
   // Defensive nullish guard. The endpoint contract documents `string | number`,
@@ -115,11 +123,11 @@ function parseResetAt(value: string | number | null | undefined): number {
     // pool.usage.{hourly,weekly}.resetAt — silently breaking isWindowExpired,
     // weeklyUrgency (drainable / Infinity = 0 urgency), and relTime rendering.
     if (!Number.isFinite(value)) return 0
-    return value > 1e12 ? value : value * 1000 // ms vs seconds heuristic
+    return msFromLoose(value)
   }
   const asNum = Number(value)
   if (Number.isFinite(asNum) && value.trim() !== '') {
-    return asNum > 1e12 ? asNum : asNum * 1000
+    return msFromLoose(asNum)
   }
   const parsed = Date.parse(value)
   return Number.isFinite(parsed) ? parsed : 0

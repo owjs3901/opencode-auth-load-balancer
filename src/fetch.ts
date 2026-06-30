@@ -68,11 +68,14 @@ async function recordUsage(
   now: number,
 ): Promise<void> {
   const partial = adapter.parseUsageHeaders(res.headers, now)
+  // No usage headers (common on 401/403 auth rejections, which never carry quota
+  // headers) → nothing to record. Skip the cross-process pool lock + atomic
+  // rewrite entirely instead of taking it for a no-op callback.
+  if (!partial) return
   await bestEffort('usage', () =>
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
-      if (!account) return
-      if (partial) applyUsagePartial(account, partial, now)
+      if (account) applyUsagePartial(account, partial, now)
     }),
   )
 }

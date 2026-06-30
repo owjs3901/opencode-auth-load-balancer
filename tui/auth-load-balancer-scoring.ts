@@ -232,6 +232,9 @@ export function weeklyUrgency(
   // by `status.ts` on every dashboard render).
   const weekly = account.usage.weekly
   const drainable = Math.max(0, cfg.weeklyDrainTarget - utilOf(weekly, now))
+  // At/over the weekly drain target `drainable === 0`, so `urgency = 0 / (days*days) = 0`
+  // regardless of the divisor — skip the resetAt/ms/days/divide chain (exact identity).
+  if (drainable === 0) return 0
   const resetAt = weekly?.resetAt ?? 0
   const ms = resetAt > now ? resetAt - now : cfg.weekWindowMs
   const days = Math.max(ms, cfg.minResetMs) / DAY_MS + RESET_CUSHION_DAYS
@@ -258,6 +261,9 @@ export function scoreAccount(
   // in `weeklyUrgency` above (per-candidate, per-request hot path).
   const hourly = account.usage.hourly
   const hourlyUtil = utilOf(hourly, now)
+  // With no 5h pressure `pressure === 0`, so `score = urgency * (1 - influence*0) = urgency`
+  // — skip the resetAt/msToReset/resetFactor/multiply chain (exact identity).
+  if (hourlyUtil === 0) return urgency
   const resetAt = hourly?.resetAt ?? 0
   const msToReset = resetAt > now ? resetAt - now : HOURLY_WINDOW_MS
   const resetFactor = clamp01(msToReset / HOURLY_WINDOW_MS)

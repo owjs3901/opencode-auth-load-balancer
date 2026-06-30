@@ -23,11 +23,11 @@ function textOf(content: unknown): string {
 
 /** Extract the first user message text from an Anthropic or OpenAI-Responses body. */
 function firstUserText(parsed: Record<string, unknown>): string {
-  const lists = [parsed.messages, parsed.input].filter(Array.isArray) as Array<
-    { role?: string; content?: unknown }[]
-  >
-  for (const list of lists) {
-    const user = list.find((m) => m && m.role === 'user')
+  for (const list of [parsed.messages, parsed.input]) {
+    if (!Array.isArray(list)) continue
+    const user = (list as { role?: string; content?: unknown }[]).find(
+      (m) => m && m.role === 'user',
+    )
     if (user) return textOf(user.content)
   }
   return ''

@@ -172,10 +172,8 @@ export interface FetchHooks {
  */
 function noUsableAccountResponse(providerID: string): Response {
   const message = `No usable ${providerID} account in the auth-load-balancer pool. Run "opencode auth login" to add or re-login an account.`
-  const body =
-    providerID === 'anthropic'
-      ? { type: 'error', error: { type: 'authentication_error', message } }
-      : { error: { type: 'authentication_error', message } }
+  const error = { type: 'authentication_error', message }
+  const body = providerID === 'anthropic' ? { type: 'error', error } : { error }
   return new Response(JSON.stringify(body), {
     status: 401,
     headers: { 'content-type': 'application/json' },

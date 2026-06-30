@@ -78,8 +78,10 @@ function applyInstructions(obj: Record<string, unknown>): void {
   if (Array.isArray(obj.input)) {
     const systemTexts: string[] = []
     const remaining: InputItem[] = []
+    let removedSystem = false
     for (const raw of obj.input as InputItem[]) {
       if (raw && raw.type === 'message' && raw.role === 'system') {
+        removedSystem = true
         const text = extractText(raw.content)
         if (text) systemTexts.push(text)
       } else {
@@ -89,7 +91,11 @@ function applyInstructions(obj: Record<string, unknown>): void {
     if (systemTexts.length > 0) {
       instructions = [instructions, ...systemTexts].filter(Boolean).join('\n\n')
     }
-    obj.input = remaining
+    // Only replace `obj.input` when a system message was actually removed;
+    // otherwise `remaining` is element-identical to the original, so leaving
+    // `obj.input` untouched avoids a full-array reallocation + copy on the
+    // common Codex follow-up turn (no system message present).
+    if (removedSystem) obj.input = remaining
   }
 
   obj.instructions = instructions.trim() || 'You are a helpful assistant.'

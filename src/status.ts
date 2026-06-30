@@ -17,7 +17,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   openai: 'Codex',
 }
 
-export interface AccountStatus {
+interface AccountStatus {
   id: string
   label: string
   weeklyUtil: number | null
@@ -32,7 +32,7 @@ export interface AccountStatus {
   rank: number
 }
 
-export interface ProviderStatus {
+interface ProviderStatus {
   providerID: string
   currentAccountId: string | null
   accounts: AccountStatus[]

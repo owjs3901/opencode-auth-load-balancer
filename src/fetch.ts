@@ -158,7 +158,7 @@ async function recordSuccess(
   )
 }
 
-export interface FetchHooks {
+interface FetchHooks {
   /** Called with the account that successfully served a request (for toasts/logs). */
   onUse?: (providerID: string, account: PoolAccount) => void
 }

@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-export interface DataDirEnv {
+interface DataDirEnv {
   override?: string | undefined
   xdgDataHome?: string | undefined
 }

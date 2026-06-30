@@ -44,7 +44,6 @@ function acc(o: {
     cooldownUntil: o.cooldownUntil ?? 0,
     disabledReason: o.disabled ?? null,
     createdAt: NOW,
-    lastUsedAt: 0,
   }
 }
 

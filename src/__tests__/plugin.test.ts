@@ -128,7 +128,6 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
     cooldownUntil: 0,
     disabledReason: null,
     createdAt: Date.now(),
-    lastUsedAt: 0,
     ...over,
   }
 }

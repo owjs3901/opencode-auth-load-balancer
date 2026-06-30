@@ -30,7 +30,6 @@ function makeAccount(
     cooldownUntil: 0,
     disabledReason: null,
     createdAt: now,
-    lastUsedAt: 0,
   }
 }
 

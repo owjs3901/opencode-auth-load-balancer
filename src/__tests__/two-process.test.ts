@@ -58,7 +58,6 @@ function staleAccount(id: string): PoolAccount {
     cooldownUntil: 0,
     disabledReason: null,
     createdAt: now,
-    lastUsedAt: 0,
   }
 }
 

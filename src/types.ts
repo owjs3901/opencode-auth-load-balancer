@@ -65,7 +65,6 @@ export interface PoolAccount {
   /** Non-null when the account needs manual re-login (e.g. revoked refresh token). */
   disabledReason: string | null
   createdAt: number
-  lastUsedAt: number
 }
 
 /** A conversation's sticky account assignment (preserves prompt cache across turns). */

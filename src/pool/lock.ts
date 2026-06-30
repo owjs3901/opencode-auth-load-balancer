@@ -5,6 +5,17 @@ import { dirname, join } from 'node:path'
 
 import { ignore, sleep } from '../util'
 
+// `os.hostname()` crosses the JS↔native boundary on every call
+// (`gethostname(2)` on Linux/macOS, `GetComputerNameW` on Windows), yet the
+// hostname is constant for the life of the process. `acquireLock` sits under
+// every `mutatePool` call (cross-process pool-write lock around usage
+// records, cooldowns, session pins, refresh commits), so an active session
+// resolves it multiple times per turn. Capture it ONCE at module load and
+// reuse the string in every lock-meta record — `pid: process.pid` and
+// `acquiredAt: Date.now()` are property reads and stay per-call; only
+// `randomUUID()` MUST stay per-call by the lock-ownership contract.
+const HOSTNAME = hostname()
+
 /**
  * Cross-process advisory file lock.
  *
@@ -149,7 +160,7 @@ export async function acquireLock(
   const meta: LockMeta = {
     ownerId: randomUUID(),
     pid: process.pid,
-    host: hostname(),
+    host: HOSTNAME,
     acquiredAt: Date.now(),
   }
   const deadline = Date.now() + opts.timeoutMs

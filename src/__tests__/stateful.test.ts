@@ -44,7 +44,6 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
     cooldownUntil: 0,
     disabledReason: null,
     createdAt: Date.now(),
-    lastUsedAt: 0,
     ...over,
   }
 }
@@ -933,6 +932,55 @@ describe('usage-refresh', () => {
     await expect(
       refreshUsageInBackground(adapter, Date.now()),
     ).resolves.toBeUndefined()
+  })
+
+  test('lastPoll throttle holds across a multi-provider pool', async () => {
+    // Regression: the prune gate compares lastPoll.size against
+    // pool.accounts.length (the historical alive-account upper bound), NOT
+    // the per-provider filtered subset. In a 2-anthropic + 1-openai pool the
+    // per-provider `accounts.length` is 2 but `lastPoll` grows to size 3
+    // once both providers have ever been polled — the pre-fix gate
+    // `lastPoll.size > accounts.length` (3 > 2) fired on every call and ran
+    // the idempotent prune loop pointlessly; the post-fix gate
+    // `lastPoll.size > pool.accounts.length` (3 > 3) skips the prune as
+    // designed. The user-visible behavior this fix preserves is the throttle:
+    // a re-entrant call within `SEED_TTL_MS` must short-circuit via
+    // `polledRecently` and NOT re-poll fetchUsage.
+    const a1 = account({
+      providerID: 'anthropic',
+      usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
+    })
+    const a2 = account({
+      providerID: 'anthropic',
+      usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
+    })
+    const o1 = account({
+      providerID: 'openai',
+      usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a1 }, { ...a2 }, { ...o1 })
+    })
+    let fetched = 0
+    const adapter = fakeAdapter({
+      fetchUsage: async () => {
+        fetched += 1
+        return {
+          hourly: null,
+          weekly: null,
+          status: null,
+          capturedAt: Date.now(),
+        }
+      },
+    })
+    const t = Date.now()
+    await refreshUsageInBackground(adapter, t)
+    // 2 anthropic accounts polled once each; the openai row is filtered out.
+    expect(fetched).toBe(2)
+    await refreshUsageInBackground(adapter, t)
+    await refreshUsageInBackground(adapter, t)
+    // 2nd + 3rd same-`t` calls short-circuit via polledRecently — throttle intact.
+    expect(fetched).toBe(2)
   })
 })
 

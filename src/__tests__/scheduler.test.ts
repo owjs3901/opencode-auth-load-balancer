@@ -49,7 +49,6 @@ function account(
     cooldownUntil: opts.cooldownUntil ?? 0,
     disabledReason: opts.disabled ?? null,
     createdAt: NOW,
-    lastUsedAt: 0,
   }
 }
 

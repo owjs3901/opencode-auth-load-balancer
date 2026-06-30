@@ -61,7 +61,6 @@ async function recordUsage(
         if (partial.status !== undefined) account.usage.status = partial.status
         account.usage.capturedAt = now
       }
-      account.lastUsedAt = now
       pool.lastSelected[adapter.id] = accountId
     }),
   )

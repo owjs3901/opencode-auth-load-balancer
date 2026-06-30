@@ -22,7 +22,6 @@ function acct(accountId: string | null): PoolAccount {
     cooldownUntil: 0,
     disabledReason: null,
     createdAt: 0,
-    lastUsedAt: 0,
   }
 }
 

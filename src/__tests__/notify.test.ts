@@ -33,7 +33,6 @@ function acc(
     cooldownUntil: 0,
     disabledReason: null,
     createdAt: 0,
-    lastUsedAt: 0,
   }
 }
 

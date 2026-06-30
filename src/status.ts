@@ -52,21 +52,6 @@ function isExpired(
   return !!window && window.resetAt > 0 && window.resetAt <= now
 }
 
-/**
- * The weekly reset time to display, or `0` when there is none to show.
- *
- * Once a weekly window has reset its stored values are stale, so the dashboard
- * shows `0%` util — return `0` here too so the `resets` column matches that `0%`
- * instead of printing the elapsed window's old reset time.
- */
-function weeklyResetForDisplay(
-  weekly: PoolAccount['usage']['weekly'],
-  now: number,
-): number {
-  if (!weekly) return 0
-  return isExpired(weekly, now) ? 0 : weekly.resetAt
-}
-
 function toStatus(
   account: PoolAccount,
   now: number,
@@ -75,12 +60,16 @@ function toStatus(
   rank: number,
 ): AccountStatus {
   const weekly = account.usage.weekly
+  // Evaluate the weekly window's expiry ONCE and reuse it for both display
+  // values: a reset window shows `0%` util, so the `resets` column must show
+  // `0` too (not the elapsed window's stale reset time) to match that `0%`.
+  const weeklyExpired = isExpired(weekly, now)
   return {
     id: account.id,
     label: account.label,
     weeklyUtil: displayUtil(weekly, now),
     hourlyUtil: displayUtil(account.usage.hourly, now),
-    weeklyResetAt: weeklyResetForDisplay(weekly, now),
+    weeklyResetAt: weekly && !weeklyExpired ? weekly.resetAt : 0,
     available,
     cooldownUntil: account.cooldownUntil,
     disabledReason: account.disabledReason,

@@ -89,13 +89,16 @@ export function buildStatus(
   now: number,
   cfg: SchedulerConfig = DEFAULT_CONFIG,
 ): ProviderStatus[] {
-  const providerIds = [
-    ...new Set(pool.accounts.map((a) => a.providerID)),
-  ].sort()
+  const byProvider = new Map<string, PoolAccount[]>()
+  for (const a of pool.accounts) {
+    const list = byProvider.get(a.providerID)
+    if (list) list.push(a)
+    else byProvider.set(a.providerID, [a])
+  }
+  const providerIds = [...byProvider.keys()].sort()
   return providerIds.map((providerID) => {
     const currentAccountId = pool.lastSelected[providerID] ?? null
-    const ranked = pool.accounts
-      .filter((a) => a.providerID === providerID)
+    const ranked = (byProvider.get(providerID) ?? [])
       .map((a) => {
         const available = isAvailable(a, cfg, now)
         return {

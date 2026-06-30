@@ -22,16 +22,25 @@ function textOf(content: unknown): string {
   return out
 }
 
+/**
+ * Find the first user message's text in a messages/input list. Lifted to module
+ * scope (like `parseHeaderWindow` / `windowFromPercent`) so we don't reallocate a
+ * closure per call. Captures NOTHING from its caller — only its `list` argument
+ * and the module-level `textOf`.
+ */
+function firstUserFromList(list: unknown): string | null {
+  if (!Array.isArray(list)) return null
+  const user = (list as { role?: string; content?: unknown }[]).find(
+    (m) => m && m.role === 'user',
+  )
+  return user ? textOf(user.content) : null
+}
+
 /** Extract the first user message text from an Anthropic or OpenAI-Responses body. */
 function firstUserText(parsed: Record<string, unknown>): string {
-  const fromList = (list: unknown): string | null => {
-    if (!Array.isArray(list)) return null
-    const user = (list as { role?: string; content?: unknown }[]).find(
-      (m) => m && m.role === 'user',
-    )
-    return user ? textOf(user.content) : null
-  }
-  return fromList(parsed.messages) ?? fromList(parsed.input) ?? ''
+  return (
+    firstUserFromList(parsed.messages) ?? firstUserFromList(parsed.input) ?? ''
+  )
 }
 
 /**

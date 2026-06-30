@@ -56,7 +56,7 @@ export function selectAccount(
   const degraded = available.length === 0
   const candidates = degraded ? pool : available
 
-  // `degraded` is loop-invariant (fixed at line 49), so pick the scoring
+  // `degraded` is loop-invariant (fixed above before the loop), so pick the scoring
   // function ONCE rather than re-branching the ternary per candidate on this
   // per-request hot path. The degraded fallback ranks by least weekly
   // utilization; the normal path uses the full urgency scorer.

@@ -39,22 +39,32 @@ interface ProviderStatus {
 }
 
 /**
+ * Whether a usage window has already reset (its stored values are stale).
+ *
+ * Mirrors `displayUtil`'s expiry rule (re-spelled here rather than imported, to
+ * avoid exporting a new score-core symbol, which would break the byte-identical
+ * TUI scoring sync). A `null` window or `resetAt === 0` (unknown) is NOT expired.
+ */
+function isExpired(
+  window: PoolAccount['usage']['weekly'],
+  now: number,
+): boolean {
+  return !!window && window.resetAt > 0 && window.resetAt <= now
+}
+
+/**
  * The weekly reset time to display, or `0` when there is none to show.
  *
- * Mirrors `displayUtil`'s expiry rule (inlined here rather than imported, to
- * avoid exporting a new score-core symbol, which would break the byte-identical
- * TUI scoring sync): once a weekly window has reset (`resetAt > 0 && resetAt <=
- * now`) its stored values are stale, so the dashboard shows `0%` util — return
- * `0` here too so the `resets` column matches that `0%` instead of printing the
- * elapsed window's old reset time. `resetAt === 0` (unknown) is NOT expired.
+ * Once a weekly window has reset its stored values are stale, so the dashboard
+ * shows `0%` util — return `0` here too so the `resets` column matches that `0%`
+ * instead of printing the elapsed window's old reset time.
  */
 function weeklyResetForDisplay(
   weekly: PoolAccount['usage']['weekly'],
   now: number,
 ): number {
   if (!weekly) return 0
-  const expired = weekly.resetAt > 0 && weekly.resetAt <= now
-  return expired ? 0 : weekly.resetAt
+  return isExpired(weekly, now) ? 0 : weekly.resetAt
 }
 
 function toStatus(

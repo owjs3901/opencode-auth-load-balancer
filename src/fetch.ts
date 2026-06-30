@@ -6,7 +6,7 @@ import { ensureAccessToken } from './refresh'
 import { loadConfig } from './scheduler/config'
 import { selectForSession } from './scheduler/select'
 import { deriveSessionKey, SESSION_HEADER } from './session'
-import type { PoolAccount } from './types'
+import type { PoolAccount, UsageSnapshot } from './types'
 import { refreshUsageInBackground } from './usage-refresh'
 import { ignore } from './util'
 
@@ -44,6 +44,23 @@ export async function bestEffort(
   }
 }
 
+/**
+ * Merge a parsed usage partial into an account's usage snapshot in place. Shared
+ * by `recordUsage` (rotation path) and `recordSuccess` (success path) so the
+ * field-merge contract lives in ONE place and the two paths can never diverge.
+ * Only defined fields overwrite; `capturedAt` is always stamped with `now`.
+ */
+function applyUsagePartial(
+  account: PoolAccount,
+  partial: Partial<UsageSnapshot>,
+  now: number,
+): void {
+  if (partial.hourly !== undefined) account.usage.hourly = partial.hourly
+  if (partial.weekly !== undefined) account.usage.weekly = partial.weekly
+  if (partial.status !== undefined) account.usage.status = partial.status
+  account.usage.capturedAt = now
+}
+
 async function recordUsage(
   adapter: ProviderAdapter,
   accountId: string,
@@ -55,13 +72,7 @@ async function recordUsage(
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
       if (!account) return
-      if (partial) {
-        if (partial.hourly !== undefined) account.usage.hourly = partial.hourly
-        if (partial.weekly !== undefined) account.usage.weekly = partial.weekly
-        if (partial.status !== undefined) account.usage.status = partial.status
-        account.usage.capturedAt = now
-      }
-      pool.lastSelected[adapter.id] = accountId
+      if (partial) applyUsagePartial(account, partial, now)
     }),
   )
 }
@@ -134,15 +145,7 @@ async function recordSuccess(
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
       if (account) {
-        if (partial) {
-          if (partial.hourly !== undefined)
-            account.usage.hourly = partial.hourly
-          if (partial.weekly !== undefined)
-            account.usage.weekly = partial.weekly
-          if (partial.status !== undefined)
-            account.usage.status = partial.status
-          account.usage.capturedAt = now
-        }
+        if (partial) applyUsagePartial(account, partial, now)
         pool.lastSelected[adapter.id] = accountId
       }
       if (sessionKey) {

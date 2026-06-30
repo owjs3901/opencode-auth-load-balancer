@@ -61,31 +61,18 @@ function applyUsagePartial(
   account.usage.capturedAt = now
 }
 
-async function recordUsage(
-  adapter: ProviderAdapter,
-  accountId: string,
-  res: Response,
-  now: number,
-): Promise<void> {
-  const partial = adapter.parseUsageHeaders(res.headers, now)
-  // No usage headers (common on 401/403 auth rejections, which never carry quota
-  // headers) → nothing to record. Skip the cross-process pool lock + atomic
-  // rewrite entirely instead of taking it for a no-op callback.
-  if (!partial) return
-  await bestEffort('usage', () =>
-    mutatePool((pool) => {
-      const account = findAccount(pool, accountId)
-      if (account) applyUsagePartial(account, partial, now)
-    }),
-  )
-}
-
-async function applyCooldown(
-  accountId: string,
-  fallbackMs: number,
+/**
+ * Compute the absolute cooldown target (epoch ms) for a rejected response.
+ * Defaults to `now + fallbackMs`, but honors `Retry-After` (RFC 9110 §10.2.3):
+ * either delay-seconds or an HTTP-date. Pure (takes `now` explicitly) so both
+ * the standalone `applyCooldown` and the folded `recordRotation` write share
+ * the exact same parsing + overflow-guard math instead of re-implementing it.
+ */
+function cooldownUntilFrom(
   res: Response | null,
-): Promise<void> {
-  const now = Date.now()
+  fallbackMs: number,
+  now: number,
+): number {
   let until = now + fallbackMs
   const retryAfter = res?.headers.get('retry-after')
   if (retryAfter) {
@@ -104,11 +91,52 @@ async function applyCooldown(
       if (Number.isFinite(httpDate) && httpDate > now) until = httpDate
     }
   }
+  return until
+}
+
+async function applyCooldown(
+  accountId: string,
+  fallbackMs: number,
+  res: Response | null,
+): Promise<void> {
+  const until = cooldownUntilFrom(res, fallbackMs, Date.now())
   await bestEffort('cooldown', () =>
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
       if (account)
         account.cooldownUntil = Math.max(account.cooldownUntil, until)
+    }),
+  )
+}
+
+/**
+ * Fold the rotation path's two pool writes (`recordUsage` + `applyCooldown`)
+ * into ONE atomic `mutatePool`. On a 429/`account` rotation the response carries
+ * usage headers AND we must cool the account down before the next attempt; the
+ * two effects touch disjoint fields (`usage.*` vs `cooldownUntil`), are
+ * commutative, and both must land before retrying — so a single lock+rewrite
+ * cycle suffices instead of two, mirroring `recordSuccess` on the success path.
+ * This halves post-response lock cycles during a rate-limit storm (the most
+ * lock-contended moment). `cooldownUntilFrom` is read with the SAME `now` used
+ * for the usage stamp so the write is internally consistent. `bestEffort` still
+ * swallows `LockTimeoutError` / `PoolWriteError` so a bookkeeping failure never
+ * fails an already-served response.
+ */
+async function recordRotation(
+  adapter: ProviderAdapter,
+  accountId: string,
+  res: Response,
+  fallbackMs: number,
+  now: number,
+): Promise<void> {
+  const partial = adapter.parseUsageHeaders(res.headers, now)
+  const until = cooldownUntilFrom(res, fallbackMs, now)
+  await bestEffort('rotation', () =>
+    mutatePool((pool) => {
+      const account = findAccount(pool, accountId)
+      if (!account) return
+      if (partial) applyUsagePartial(account, partial, now)
+      account.cooldownUntil = Math.max(account.cooldownUntil, until)
     }),
   )
 }
@@ -307,14 +335,14 @@ export function createLoadBalancedFetch(
 
         // Split usage recording across the two outcomes so the dominant
         // success path needs only ONE pool write (combined with the session
-        // pin via `recordSuccess`) instead of two. On rotation we still record
-        // usage + apply cooldown as separate writes — both are needed before
-        // the next attempt and folding them would couple unrelated effects.
+        // pin via `recordSuccess`) instead of two. On rotation we fold the
+        // usage record + cooldown into ONE pool write via `recordRotation`
+        // (disjoint, commutative fields that both must land before retrying),
+        // halving post-response lock cycles during a rate-limit storm.
         const cls = adapter.classifyError(res.status)
         if (cls === 'account' || cls === 'auth') {
-          await recordUsage(adapter, account.id, res, now)
           const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
-          await applyCooldown(account.id, ms, res)
+          await recordRotation(adapter, account.id, res, ms, now)
           lastError = new Error(
             `${adapter.id} account "${account.label}" returned ${res.status}`,
           )

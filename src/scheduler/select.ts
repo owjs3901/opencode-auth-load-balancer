@@ -181,16 +181,18 @@ export function selectForSession(
   if (pinnedOverSoft || cfg.drainMigrate) {
     const pinnedUtil = maxUtil(pinned, now)
     const cheap = isCheapMoment(requestBytes, cfg)
+    // Imminence is only meaningful on the `pinnedOverSoft` side, so fold
+    // `pinnedOverSoft &&` into the definition: on the drain-only path
+    // (`!pinnedOverSoft && drainMigrate`) `pinnedImminent` is then plainly false
+    // and every read below collapses accordingly. The gate's left operand already
+    // short-circuits on `pinnedOverSoft`, so this is behavior-neutral.
     const pinnedImminent =
-      pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND
+      pinnedOverSoft && pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND
     if (
       // Within `IMMINENT_EXHAUSTION_BAND` of hard exhaustion, a forced (cost-gate-
       // ignoring) switch is coming next turn anyway; migrating now is cheaper because
       // the re-sent conversation only grows. So a PROACTIVE move bypasses the byte gate
-      // here — drain never does (it is opportunistic, not imminent). Imminence is only
-      // consulted on the `pinnedOverSoft` side, so `pinnedImminent` is hoisted once above
-      // (reused both in this gate and inside the block below); it is unused on the
-      // drain-only path (one cheap numeric compare, no behavior change).
+      // here — drain never does (it is opportunistic, not imminent).
       (pinnedOverSoft && (cheap || pinnedImminent)) ||
       (cfg.drainMigrate && cheap)
     ) {

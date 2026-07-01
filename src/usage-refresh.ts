@@ -59,8 +59,8 @@ export async function refreshUsageInBackground(
       if (!stale || polledRecently) return
       lastPoll.set(account.id, now)
       try {
-        await ensureAccessToken(adapter, account, Date.now())
-        const snapshot = await adapter.fetchUsage(account, Date.now())
+        await ensureAccessToken(adapter, account, now)
+        const snapshot = await adapter.fetchUsage(account, now)
         if (snapshot) {
           await mutatePool((p) => {
             const stored = findAccount(p, account.id)

@@ -118,9 +118,15 @@ export function rewriteRequestBody(body: string): string {
     obj.store = false
 
     const include = Array.isArray(obj.include) ? (obj.include as string[]) : []
-    const merged = new Set(include)
-    merged.add('reasoning.encrypted_content')
-    obj.include = [...merged]
+    // Common steady-state case: opencode already sends the encrypted-reasoning
+    // entry with no duplicates, so the array is already correct — reuse it and
+    // skip the Set construction + spread. Only rebuild (de-dup + append) when the
+    // entry is missing or the array carries duplicates.
+    obj.include =
+      include.includes('reasoning.encrypted_content') &&
+      new Set(include).size === include.length
+        ? include
+        : [...new Set([...include, 'reasoning.encrypted_content'])]
 
     applyInstructions(obj)
     delete obj.max_output_tokens

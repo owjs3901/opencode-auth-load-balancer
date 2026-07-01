@@ -181,15 +181,16 @@ export function selectForSession(
   const pinnedOverSoft = overSoftThreshold(pinned, cfg, now)
   if (pinnedOverSoft || cfg.drainMigrate) {
     const pinnedUtil = maxUtil(pinned, now)
-    // Within `IMMINENT_EXHAUSTION_BAND` of hard exhaustion, a forced (cost-gate-
-    // ignoring) switch is coming next turn anyway; migrating now is cheaper because
-    // the re-sent conversation only grows. So a PROACTIVE move bypasses the byte gate
-    // here — drain never does (it is opportunistic, not imminent).
-    const pinnedImminent =
-      pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND
     const cheap = isCheapMoment(requestBytes, cfg)
     if (
-      (pinnedOverSoft && (cheap || pinnedImminent)) ||
+      // Within `IMMINENT_EXHAUSTION_BAND` of hard exhaustion, a forced (cost-gate-
+      // ignoring) switch is coming next turn anyway; migrating now is cheaper because
+      // the re-sent conversation only grows. So a PROACTIVE move bypasses the byte gate
+      // here — drain never does (it is opportunistic, not imminent). Imminence is only
+      // consulted on the `pinnedOverSoft` side, so it is computed there (and reused
+      // inside the block below), never on the drain-only path.
+      (pinnedOverSoft &&
+        (cheap || pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND)) ||
       (cfg.drainMigrate && cheap)
     ) {
       const alt = selectAccount(
@@ -212,6 +213,8 @@ export function selectForSession(
           // switch is coming regardless). Otherwise: require a real headroom margin
           // so two near-threshold accounts don't ping-pong A->B->A, each switch
           // paying a full prompt-cache write.
+          const pinnedImminent =
+            pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND
           const altUtil = maxUtil(alt.account, now)
           const proactiveBetter = pinnedImminent
             ? altUtil < pinnedUtil

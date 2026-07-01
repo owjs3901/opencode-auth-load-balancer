@@ -60,12 +60,11 @@ export function deriveSessionKey(
   try {
     const parsed = JSON.parse(body) as Record<string, unknown>
     const sys = parsed.system
-    const systemText =
-      typeof sys === 'string'
-        ? sys
-        : typeof parsed.instructions === 'string'
-          ? parsed.instructions
-          : JSON.stringify(sys ?? '')
+    let systemText: string
+    if (typeof sys === 'string') systemText = sys
+    else if (typeof parsed.instructions === 'string')
+      systemText = parsed.instructions
+    else systemText = JSON.stringify(sys ?? '')
     const hash = createHash('sha256')
       .update(systemText)
       .update('\u0000')

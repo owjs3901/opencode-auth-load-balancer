@@ -177,10 +177,10 @@ function until(resetAt: number | undefined, now: number): string {
 function winPct(w: UsageWindow | null | undefined, now: number): string {
   return pct(displayUtil(toScoreWindow(w), now))
 }
-function stateOf(a: PoolAccount, now: number): string {
-  if (a.disabledReason) return 're-login'
-  if ((a.cooldownUntil ?? 0) > now) return 'cooldown'
-  if (maxUtil(toScore(a), now) >= cfg.exhaustedAt) return 'full'
+function stateOf(sa: ScoreAccount, now: number): string {
+  if (sa.disabledReason) return 're-login'
+  if (sa.cooldownUntil > now) return 'cooldown'
+  if (maxUtil(sa, now) >= cfg.exhaustedAt) return 'full'
   return ''
 }
 
@@ -274,6 +274,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           const available = isAvailable(sa, cfg, now)
           return {
             a,
+            sa,
             available,
             score: available
               ? scoreAccount(sa, cfg, now)
@@ -283,7 +284,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
         })
         .sort(compareRanked)
       let rank = 0
-      const rows: Row[] = ranked.map(({ a, available, score }) => {
+      const rows: Row[] = ranked.map(({ a, sa, available, score }) => {
         if (available) rank += 1
         return {
           id: a.id,
@@ -295,7 +296,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           wkReset: until(a.usage?.weekly?.resetAt, now),
           h: winPct(a.usage?.hourly, now),
           hReset: until(a.usage?.hourly?.resetAt, now),
-          state: stateOf(a, now),
+          state: stateOf(sa, now),
         }
       })
       return { provider: PROVIDER_NAMES[providerID] ?? providerID, rows }

@@ -1,6 +1,9 @@
 node_modules/
 dist/
+*.tsbuildinfo
+*.tgz
 *.log
 .DS_Store
 .codegraph/
 .omo
+coverage

@@ -1,0 +1,94 @@
+name: CI & Release
+
+# Single pipeline: the `quality` gate (typecheck / lint / test / build) must pass
+# before the `release` job (changepacks) is allowed to run — enforced via `needs`.
+#
+# changepacks-driven npm publishing:
+# On a pull request: the `release` job's changepacks/action posts/updates a
+# comment summarising the pending changepacks (whether the package will bump).
+# On push to main:
+# - if changepack logs (.changepacks/changepack_log_*.json) are pending, the
+#   action opens/updates a "Update Versions" PR that runs `changepacks update`;
+# - once that PR is merged (logs consumed), the action publishes the bumped
+#   package to npm (publish: true) and creates a GitHub release + tag.
+#
+# Uses NPM Trusted Publishing (OIDC) — no NPM_TOKEN secret required.
+# Configure the package on npmjs.com: package Settings > Trusted Publishers.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: ci-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: typecheck / lint / test / build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
+
+  release:
+    name: changepacks (version PR / publish)
+    # Gate: release runs ONLY if the quality job fully passed.
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # changepacks detects changes from git history — needs the full tree.
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        # NOT --frozen-lockfile: after the "Update Versions" PR bumps the
+        # package.json version, this re-syncs bun.lock before publish.
+        run: bun install
+
+      - name: Build (produce dist/ for publish)
+        run: bun run build
+
+      - name: Changepacks
+        uses: changepacks/action@main
+        id: changepacks
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          publish: true
+        env:
+          NPM_CONFIG_PROVENANCE: "true"

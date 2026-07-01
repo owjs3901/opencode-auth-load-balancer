@@ -118,7 +118,9 @@ export function rewriteRequestBody(body: string): string {
     obj.store = false
 
     const include = Array.isArray(obj.include) ? (obj.include as string[]) : []
-    obj.include = [...new Set([...include, 'reasoning.encrypted_content'])]
+    const merged = new Set(include)
+    merged.add('reasoning.encrypted_content')
+    obj.include = [...merged]
 
     applyInstructions(obj)
     delete obj.max_output_tokens

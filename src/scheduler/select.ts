@@ -165,9 +165,8 @@ export function selectForSession(
     return selectAccount(pool.accounts, providerID, now, cfg, exclude)
 
   // Forced: the pinned account can no longer serve requests.
-  if (!isAvailable(pinned, cfg, now)) {
+  if (!isAvailable(pinned, cfg, now))
     return selectAccount(pool.accounts, providerID, now, cfg, exclude)
-  }
 
   // Non-forced migration. The forced-switch path above already handled "the pin
   // can't serve"; here the pin is still usable, so any switch is OPTIONAL and must
@@ -182,15 +181,17 @@ export function selectForSession(
   if (pinnedOverSoft || cfg.drainMigrate) {
     const pinnedUtil = maxUtil(pinned, now)
     const cheap = isCheapMoment(requestBytes, cfg)
+    const pinnedImminent =
+      pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND
     if (
       // Within `IMMINENT_EXHAUSTION_BAND` of hard exhaustion, a forced (cost-gate-
       // ignoring) switch is coming next turn anyway; migrating now is cheaper because
       // the re-sent conversation only grows. So a PROACTIVE move bypasses the byte gate
       // here — drain never does (it is opportunistic, not imminent). Imminence is only
-      // consulted on the `pinnedOverSoft` side, so it is computed there (and reused
-      // inside the block below), never on the drain-only path.
-      (pinnedOverSoft &&
-        (cheap || pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND)) ||
+      // consulted on the `pinnedOverSoft` side, so `pinnedImminent` is hoisted once above
+      // (reused both in this gate and inside the block below); it is unused on the
+      // drain-only path (one cheap numeric compare, no behavior change).
+      (pinnedOverSoft && (cheap || pinnedImminent)) ||
       (cfg.drainMigrate && cheap)
     ) {
       const alt = selectAccount(
@@ -213,8 +214,6 @@ export function selectForSession(
           // switch is coming regardless). Otherwise: require a real headroom margin
           // so two near-threshold accounts don't ping-pong A->B->A, each switch
           // paying a full prompt-cache write.
-          const pinnedImminent =
-            pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND
           const altUtil = maxUtil(alt.account, now)
           const proactiveBetter = pinnedImminent
             ? altUtil < pinnedUtil

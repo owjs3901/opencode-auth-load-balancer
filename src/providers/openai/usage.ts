@@ -86,10 +86,9 @@ function endpointWindow(
     return null
   // secondsToMs absorbs the non-finite / overflow guard (util.ts); a missing /
   // non-number reset_at coerces to 0 → secondsToMs(0) → 0.
-  const resetSec = typeof w.reset_at === 'number' ? w.reset_at : 0
   return {
     utilization: clamp01(w.used_percent / 100),
-    resetAt: secondsToMs(resetSec),
+    resetAt: secondsToMs(Number(w.reset_at ?? 0)),
   }
 }
 

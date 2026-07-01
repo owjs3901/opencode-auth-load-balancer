@@ -13,8 +13,7 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   // segments still decodes; the `try/catch` below rejects anything non-JSON.
   if (parts.length < 2 || !parts[1]) return null
   try {
-    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
-    const json = Buffer.from(b64, 'base64').toString('utf8')
+    const json = Buffer.from(parts[1], 'base64url').toString('utf8')
     return JSON.parse(json) as Record<string, unknown>
   } catch {
     return null

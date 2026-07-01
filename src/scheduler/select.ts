@@ -179,7 +179,11 @@ export function selectForSession(
   // `maxUtil(pinned)` below is only paid on the migration-reachable path.
   const pinnedOverSoft = overSoftThreshold(pinned, cfg, now)
   if (pinnedOverSoft || cfg.drainMigrate) {
-    const pinnedUtil = maxUtil(pinned, now)
+    // `pinnedUtil` is read ONLY under `pinnedOverSoft` (in `pinnedImminent`, whose
+    // own definition short-circuits on `pinnedOverSoft`, and lines gated by
+    // `if (pinnedOverSoft)`). On the drain-only path (`!pinnedOverSoft &&
+    // drainMigrate`) it is never observed, so skip the `maxUtil` work there.
+    const pinnedUtil = pinnedOverSoft ? maxUtil(pinned, now) : 0
     const cheap = isCheapMoment(requestBytes, cfg)
     // Imminence is only meaningful on the `pinnedOverSoft` side, so fold
     // `pinnedOverSoft &&` into the definition: on the drain-only path

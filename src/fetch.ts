@@ -1,5 +1,6 @@
 import { LockTimeoutError } from './pool/lock'
 import { findAccount, mutatePool, PoolWriteError, readPool } from './pool/store'
+import { PROVIDER_ID as ANTHROPIC_PROVIDER_ID } from './providers/anthropic/constants'
 import { mergeHeaders } from './providers/headers'
 import type { FetchInput, ProviderAdapter } from './providers/types'
 import { ensureAccessToken } from './refresh'
@@ -204,7 +205,8 @@ interface FetchHooks {
 function noUsableAccountResponse(providerID: string): Response {
   const message = `No usable ${providerID} account in the auth-load-balancer pool. Run "opencode auth login" to add or re-login an account.`
   const error = { type: 'authentication_error', message }
-  const body = providerID === 'anthropic' ? { type: 'error', error } : { error }
+  const body =
+    providerID === ANTHROPIC_PROVIDER_ID ? { type: 'error', error } : { error }
   return new Response(JSON.stringify(body), {
     status: 401,
     headers: { 'content-type': 'application/json' },

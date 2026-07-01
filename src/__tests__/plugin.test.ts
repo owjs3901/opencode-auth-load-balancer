@@ -23,6 +23,7 @@ import { openaiAdapter } from '../providers/openai/adapter'
 import { loadConfig } from '../scheduler/config'
 import { SESSION_HEADER } from '../session'
 import type { PoolAccount } from '../types'
+import { refreshUsageInBackground } from '../usage-refresh'
 
 const realFetch = globalThis.fetch
 type Responder = (
@@ -1184,6 +1185,172 @@ describe('toast on switch + status tool', () => {
       expect(hooks).toBeTypeOf('object')
       expect(hooks).not.toBeNull()
     }
+  })
+})
+
+describe('out-of-band weekly reset (e.g. a promotional server-side quota reset)', () => {
+  test('a response carrying only 5h/status headers must NOT mark the weekly snapshot fresh — the endpoint re-poll then picks up the reset', async () => {
+    const now = Date.now()
+    const seedAt = now - 60_000 // fresh (< SEED_TTL_MS) but distinguishable from `now`
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({
+          id: 'reset-hdr',
+          label: 'reset-hdr',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.9, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: seedAt,
+          },
+        }),
+      )
+    })
+    // Post-reset upstream shape: the fresh (empty) weekly window reports nothing,
+    // so the response carries ONLY the 5h + status headers.
+    respond = (url) => {
+      if (url.includes('/v1/messages'))
+        return new Response('ok', {
+          status: 200,
+          headers: {
+            'anthropic-ratelimit-unified-5h-utilization': '0.20',
+            'anthropic-ratelimit-unified-5h-reset': String(
+              Math.floor((now + 5 * 60 * 60 * 1000) / 1000),
+            ),
+            'anthropic-ratelimit-unified-status': 'allowed',
+          },
+        })
+      return new Response('{}', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+
+    const after = (await readPool()).accounts.find((x) => x.id === 'reset-hdr')
+    // Present fields merged...
+    expect(after?.usage.hourly?.utilization).toBeCloseTo(0.2, 5)
+    expect(after?.usage.status).toBe('allowed')
+    // ...but weekly is untouched AND the snapshot is NOT stamped fresh (the
+    // pre-fix unconditional `capturedAt = now` here suppressed the usage-endpoint
+    // re-poll forever, pinning the pre-reset 90% on the active account).
+    expect(after?.usage.weekly?.utilization).toBeCloseTo(0.9, 5)
+    expect(after?.usage.capturedAt).toBe(seedAt)
+
+    // Once the snapshot ages past SEED_TTL_MS, the authoritative endpoint poll
+    // must land the server-side reset (weekly -> 0%).
+    await mutatePool((pool) => {
+      const stored = pool.accounts.find((x) => x.id === 'reset-hdr')
+      if (stored) stored.usage.capturedAt = Date.now() - 6 * 60_000
+    })
+    const weeklyResetSec = Math.floor((now + 7 * 24 * 60 * 60 * 1000) / 1000)
+    respond = (url) => {
+      if (url.includes('/api/oauth/usage'))
+        return new Response(
+          JSON.stringify({
+            five_hour: {
+              utilization: 12,
+              resets_at: Math.floor((now + 5 * 60 * 60 * 1000) / 1000),
+            },
+            seven_day: { utilization: 0, resets_at: weeklyResetSec },
+          }),
+          { status: 200 },
+        )
+      return new Response('{}', { status: 200 })
+    }
+    await refreshUsageInBackground(anthropicAdapter, Date.now())
+    const reset = (await readPool()).accounts.find((x) => x.id === 'reset-hdr')
+    expect(reset?.usage.weekly?.utilization).toBe(0)
+    expect(reset?.usage.weekly?.resetAt).toBe(weeklyResetSec * 1000)
+    expect(reset?.usage.capturedAt).toBeGreaterThan(seedAt)
+  })
+
+  test('a header response without a 7d reset keeps the previously seen FIXED weekly anchor', async () => {
+    const now = Date.now()
+    const anchor = now + 7 * 60 * 60 * 1000 // fixed weekly anchor 7h away
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({
+          id: 'anchor-keep',
+          label: 'anchor-keep',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.9, resetAt: anchor },
+            status: null,
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    // Post-reset shape: utilization comes back (0) but the reset header is
+    // absent. The anchor is a FIXED per-account time — losing it made the
+    // scheduler assume a week of slack for a reset that is 7 hours away.
+    respond = (url) => {
+      if (url.includes('/v1/messages'))
+        return new Response('ok', {
+          status: 200,
+          headers: { 'anthropic-ratelimit-unified-7d-utilization': '0' },
+        })
+      return new Response('{}', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+    const after = (await readPool()).accounts.find(
+      (x) => x.id === 'anchor-keep',
+    )
+    expect(after?.usage.weekly).toEqual({ utilization: 0, resetAt: anchor })
+  })
+
+  test('auth_lb_status re-polls stale accounts before rendering, so the reset shows without any model request', async () => {
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({
+          id: 'status-stale',
+          label: 'status-stale',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 0.9, resetAt: now + 30 * 60 * 60 * 1000 },
+            status: null,
+            capturedAt: 0, // stale -> the status tool's refresh must poll it
+          },
+        }),
+      )
+      pool.lastSelected.anthropic = 'status-stale'
+    })
+    respond = (url) => {
+      if (url.includes('/api/oauth/usage'))
+        return new Response(
+          JSON.stringify({
+            five_hour: {
+              utilization: 1,
+              resets_at: Math.floor((now + 5 * 60 * 60 * 1000) / 1000),
+            },
+            seven_day: {
+              utilization: 3,
+              resets_at: Math.floor((now + 7 * 24 * 60 * 60 * 1000) / 1000),
+            },
+          }),
+          { status: 200 },
+        )
+      return new Response('{}', { status: 200 })
+    }
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+    const result = await hooks.tool.auth_lb_status.execute()
+    // The rendered dashboard reflects the POST-reset weekly (3%), not the stale 90%.
+    expect(result.output).toContain('status-stale')
+    expect(result.output).toContain('3%')
+    expect(result.output).not.toContain('90%')
+    const stored = (await readPool()).accounts.find(
+      (x) => x.id === 'status-stale',
+    )
+    expect(stored?.usage.weekly?.utilization).toBeCloseTo(0.03, 5)
   })
 })
 

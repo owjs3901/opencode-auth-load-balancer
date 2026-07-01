@@ -8,6 +8,7 @@ import { loadConfig } from './scheduler/config'
 import { selectForSession } from './scheduler/select'
 import { deriveSessionKey, SESSION_HEADER } from './session'
 import type { PoolAccount, UsageSnapshot } from './types'
+import { preserveWeeklyAnchor } from './usage-merge'
 import { refreshUsageInBackground } from './usage-refresh'
 import { ignore, sleepAbortable } from './util'
 
@@ -47,7 +48,17 @@ export async function bestEffort(
  * Merge a parsed usage partial into an account's usage snapshot in place. Shared
  * by `recordUsage` (rotation path) and `recordSuccess` (success path) so the
  * field-merge contract lives in ONE place and the two paths can never diverge.
- * Only defined fields overwrite; `capturedAt` is always stamped with `now`.
+ * Only defined fields overwrite.
+ *
+ * `capturedAt` is stamped ONLY when the partial actually delivered a WEEKLY
+ * window. `capturedAt` is the gate `refreshUsageInBackground` uses to decide
+ * whether the authoritative usage endpoint must be re-polled, and weekly is the
+ * PRIMARY scheduling signal that poll exists to backfill. Stamping it on a
+ * weekly-less partial (e.g. a response carrying only 5h/status headers — seen
+ * after Anthropic's out-of-band "special" weekly resets, when a fresh empty
+ * weekly window has nothing to report) marked the snapshot "fresh" without
+ * refreshing the weekly field, so the endpoint was never consulted and a stale
+ * pre-reset weekly value persisted indefinitely on the actively-used account.
  */
 function applyUsagePartial(
   account: PoolAccount,
@@ -55,9 +66,18 @@ function applyUsagePartial(
   now: number,
 ): void {
   if (partial.hourly !== undefined) account.usage.hourly = partial.hourly
-  if (partial.weekly !== undefined) account.usage.weekly = partial.weekly
   if (partial.status !== undefined) account.usage.status = partial.status
-  account.usage.capturedAt = now
+  if (partial.weekly !== undefined) {
+    // Weekly resets are FIXED per-account anchors: when the incoming window
+    // carries no reset time (post-reset headers/endpoint), keep the previously
+    // seen anchor (rolled forward) instead of downgrading to "unknown".
+    account.usage.weekly = preserveWeeklyAnchor(
+      partial.weekly,
+      account.usage.weekly,
+      now,
+    )
+    account.usage.capturedAt = now
+  }
 }
 
 /**

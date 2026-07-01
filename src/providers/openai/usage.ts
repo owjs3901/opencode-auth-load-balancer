@@ -72,17 +72,24 @@ interface UsageEndpointResponse {
 function endpointWindow(
   w: UsageEndpointWindow | null | undefined,
 ): UsageWindow | null {
+  // A null/absent window inside a valid `rate_limit` payload is AUTHORITATIVE
+  // "no usage recorded in this window" (fresh account, out-of-band quota reset,
+  // or idle past the window) — a true 0%, not "unknown". Synthesize a zero
+  // window so dashboards render "0%" instead of "-" (mirrors the Anthropic
+  // endpoint helper; "-" stays reserved for never-polled accounts). Genuinely
+  // broken bodies never get here: the `rate_limit` envelope check in
+  // `fetchUsage` is the shape guard (its absence discards the poll entirely,
+  // keeping the last-known snapshot). Scoring is unaffected:
+  // utilOf/weeklyUrgency already read a missing window as 0.
+  if (!w) return { utilization: 0, resetAt: 0 }
   // Symmetric with parseUsageHeaders() / windowFromPercent above and the
-  // Anthropic endpoint helper: a non-finite `used_percent` (e.g. JSON `1e500`
-  // → Infinity) passes the typeof gate but then `clamp01(Infinity/100)` falls
-  // into the `!Number.isFinite ⇒ 0` branch in score-core, ranking the
-  // malformed account as "0% used" → selected first. Reject it as null so
-  // the scheduler keeps the last-known snapshot instead.
-  if (
-    !w ||
-    typeof w.used_percent !== 'number' ||
-    !Number.isFinite(w.used_percent)
-  )
+  // Anthropic endpoint helper: a window that is PRESENT but malformed is
+  // unusable. A non-finite `used_percent` (e.g. JSON `1e500` → Infinity)
+  // passes the typeof gate but then `clamp01(Infinity/100)` falls into the
+  // `!Number.isFinite ⇒ 0` branch in score-core, ranking the malformed
+  // account as "0% used" → selected first. Reject it as null (NOT 0%) so the
+  // scheduler keeps the last-known snapshot instead.
+  if (typeof w.used_percent !== 'number' || !Number.isFinite(w.used_percent))
     return null
   // secondsToMs absorbs the non-finite / overflow guard (util.ts); a missing /
   // non-number reset_at coerces to 0 → secondsToMs(0) → 0.

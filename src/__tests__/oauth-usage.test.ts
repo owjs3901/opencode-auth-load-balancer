@@ -258,7 +258,9 @@ describe('anthropic usage', () => {
         { status: 200 },
       )
     u = await aFetchUsage(acct('anthropic', null), 0)
-    expect(u?.hourly).toBeNull()
+    // An explicitly-null window from the authoritative endpoint = no usage
+    // recorded = a TRUE 0% (rendered "0%"), not "unknown" (rendered "-").
+    expect(u?.hourly).toEqual({ utilization: 0, resetAt: 0 })
     expect(u?.weekly?.resetAt).toBe(0)
   })
 
@@ -293,10 +295,12 @@ describe('anthropic usage', () => {
   })
 
   test('fetchUsage rejects endpoint windows with missing or non-finite utilization', async () => {
-    // Missing utilization (undefined after JSON.parse): the pre-fix code
-    // silently produced { utilization: 0 } and the scheduler then ranked the
-    // account as having full headroom. Symmetric with parseUsageHeaders() and
-    // the OpenAI endpoint helper, the window must be rejected as null.
+    // Missing utilization (undefined after JSON.parse) on a PRESENT window: the
+    // pre-fix code silently produced { utilization: 0 } and the scheduler then
+    // ranked the account as having full headroom. Symmetric with
+    // parseUsageHeaders() and the OpenAI endpoint helper, a malformed window
+    // must be rejected as null — while an explicitly-null window (authoritative
+    // "no usage recorded") maps to a true 0% window instead.
     respond = () =>
       new Response(
         JSON.stringify({
@@ -307,7 +311,7 @@ describe('anthropic usage', () => {
       )
     let u = await aFetchUsage(acct('anthropic', null), 0)
     expect(u?.hourly).toBeNull()
-    expect(u?.weekly).toBeNull()
+    expect(u?.weekly).toEqual({ utilization: 0, resetAt: 0 })
 
     // Non-number utilization (string) — same outcome.
     respond = () =>
@@ -321,6 +325,41 @@ describe('anthropic usage', () => {
     u = await aFetchUsage(acct('anthropic', null), 0)
     expect(u?.hourly).toBeNull()
     expect(u?.weekly).toBeNull()
+  })
+
+  test('fetchUsage zeroes only shape-validated absent windows — a body with no window key at all keeps last-known', async () => {
+    // Genuinely broken data — schema drift, an error payload, a JSON proxy
+    // page — carries NEITHER window key: the poll must be DISCARDED (null →
+    // caller keeps the last-known snapshot), never read as "0% used".
+    respond = () =>
+      new Response(JSON.stringify({ error: { type: 'overloaded' } }), {
+        status: 200,
+      })
+    expect(await aFetchUsage(acct('anthropic', null), 0)).toBeNull()
+
+    // Explicit `null` windows in a recognizable usage body ARE authoritative
+    // "no usage recorded" (e.g. right after Anthropic's promotional weekly
+    // reset wiped the record) → true 0% windows, rendered "0%" not "-".
+    respond = () =>
+      new Response(JSON.stringify({ five_hour: null, seven_day: null }), {
+        status: 200,
+      })
+    const u = await aFetchUsage(acct('anthropic', null), 0)
+    expect(u?.hourly).toEqual({ utilization: 0, resetAt: 0 })
+    expect(u?.weekly).toEqual({ utilization: 0, resetAt: 0 })
+
+    // One key absent while the sibling parses: the sibling validates the
+    // shape, so the absent window is an authoritative 0% too.
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          seven_day: { utilization: 20, resets_at: 1900000000 },
+        }),
+        { status: 200 },
+      )
+    const v = await aFetchUsage(acct('anthropic', null), 0)
+    expect(v?.hourly).toEqual({ utilization: 0, resetAt: 0 })
+    expect(v?.weekly?.utilization).toBeCloseTo(0.2, 5)
   })
 
   test('fetchUsage treats resets_at:null as "no reset" (regression: parseResetAt(null) used to throw)', async () => {
@@ -526,7 +565,9 @@ describe('openai usage', () => {
         'chatgpt-account-id'
       ],
     ).toBeUndefined()
-    expect(u?.hourly).toBeNull()
+    // primary_window: null = authoritative "no usage in this window" → true 0%;
+    // secondary_window is PRESENT but has no used_percent → malformed → null.
+    expect(u?.hourly).toEqual({ utilization: 0, resetAt: 0 })
     expect(u?.weekly).toBeNull()
   })
 

@@ -20,7 +20,13 @@ export interface UsageSnapshot {
   /** Weekly (7-day rolling) window — the PRIMARY scheduling signal. */
   weekly: UsageWindow | null
   status: UsageStatus | null
-  /** epoch ms when this snapshot was captured (0 = never). */
+  /**
+   * epoch ms when the WEEKLY window was last captured (0 = never). Deliberately
+   * weekly-scoped: this is the staleness gate for the usage-endpoint re-poll
+   * (`refreshUsageInBackground`), and weekly is the primary signal that poll
+   * backfills — a response that updates only hourly/status must not mark the
+   * snapshot fresh, or an out-of-band weekly reset is never picked up.
+   */
   capturedAt: number
 }
 

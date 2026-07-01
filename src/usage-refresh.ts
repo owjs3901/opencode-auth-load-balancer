@@ -1,6 +1,7 @@
 import { findAccount, mutatePool, readPool } from './pool/store'
 import type { ProviderAdapter } from './providers/types'
 import { ensureAccessToken } from './refresh'
+import { preserveWeeklyAnchor } from './usage-merge'
 
 const SEED_TTL_MS = 5 * 60 * 1000
 
@@ -8,11 +9,14 @@ const SEED_TTL_MS = 5 * 60 * 1000
 const lastPoll = new Map<string, number>()
 
 /**
- * Best-effort: seed/refresh usage for accounts whose snapshot is missing or stale,
- * via the provider's dedicated usage endpoint. Throttled per account (at most one
- * poll per account per SEED_TTL_MS). Callers invoke it fire-and-forget, so it adds
- * no latency to the request path; failures are swallowed — response headers remain
- * the primary, always-fresh usage signal and this only fixes cold-start blindness.
+ * Best-effort: seed/refresh usage for accounts whose WEEKLY snapshot is missing or
+ * stale (`capturedAt` is stamped only when a weekly window arrives — see
+ * `applyUsagePartial` in fetch.ts), via the provider's dedicated usage endpoint.
+ * Throttled per account (at most one poll per account per SEED_TTL_MS). Callers
+ * invoke it fire-and-forget, so it adds no latency to the request path; failures
+ * are swallowed — response headers remain the primary, always-fresh usage signal
+ * and this fixes cold-start blindness AND out-of-band server-side resets (e.g. a
+ * promotional weekly-quota reset) that response headers alone don't converge.
  *
  * Returns a promise (for tests / explicit awaiting); request-path callers ignore it.
  */
@@ -64,7 +68,20 @@ export async function refreshUsageInBackground(
         if (snapshot) {
           await mutatePool((p) => {
             const stored = findAccount(p, account.id)
-            if (stored) stored.usage = snapshot
+            // Weekly resets are FIXED per-account anchors: an endpoint response
+            // whose weekly window lost its reset time (`resets_at: null` after
+            // an out-of-band quota reset) must not erase a previously seen
+            // anchor — preserve it (rolled forward) so the scheduler keeps
+            // ranking the account by its REAL, possibly imminent reset.
+            if (stored)
+              stored.usage = {
+                ...snapshot,
+                weekly: preserveWeeklyAnchor(
+                  snapshot.weekly,
+                  stored.usage.weekly,
+                  now,
+                ),
+              }
           })
         }
       } catch {

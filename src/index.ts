@@ -152,12 +152,28 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
   tool: {
     auth_lb_status: tool({
       description:
-        "Show the auth load-balancer pool: the in-use account per provider, each account's weekly and 5h usage, cooldowns, and the ranked next-candidate accounts.",
+        "Show the auth load-balancer pool: the in-use account per provider, each account's weekly and 5h usage, cooldowns, and the ranked next-candidate accounts. Refreshes stale usage from the provider usage endpoints (throttled) before rendering.",
       args: {},
-      execute: async () => ({
-        title: 'Auth Load Balancer',
-        output: renderStatus(await readStatus()),
-      }),
+      execute: async () => {
+        // The pool only converges to server-side truth via response headers (needs
+        // model requests in flight) or the usage-endpoint poll (request-path /
+        // startup only). Checking the dashboard is exactly when a user wants an
+        // out-of-band change — e.g. Anthropic's promotional weekly-quota reset —
+        // reflected NOW, so poll stale accounts here too. AWAITED so the freshly
+        // fetched numbers are in THIS render; the internal SEED_TTL/lastPoll
+        // throttle keeps repeat calls cheap, and failures fall back to the
+        // last-known snapshot (never fail the dashboard).
+        const now = Date.now()
+        await Promise.all(
+          [anthropicAdapter, openaiAdapter].map((adapter) =>
+            refreshUsageInBackground(adapter, now).catch(ignore),
+          ),
+        )
+        return {
+          title: 'Auth Load Balancer',
+          output: renderStatus(await readStatus()),
+        }
+      },
     }),
     auth_lb_rename: tool({
       description:

@@ -916,6 +916,43 @@ describe('usage-refresh', () => {
     expect(reread?.usage.capturedAt).toBe(0)
   })
 
+  test('an endpoint snapshot that lost the weekly reset keeps the stored anchor, rolled forward past now', async () => {
+    // Out-of-band quota reset: the endpoint reports utilization 0 with
+    // resets_at null. The account's FIXED weekly anchor (here: already
+    // elapsed) must survive the merge, advanced by one week — not collapse to
+    // "unknown" (which would demote the account to a full-window assumption).
+    const WEEK = 7 * 24 * 60 * 60 * 1000
+    const now = Date.now()
+    const pastAnchor = now - 60_000
+    const a = account({
+      usage: {
+        hourly: null,
+        weekly: { utilization: 1, resetAt: pastAnchor },
+        status: null,
+        capturedAt: 0, // stale -> polled
+      },
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      fetchUsage: async () => ({
+        hourly: { utilization: 0, resetAt: 0 },
+        weekly: { utilization: 0, resetAt: 0 },
+        status: null,
+        capturedAt: now,
+      }),
+    })
+    await refreshUsageInBackground(adapter, now)
+    const reread = findAccount(await readPool(), a.id)
+    expect(reread?.usage.weekly).toEqual({
+      utilization: 0,
+      resetAt: pastAnchor + WEEK,
+    })
+    // hourly windows are ROLLING (no fixed anchor) — never synthesized.
+    expect(reread?.usage.hourly).toEqual({ utilization: 0, resetAt: 0 })
+  })
+
   test('swallows errors from the refresh/usage path', async () => {
     const a = account({
       expires: Date.now() - 1,
@@ -1059,10 +1096,9 @@ describe('adapter delegation', () => {
         ),
       ).not.toBeNull()
       expect((await anthropicAdapter.refresh('r')).access).toBe('a')
-      // body parses but isn't a usage shape -> snapshot with empty windows
-      expect(
-        (await anthropicAdapter.fetchUsage(account(), 0))?.hourly,
-      ).toBeNull()
+      // body parses but carries NEITHER window key -> not the usage shape ->
+      // discard the poll entirely (keep last-known) instead of zeroing windows
+      expect(await anthropicAdapter.fetchUsage(account(), 0)).toBeNull()
       expect(
         await openaiAdapter.exchange(
           'https://cb?code=C&state=S',

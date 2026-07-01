@@ -125,8 +125,8 @@ function clamp01(n: number): number {
  * described has rolled over, so its stored utilization is STALE and no longer applies (a
  * 5h window that read 100% an hour ago has full headroom again, even before we re-poll).
  * `resetAt === 0` means the reset time is UNKNOWN — NOT expired — so an account with no
- * reset metadata keeps its reported utilization (matching the conservative "unknown
- * reset" handling in `weeklyUrgency` / `scoreAccount`) until real numbers arrive.
+ * reset metadata keeps its reported utilization until real numbers arrive (see
+ * `weeklyUrgency` / `scoreAccount` for how an unknown reset is then ranked).
  */
 function isWindowExpired(window: ScoreWindow, now: number): boolean {
   return window.resetAt > 0 && window.resetAt <= now
@@ -218,8 +218,20 @@ export function isAvailable(
  * account outranks one that merely has more quota left but resets far away (which is what
  * `remaining / time` failed to do). `drainable` caps the chase at `weeklyDrainTarget`
  * (stop favoring an account near the top of its window) and the cushion prevents a blow-up
- * at the reset instant. An unknown/stale reset time falls back to a full-window baseline,
- * keeping the account conservative (low urgency) until real reset metadata arrives.
+ * at the reset instant.
+ *
+ * Unknown reset metadata splits in two:
+ *  - Window PRESENT but `resetAt === 0` (utilization known, anchor unknown — the
+ *    post-quota-reset shape): weekly resets are FIXED per-account anchors, so
+ *    "unknown" does NOT imply "a full window away" — it may be hours away, wasting a
+ *    refillable budget every idle hour. Assume the reset is IMMINENT (`minResetMs`)
+ *    so the account is ranked FIRST and serves one request ASAP; that response's
+ *    headers reveal the real anchor and the score self-corrects immediately.
+ *    (`drainable` still gates this: an unknown-anchor account with no headroom
+ *    scores 0, so probing never routes to an exhausted account.)
+ *  - Window MISSING entirely (never polled — utilization unknown too): keep the
+ *    conservative full-window baseline. The free usage-endpoint poll resolves this
+ *    case within seconds without routing any traffic to it.
  */
 export function weeklyUrgency(
   account: ScoreAccount,
@@ -238,7 +250,15 @@ export function weeklyUrgency(
   // regardless of the divisor — skip the resetAt/ms/days/divide chain (exact identity).
   if (drainable === 0) return 0
   const resetAt = weekly?.resetAt ?? 0
-  const ms = resetAt > now ? resetAt - now : cfg.weekWindowMs
+  // See the jsdoc: a PRESENT window with an unknown anchor assumes an IMMINENT
+  // reset (probe-first — one request reveals the fixed anchor); a MISSING
+  // window (or a stale, elapsed anchor) keeps the full-window baseline.
+  const ms =
+    resetAt > now
+      ? resetAt - now
+      : weekly && resetAt === 0
+        ? cfg.minResetMs
+        : cfg.weekWindowMs
   const days = Math.max(ms, cfg.minResetMs) / DAY_MS + RESET_CUSHION_DAYS
   return drainable / (days * days)
 }

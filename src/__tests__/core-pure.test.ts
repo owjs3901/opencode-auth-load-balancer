@@ -6,7 +6,71 @@ import { opencodeDataDir, poolFilePath, resolveDataDir } from '../pool/paths'
 import { mergeHeaders } from '../providers/headers'
 import { DEFAULT_CONFIG, loadConfig } from '../scheduler/config'
 import { deriveSessionKey, SESSION_HEADER } from '../session'
+import { preserveWeeklyAnchor, rollWeeklyAnchorForward } from '../usage-merge'
 import { sleepAbortable } from '../util'
+
+const WEEK = 7 * 24 * 60 * 60 * 1000
+
+describe('rollWeeklyAnchorForward (fixed weekly anchors repeat every 7d)', () => {
+  const now = 1_000_000_000_000
+  test('no usable anchor stays unknown', () => {
+    expect(rollWeeklyAnchorForward(0, now)).toBe(0)
+    expect(rollWeeklyAnchorForward(-5, now)).toBe(0)
+    expect(rollWeeklyAnchorForward(Number.NaN, now)).toBe(0)
+    expect(rollWeeklyAnchorForward(Number.POSITIVE_INFINITY, now)).toBe(0)
+  })
+  test('a future anchor is returned untouched', () => {
+    expect(rollWeeklyAnchorForward(now + 123, now)).toBe(now + 123)
+  })
+  test('a past anchor rolls forward by whole weeks to the NEXT occurrence', () => {
+    expect(rollWeeklyAnchorForward(now - 1, now)).toBe(now - 1 + WEEK)
+    expect(rollWeeklyAnchorForward(now - WEEK - 1, now)).toBe(
+      now - 1 + WEEK, // two periods past -> +2 weeks
+    )
+  })
+  test('an anchor exactly at now rolls to the NEXT week (strictly future)', () => {
+    expect(rollWeeklyAnchorForward(now, now)).toBe(now + WEEK)
+  })
+})
+
+describe('preserveWeeklyAnchor (anchor survives resets_at-less merges)', () => {
+  const now = 1_000_000_000_000
+  test('incoming null / incoming with its own reset pass through untouched', () => {
+    expect(
+      preserveWeeklyAnchor(null, { utilization: 1, resetAt: 9 }, now),
+    ).toBe(null)
+    const fresh = { utilization: 0.2, resetAt: now + 5 }
+    expect(
+      preserveWeeklyAnchor(fresh, { utilization: 1, resetAt: now + 999 }, now),
+    ).toBe(fresh)
+  })
+  test('anchor-less incoming adopts the stored FUTURE anchor, keeping incoming utilization', () => {
+    expect(
+      preserveWeeklyAnchor(
+        { utilization: 0, resetAt: 0 },
+        { utilization: 1, resetAt: now + 7 * 60 * 60 * 1000 },
+        now,
+      ),
+    ).toEqual({ utilization: 0, resetAt: now + 7 * 60 * 60 * 1000 })
+  })
+  test('anchor-less incoming adopts a stored PAST anchor rolled forward a week', () => {
+    expect(
+      preserveWeeklyAnchor(
+        { utilization: 0, resetAt: 0 },
+        { utilization: 0.9, resetAt: now - 1000 },
+        now,
+      ),
+    ).toEqual({ utilization: 0, resetAt: now - 1000 + WEEK })
+  })
+  test('no stored anchor -> incoming stays as-is (unknown stays unknown)', () => {
+    const incoming = { utilization: 0, resetAt: 0 }
+    expect(preserveWeeklyAnchor(incoming, null, now)).toBe(incoming)
+    expect(preserveWeeklyAnchor(incoming, undefined, now)).toBe(incoming)
+    expect(
+      preserveWeeklyAnchor(incoming, { utilization: 0.5, resetAt: 0 }, now),
+    ).toBe(incoming)
+  })
+})
 
 describe('resolveDataDir', () => {
   test('override wins over everything', () => {

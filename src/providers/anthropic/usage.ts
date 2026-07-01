@@ -87,8 +87,8 @@ interface UsageEndpointWindow {
 }
 
 interface UsageEndpointResponse {
-  five_hour: UsageEndpointWindow | null
-  seven_day: UsageEndpointWindow | null
+  five_hour?: UsageEndpointWindow | null
+  seven_day?: UsageEndpointWindow | null
 }
 
 /**
@@ -138,11 +138,24 @@ function parseResetAt(value: string | number | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
-function endpointWindow(w: UsageEndpointWindow | null): UsageWindow | null {
-  if (!w) return null
-  // Symmetric with parseUsageHeaders() and the OpenAI endpoint helper:
-  // a window without a finite utilization is unusable — return null so the
-  // scheduler does NOT treat a malformed response as "0% used" and rank it first.
+function endpointWindow(
+  w: UsageEndpointWindow | null | undefined,
+): UsageWindow | null {
+  // Only reached AFTER fetchUsage's shape guard confirmed the body carries at
+  // least one window key — so a null/absent window here is the server
+  // deliberately reporting NO usage recorded in that window (e.g. right after
+  // Anthropic's out-of-band promotional weekly reset wipes the weekly record,
+  // or an account idle past the window). That is a true 0%, not "unknown":
+  // synthesize a zero window (resetAt 0 = no reset scheduled yet) so dashboards
+  // render "0%" instead of "-" ("-" stays reserved for never-polled accounts).
+  // Genuinely broken bodies (no window key at all) never get here — the shape
+  // guard discards the whole poll and keeps the last-known snapshot. Scoring is
+  // unaffected: utilOf/weeklyUrgency already read a missing window as 0.
+  if (!w) return { utilization: 0, resetAt: 0 }
+  // Symmetric with parseUsageHeaders() and the OpenAI endpoint helper: a window
+  // that is PRESENT but malformed (missing / non-finite utilization) is unusable
+  // — return null (NOT 0%) so the scheduler does not treat a malformed response
+  // as "full headroom" and rank the account first.
   if (typeof w.utilization !== 'number' || !Number.isFinite(w.utilization)) {
     return null
   }
@@ -154,7 +167,8 @@ function endpointWindow(w: UsageEndpointWindow | null): UsageWindow | null {
 
 /**
  * Poll the dedicated usage endpoint for authoritative 5h + 7d utilization without
- * consuming inference quota. Returns null on any failure (caller keeps last-known).
+ * consuming inference quota. Returns null on any failure — including a 200 whose
+ * body is not the usage shape — so the caller keeps the last-known snapshot.
  */
 export async function fetchUsage(
   account: PoolAccount,
@@ -184,6 +198,15 @@ export async function fetchUsage(
     .json()
     .catch(() => null)) as UsageEndpointResponse | null
   if (!json) return null
+  // Shape guard: a 200 whose body carries NEITHER window key is NOT the usage
+  // endpoint's shape (schema drift, an error payload, a proxy page that
+  // happens to be JSON). Such a body must never be read as "0% used" — discard
+  // the poll and keep the last-known snapshot. An EXPLICIT `five_hour: null` /
+  // `seven_day: null` (or one key present while the sibling is absent) still
+  // validates the shape, so a genuine "no usage recorded" maps to 0% below.
+  // (Property access is safe on JSON primitives, so `42` / `"x"` / `[]` all
+  // fall into this guard too.)
+  if (json.five_hour === undefined && json.seven_day === undefined) return null
 
   return {
     hourly: endpointWindow(json.five_hour),

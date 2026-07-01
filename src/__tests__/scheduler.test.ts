@@ -96,6 +96,38 @@ describe('weekly urgency = drainable / (daysToReset + cushion)^2', () => {
     )
     expect(u3).toBeGreaterThan(u7)
   })
+
+  test('known utilization + UNKNOWN anchor ranks FIRST (probe-first: the fixed reset may be imminent)', () => {
+    // Post-quota-reset shape: the endpoint confirmed 0% used but resets_at was
+    // null and no anchor was ever seen. Weekly anchors are FIXED per account,
+    // so "unknown" may be hours away — the scheduler must route ONE request to
+    // discover it instead of assuming a full week of slack.
+    const unknownAnchor = account('probe', {
+      weekly: { utilization: 0, resetAt: 0 },
+    })
+    const knownSoon = account('soon', { weekly: win(0.03, 29 * HOUR) })
+    const knownFar = account('far', { weekly: win(0.07, 5 * DAY) })
+    expect(pick([knownFar, unknownAnchor, knownSoon])).toBe('probe')
+    expect(weeklyUrgency(unknownAnchor, DEFAULT_CONFIG, NOW)).toBeGreaterThan(
+      weeklyUrgency(knownSoon, DEFAULT_CONFIG, NOW),
+    )
+  })
+
+  test('a MISSING weekly window (never polled) keeps the conservative baseline — no probe boost', () => {
+    // utilization itself is unknown; the free usage-endpoint poll resolves this
+    // without routing traffic, so it must NOT outrank a known soon-resetting
+    // account.
+    const neverPolled = account('blind', { weekly: null })
+    const knownSoon = account('soon', { weekly: win(0.03, 29 * HOUR) })
+    expect(pick([neverPolled, knownSoon])).toBe('soon')
+  })
+
+  test('an unknown-anchor account with NO headroom never gets the probe boost (drainable gates it)', () => {
+    const exhaustedUnknown = account('full', {
+      weekly: { utilization: 1.0, resetAt: 0 },
+    })
+    expect(weeklyUrgency(exhaustedUnknown, DEFAULT_CONFIG, NOW)).toBe(0)
+  })
 })
 
 describe('point 1: use the sooner-resetting account first', () => {

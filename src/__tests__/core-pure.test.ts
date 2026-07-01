@@ -6,6 +6,7 @@ import { opencodeDataDir, poolFilePath, resolveDataDir } from '../pool/paths'
 import { mergeHeaders } from '../providers/headers'
 import { DEFAULT_CONFIG, loadConfig } from '../scheduler/config'
 import { deriveSessionKey, SESSION_HEADER } from '../session'
+import { sleepAbortable } from '../util'
 
 describe('resolveDataDir', () => {
   test('override wins over everything', () => {
@@ -187,5 +188,33 @@ describe('mergeHeaders', () => {
   })
   test('returns empty headers when there is no init', () => {
     expect([...mergeHeaders('https://x').keys()]).toHaveLength(0)
+  })
+})
+
+describe('sleepAbortable', () => {
+  test('resolves after the delay when no signal is given', async () => {
+    await expect(sleepAbortable(10)).resolves.toBeUndefined()
+  })
+
+  test('resolves after the delay when a live (never-aborted) signal is given', async () => {
+    const ac = new AbortController()
+    await expect(sleepAbortable(10, ac.signal)).resolves.toBeUndefined()
+  })
+
+  test('rejects immediately when the signal is already aborted (no wait)', async () => {
+    const ac = new AbortController()
+    ac.abort()
+    const start = Date.now()
+    await expect(sleepAbortable(10_000, ac.signal)).rejects.toBeDefined()
+    expect(Date.now() - start).toBeLessThan(1000) // did not block the full 10 s
+  })
+
+  test('rejects the moment the signal aborts mid-wait (does not block the full delay)', async () => {
+    const ac = new AbortController()
+    const start = Date.now()
+    const p = sleepAbortable(10_000, ac.signal)
+    setTimeout(() => ac.abort(), 20)
+    await expect(p).rejects.toBeDefined()
+    expect(Date.now() - start).toBeLessThan(1000) // woke on abort, not after 10 s
   })
 })

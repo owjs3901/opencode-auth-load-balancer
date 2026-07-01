@@ -8,6 +8,22 @@ import {
   weeklyUrgency,
 } from './score-core'
 
+/**
+ * Within this fraction of hard exhaustion (`exhaustedAt`) the pinned account is about to
+ * force a switch anyway — and a forced switch IGNORES the cost gate. So a PROACTIVE
+ * migration in this band bypasses the byte gate too: opencode re-sends the whole (only-
+ * growing) conversation every turn, so switching NOW is cheaper than the forced switch
+ * NEXT turn. Drain migration stays byte-gated (it is opportunistic, never imminent).
+ */
+const IMMINENT_EXHAUSTION_BAND = 0.01
+/**
+ * Below the imminent band, a proactive migration requires the alternative to have at
+ * least this much more headroom (absolute `maxUtil` delta). Without a margin, two
+ * accounts hovering near the soft threshold ping-pong A->B->A across turns, each switch
+ * paying a full per-account prompt-cache write.
+ */
+const PROACTIVE_MIGRATE_MIN_DELTA = 0.02
+
 export interface Selection {
   account: PoolAccount
   /** true when every account was exhausted/cooling-down and we picked the least-bad one. */
@@ -153,62 +169,75 @@ export function selectForSession(
     return selectAccount(pool.accounts, providerID, now, cfg, exclude)
   }
 
-  // Consider a non-forced migration only when switching is cheap AND a
-  // migration branch is actually reachable. The inner `proactive` check
-  // requires `overSoftThreshold(pinned)` and the drain branch requires
-  // `cfg.drainMigrate` — so when both are false (the steady-state default-
-  // config "follow-up turn in a healthy session" path, by far the dominant
-  // case), `alt` is computed and immediately discarded. Gating the
-  // `selectAccount` call on the same predicates skips a full O(N) pool scan
-  // (and a `scoreAccount`/`weeklyUrgency` call per candidate) on every such
-  // request. Behavior is unchanged when either predicate is true.
-  // `pinnedOverSoft` is the named fact "the pin is over its soft threshold",
-  // used both as the migration gate and as the proactive predicate; computing
-  // `overSoftThreshold` once avoids re-reading `account.usage.{weekly,hourly}`
-  // and re-running `utilOf` (which itself re-checks window expiry) on the
-  // cheap-moment hot path.
+  // Non-forced migration. The forced-switch path above already handled "the pin
+  // can't serve"; here the pin is still usable, so any switch is OPTIONAL and must
+  // earn its cost — re-sending the whole conversation onto a fresh (uncached)
+  // account is a full per-account prompt-cache WRITE (~1.25x, no read discount).
+  // Two-stage gate keeps the steady-state healthy follow-up turn (the dominant path)
+  // free: skip the O(N) `selectAccount` scan AND the cost/imminence math whenever the
+  // pin is below its soft threshold and drainMigrate is off. `overSoftThreshold` is
+  // computed once (it re-reads usage.{weekly,hourly} + re-runs utilOf), so the extra
+  // `maxUtil(pinned)` below is only paid on the migration-reachable path.
   const pinnedOverSoft = overSoftThreshold(pinned, cfg, now)
-  const migrationReachable = pinnedOverSoft || cfg.drainMigrate
-  if (migrationReachable && isCheapMoment(requestBytes, cfg)) {
-    const alt = selectAccount(
-      pool.accounts,
-      providerID,
-      now,
-      cfg,
-      withExcluded(exclude, pinned.id),
-    )
-    // A `degraded` alt is selectAccount's "least-bad of the cooling-down /
-    // exhausted set" — switching a still-healthy pin onto it just trades one
-    // working account for one that is rate-limited right now (almost certain to
-    // 429 again on the spot, extending its cooldown and burning a real request).
-    // Non-forced migrations require a genuinely available alternative; the
-    // forced-switch path above already handles the "pin itself is unavailable"
-    // case (which is the only legitimate way to return a degraded selection).
-    if (alt && !alt.degraded) {
-      const proactive =
-        pinnedOverSoft && maxUtil(alt.account, now) < maxUtil(pinned, now)
-      if (proactive) {
-        return { account: alt.account, degraded: false, sticky: false }
-      }
-      // Drain branch is opt-in (`drainMigrate` defaults to false). Gating the
-      // whole block on `cfg.drainMigrate` skips the `weeklyUrgency(alt)` /
-      // `weeklyUrgency(pinned)` calls on every cheap-moment request in the
-      // common default-config path, where their result is unused. Behavior is
-      // unchanged when `drainMigrate=true`.
-      if (cfg.drainMigrate) {
-        // `altUrgency > 0` guard: when BOTH the pin AND the alt are past
-        // `weeklyDrainTarget`, each `weeklyUrgency` collapses to 0 (its
-        // `drainable = max(0, weeklyDrainTarget - util)` term zeroes out). Without
-        // the guard, `0 >= 0 * margin` is true, firing a useless drain switch — no
-        // perishable quota to chase, just a lost prompt cache on the pin. The
-        // unchanged `>=` margin keeps behavior at non-zero urgencies byte-identical
-        // (locked by the drainMigrate tests in scheduler.test.ts).
-        const altUrgency = weeklyUrgency(alt.account, cfg, now)
-        if (
-          altUrgency > 0 &&
-          altUrgency >= weeklyUrgency(pinned, cfg, now) * cfg.drainMigrateMargin
-        ) {
-          return { account: alt.account, degraded: false, sticky: false }
+  if (pinnedOverSoft || cfg.drainMigrate) {
+    const pinnedUtil = maxUtil(pinned, now)
+    // Within `IMMINENT_EXHAUSTION_BAND` of hard exhaustion, a forced (cost-gate-
+    // ignoring) switch is coming next turn anyway; migrating now is cheaper because
+    // the re-sent conversation only grows. So a PROACTIVE move bypasses the byte gate
+    // here — drain never does (it is opportunistic, not imminent).
+    const pinnedImminent =
+      pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND
+    const cheap = isCheapMoment(requestBytes, cfg)
+    if (
+      (pinnedOverSoft && (cheap || pinnedImminent)) ||
+      (cfg.drainMigrate && cheap)
+    ) {
+      const alt = selectAccount(
+        pool.accounts,
+        providerID,
+        now,
+        cfg,
+        withExcluded(exclude, pinned.id),
+      )
+      // A `degraded` alt is selectAccount's "least-bad of the cooling-down /
+      // exhausted set" — switching a still-healthy pin onto it just trades one
+      // working account for one that is rate-limited right now (almost certain to
+      // 429 again on the spot, extending its cooldown and burning a real request).
+      // Non-forced migrations require a genuinely available alternative; the
+      // forced-switch path above already handles the "pin itself is unavailable"
+      // case (which is the only legitimate way to return a degraded selection).
+      if (alt && !alt.degraded) {
+        if (pinnedOverSoft) {
+          // Imminent: any genuinely-more-headroom account is worth it (the forced
+          // switch is coming regardless). Otherwise: require a real headroom margin
+          // so two near-threshold accounts don't ping-pong A->B->A, each switch
+          // paying a full prompt-cache write.
+          const altUtil = maxUtil(alt.account, now)
+          const proactiveBetter = pinnedImminent
+            ? altUtil < pinnedUtil
+            : pinnedUtil - altUtil >= PROACTIVE_MIGRATE_MIN_DELTA
+          if (proactiveBetter) {
+            return { account: alt.account, degraded: false, sticky: false }
+          }
+        }
+        // Drain branch is opt-in (`drainMigrate` defaults to false) and stays byte-
+        // gated (`cheap`): unlike proactive it is never imminent, so it must never
+        // bypass the cost gate. Gating on `cfg.drainMigrate` also skips the
+        // `weeklyUrgency` calls on the common proactive path.
+        if (cfg.drainMigrate && cheap) {
+          // `altUrgency > 0` guard: when BOTH the pin AND the alt are past
+          // `weeklyDrainTarget`, each `weeklyUrgency` collapses to 0 (its
+          // `drainable = max(0, weeklyDrainTarget - util)` term zeroes out). Without
+          // the guard, `0 >= 0 * margin` is true, firing a useless drain switch — no
+          // perishable quota to chase, just a lost prompt cache on the pin.
+          const altUrgency = weeklyUrgency(alt.account, cfg, now)
+          if (
+            altUrgency > 0 &&
+            altUrgency >=
+              weeklyUrgency(pinned, cfg, now) * cfg.drainMigrateMargin
+          ) {
+            return { account: alt.account, degraded: false, sticky: false }
+          }
         }
       }
     }

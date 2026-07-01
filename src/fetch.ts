@@ -9,10 +9,8 @@ import { selectForSession } from './scheduler/select'
 import { deriveSessionKey, SESSION_HEADER } from './session'
 import type { PoolAccount, UsageSnapshot } from './types'
 import { refreshUsageInBackground } from './usage-refresh'
-import { ignore } from './util'
+import { ignore, sleepAbortable } from './util'
 
-/** Max distinct accounts to try for a single logical request before giving up. */
-const MAX_ATTEMPTS = 4
 const ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000
 const AUTH_COOLDOWN_MS = 2 * 60 * 1000
 
@@ -214,6 +212,31 @@ function noUsableAccountResponse(providerID: string): Response {
 }
 
 /**
+ * Earliest epoch-ms at which one of `accountIds` recovers from an `account`-class
+ * (429/402) cooldown. Considers ONLY those ids (the accounts THIS request cooled via a
+ * 429/402) — an auth cooldown or a thrown network error is NOT recoverable by waiting,
+ * so those are never passed in. Returns null when none of them is still cooling (the
+ * pool won't self-heal, so the caller fails fast instead of blocking).
+ */
+function soonestCooldownUntil(
+  accounts: PoolAccount[],
+  providerID: string,
+  now: number,
+  accountIds: ReadonlySet<string>,
+): number | null {
+  if (accountIds.size === 0) return null
+  let soonest = Number.POSITIVE_INFINITY
+  for (const account of accounts) {
+    if (account.providerID !== providerID) continue
+    if (account.disabledReason) continue
+    if (!accountIds.has(account.id)) continue
+    if (account.cooldownUntil <= now) continue
+    if (account.cooldownUntil < soonest) soonest = account.cooldownUntil
+  }
+  return Number.isFinite(soonest) ? soonest : null
+}
+
+/**
  * Build a `fetch`-compatible function that load-balances every request for one
  * provider across the pooled accounts. Returned from an adapter's auth.loader and
  * handed to opencode's provider SDK, so it sits on the path of every API call.
@@ -254,6 +277,11 @@ export function createLoadBalancedFetch(
     // accidentally re-introduce it.
     baseHeaders.delete(SESSION_HEADER)
     const tried = new Set<string>()
+    // Accounts cooled by an `account`-class 429/402 THIS request — the only cooldowns
+    // worth WAITING out (they reflect a real Retry-After / quota window that WILL clear).
+    // Auth (401/403) cooldowns and thrown network errors are NOT added, so the wait path
+    // below never blocks on a credential problem or a client abort.
+    const waitableCooldownIds = new Set<string>()
     let lastError: unknown = null
 
     // `bodyStr` is captured from the enclosing closure and never reassigned, so its
@@ -262,11 +290,12 @@ export function createLoadBalancedFetch(
     // body's size" intent is explicit at the call site. The CJK cost-gate
     // regression lock in plugin.test.ts exercises this value on both the
     // gate-held and gate-passed branches.
-    // Also skip the UTF-8 walk entirely when the cost gate is disabled
-    // (`cheapSwitchMaxBytes <= 0`, the default): `isCheapMoment` short-circuits
-    // on that condition BEFORE reading `requestBytes` (see select.ts), so the
-    // value is unused and a full UTF-8 walk of a 100+ KB request body would be
-    // pure waste on every request in the default config.
+    // Skip the UTF-8 walk entirely when the cost gate is DISABLED
+    // (`cheapSwitchMaxBytes <= 0` — an explicit opt-out, NO LONGER the default):
+    // a `<= 0` gate makes every moment "cheap", so `selectForSession` never reads
+    // `requestBytes`, and a full UTF-8 walk of a 100+ KB body would be pure waste.
+    // With the gate ON by default (64 KiB) the walk runs per request — a native,
+    // allocation-free length the gate genuinely needs to size the request.
     const requestBytes =
       cfg.cheapSwitchMaxBytes > 0 && bodyStr
         ? Buffer.byteLength(bodyStr, 'utf8')
@@ -291,7 +320,17 @@ export function createLoadBalancedFetch(
     // Cold-start / staleness seeding (throttled, fire-and-forget — no added latency).
     void refreshUsageInBackground(adapter, Date.now()).catch(ignore)
 
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    // Wall-clock budget for BLOCKING on a fully-rate-limited pool (see below). The
+    // deadline is fixed at request start so the total wait can never exceed maxWaitMs
+    // no matter how many rotate/wait rounds run.
+    const requestStart = Date.now()
+    const waitBudgetMs = Math.max(0, cfg.maxWaitMs)
+    const waitDeadline = requestStart + waitBudgetMs
+
+    // Rounds, not a fixed attempt cap: `tried` bounds each round (once every account is
+    // tried, selectForSession returns null and the round ends), and `waitDeadline`
+    // bounds the whole request across wait-and-retry rounds.
+    for (;;) {
       const now = Date.now()
       const pool = await readPool()
 
@@ -305,11 +344,31 @@ export function createLoadBalancedFetch(
         requestBytes,
       )
       if (!selection) {
-        // Exhausted every candidate this request, or none exist for this provider.
-        if (tried.size > 0) break
-        // No usable account: return a clean 401 rather than leaking the SDK's empty
-        // x-api-key through the global fetch (see noUsableAccountResponse).
-        return noUsableAccountResponse(adapter.id)
+        // No account exists for this provider at all: return a clean 401 rather than
+        // leaking the SDK's empty x-api-key through the global fetch (see
+        // noUsableAccountResponse).
+        if (tried.size === 0) return noUsableAccountResponse(adapter.id)
+
+        // Every account we tried is rate-limited. Instead of failing the turn abruptly,
+        // WAIT for the soonest `account`-class (429/402) cooldown to expire — honoring
+        // Retry-After — when it lands within the wait budget, then retry with a clean
+        // slate. `sleepAbortable` wakes instantly on a client abort (opencode cancelling
+        // the turn); that rejection propagates untouched, matching the abort handling in
+        // the fetch catch below. When nothing recoverable is left (no waitable cooldown,
+        // or it is beyond the budget) we fall through and throw the last error as before.
+        const resumeAt = soonestCooldownUntil(
+          pool.accounts,
+          adapter.id,
+          now,
+          waitableCooldownIds,
+        )
+        if (resumeAt !== null && waitBudgetMs > 0 && resumeAt <= waitDeadline) {
+          await sleepAbortable(resumeAt - now, init?.signal ?? undefined)
+          tried.clear()
+          waitableCooldownIds.clear()
+          continue
+        }
+        break
       }
 
       const { account, degraded, sticky } = selection
@@ -345,6 +404,9 @@ export function createLoadBalancedFetch(
         if (cls === 'account' || cls === 'auth') {
           const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
           await recordRotation(adapter, account.id, res, ms, now)
+          // Only an `account`-class (429/402) cooldown is worth waiting out; an auth
+          // (401/403) failure needs a re-login, not time, so it stays out of the set.
+          if (cls === 'account') waitableCooldownIds.add(account.id)
           lastError = new Error(
             `${adapter.id} account "${account.label}" returned ${res.status}`,
           )

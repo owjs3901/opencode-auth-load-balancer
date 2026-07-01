@@ -7,6 +7,35 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Abortable sleep. Resolves after `ms`, or rejects with the signal's abort reason the
+ * moment `signal` aborts — so a request waiting out a rate-limit cooldown (see fetch.ts)
+ * wakes IMMEDIATELY when opencode cancels the turn instead of blocking the full delay.
+ * Falls back to the plain `sleep` when no signal is given. The abort reason is propagated
+ * untouched (a DOMException named `AbortError` by default), which fetch.ts recognizes as
+ * a client abort and re-throws rather than treating as the account's fault.
+ */
+export function sleepAbortable(
+  ms: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const delay = Math.max(0, ms)
+  if (!signal) return sleep(delay)
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(signal.reason)
+    }
+    timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, delay)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/**
  * Clamp a number into [0, 1], treating NaN/Infinity as 0. Used by both provider
  * usage parsers to normalize header/endpoint utilization into the contract the
  * scheduler expects (a finite fraction). NOTE: `src/scheduler/score-core.ts` ships

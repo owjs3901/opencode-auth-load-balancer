@@ -13,7 +13,11 @@ export interface SchedulerConfig extends ScoreConfig {
    * only switch when the outgoing request body is <= this many bytes, so a large
    * conversation isn't re-sent onto a fresh account (which has no prompt cache and
    * would burn a big chunk of its quota in one shot). <= 0 disables the gate, i.e.
-   * always allow the switch. Forced switches (hard exhaustion) ignore this gate.
+   * always allow the switch. Forced switches (hard exhaustion) ignore this gate;
+   * so does a PROACTIVE switch when the pin is within `IMMINENT_EXHAUSTION_BAND` of
+   * hard exhaustion (see select.ts) — a forced, still-ungated switch is coming next
+   * turn anyway and the re-sent conversation only grows, so moving now is cheaper.
+   * Drain switches always stay byte-gated.
    */
   cheapSwitchMaxBytes: number
   /**
@@ -27,14 +31,25 @@ export interface SchedulerConfig extends ScoreConfig {
    * pinned account's by at least this factor to justify breaking session affinity.
    */
   drainMigrateMargin: number
+  /**
+   * Max wall-clock time (ms) a single request may BLOCK waiting for the pool to recover
+   * when EVERY account is rate-limited (a 429/402 `account`-class cooldown). Rather than
+   * failing the turn abruptly, the load-balanced fetch sleeps until the soonest account's
+   * cooldown expires (honoring `Retry-After`) — bounded by this budget — then retries. A
+   * client abort (opencode cancelling the turn) interrupts the wait immediately. Must
+   * exceed `ACCOUNT_COOLDOWN_MS` (5 min) to cover a 429 that carries no `Retry-After`.
+   * <= 0 disables waiting (fail fast, the old behavior).
+   */
+  maxWaitMs: number
 }
 
 export const DEFAULT_CONFIG: SchedulerConfig = {
   ...SCORE_DEFAULTS,
   sessionTtlMs: 6 * 60 * 60 * 1000, // 6 hours
-  cheapSwitchMaxBytes: 0, // gate disabled by default -> migrate at migrateAt regardless of size
+  cheapSwitchMaxBytes: 64 * 1024, // 64 KiB: gate ON — hold large-context proactive switches; small/early ones (and imminent-exhaustion switches, see select.ts) still pass
   drainMigrate: false,
   drainMigrateMargin: 1.5,
+  maxWaitMs: 305_000, // 5 min + 5 s: outlast the ACCOUNT_COOLDOWN_MS fallback so a no-Retry-After 429 can still auto-recover before giving up
 }
 
 /** Read overrides from env (OPENCODE_AUTH_LB_*), falling back to defaults. */
@@ -70,5 +85,6 @@ export function loadConfig(
       'OPENCODE_AUTH_LB_DRAIN_MIGRATE_MARGIN',
       DEFAULT_CONFIG.drainMigrateMargin,
     ),
+    maxWaitMs: num('OPENCODE_AUTH_LB_MAX_WAIT_MS', DEFAULT_CONFIG.maxWaitMs),
   }
 }

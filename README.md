@@ -171,10 +171,11 @@ All knobs are environment variables with sane defaults.
 | `OPENCODE_AUTH_LB_EXHAUSTED_AT` | `0.999` | Hard exhaustion: at/above this utilization an account is excluded. |
 | `OPENCODE_AUTH_LB_MIGRATE_AT` | `0.95` | Soft threshold to proactively leave a pinned account (before 100%). |
 | `OPENCODE_AUTH_LB_WEEKLY_DRAIN_TARGET` | `0.98` | Soft threshold for the WEEKLY window: scoring treats weekly quota as "fully drained" past this utilization, and a pinned session proactively migrates once its weekly util crosses it. The 5h window uses `MIGRATE_AT` (~0.95); the weekly window uses this (~0.98). Must be in (`MIGRATE_AT`, `EXHAUSTED_AT`]. |
-| `OPENCODE_AUTH_LB_CHEAP_SWITCH_MAX_BYTES` | `0` | For non-forced switches, only switch when the request body ≤ this many bytes (`0` = always). Avoids re-sending a huge context onto a fresh account. |
+| `OPENCODE_AUTH_LB_CHEAP_SWITCH_MAX_BYTES` | `65536` | For non-forced (proactive/drain) switches, only switch when the request body ≤ this many bytes, so a grown conversation isn't re-sent onto a fresh (uncached) account — a full per-account prompt-cache write. `0` disables the gate (always switch). A proactive switch bypasses this gate when the pinned account is within ~1% of hard exhaustion (a forced switch is imminent anyway and the context only grows); forced switches always ignore it. |
 | `OPENCODE_AUTH_LB_DRAIN_MIGRATE` | `false` | Allow switching a healthy session to drain another account whose weekly window is about to reset. |
 | `OPENCODE_AUTH_LB_DRAIN_MIGRATE_MARGIN` | `1.5` | Urgency factor required to justify a drain switch. |
 | `OPENCODE_AUTH_LB_SESSION_TTL_MS` | `21600000` | Session→account assignments older than this are pruned. |
+| `OPENCODE_AUTH_LB_MAX_WAIT_MS` | `305000` | When **every** account is rate-limited (a `429`/`402` cooldown), how long a single request may **block** waiting for the soonest account's cooldown to expire (honoring `Retry-After`) before auto-retrying — instead of failing the turn abruptly. A client abort (cancelling the turn) interrupts the wait immediately. Must exceed the 5-min account cooldown to cover a `429` with no `Retry-After`. `0` disables waiting (fail fast). Auth (`401`/`403`) errors are never waited on. |
 | `OPENCODE_AUTH_LB_DIR` | — | Override the pool-file directory (handy for tests). |
 | `OPENCODE_AUTH_LB_DEBUG` | — | `1`/`true` logs each selection to stderr. |
 | `ANTHROPIC_BASE_URL` | — | Route Anthropic requests through a custom base URL. |

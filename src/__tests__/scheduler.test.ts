@@ -370,7 +370,10 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
 
   test('cost gate holds a proactive migration on a large request, allows it on a small one', () => {
     const a = account('a', { weekly: win(0.2, 5 * DAY) })
-    const b = account('b', { weekly: win(0.99, 5 * DAY) })
+    // 0.985: over the weekly drain target (0.98) so a proactive switch is on the
+    // table, but BELOW the imminent-exhaustion band (0.989) so the byte cost gate
+    // still applies. (The imminent bypass is exercised in its own test below.)
+    const b = account('b', { weekly: win(0.985, 5 * DAY) })
     const cfg = { ...DEFAULT_CONFIG, cheapSwitchMaxBytes: 1000 }
     // large body -> keep the pin (avoid re-sending a big context onto a fresh account)
     expect(migPick(pinnedTo([a, b], 'b'), 's:1', cfg, 5000)?.account.id).toBe(
@@ -533,5 +536,56 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
     expect(sel?.account.id).toBe('b')
     expect(sel?.sticky).toBe(true)
     expect(sel?.degraded).toBe(false)
+  })
+
+  test('cheapSwitchMaxBytes defaults to 64 KiB (cost gate ON, so big-context switches are held)', () => {
+    // Regression lock on the default. Before, the gate was OFF (0) and proactive
+    // migrations re-sent the whole conversation onto a fresh, uncached account
+    // regardless of size — a full prompt-cache write. 64 KiB lets cheap early-turn
+    // switches through while holding grown conversations.
+    expect(DEFAULT_CONFIG.cheapSwitchMaxBytes).toBe(64 * 1024)
+  })
+
+  test('imminent exhaustion bypasses the cost gate: a huge request still migrates to a healthier account', () => {
+    // Pinned `b` (0.99) is within IMMINENT_EXHAUSTION_BAND (0.01) of hard exhaustion
+    // (>= exhaustedAt 0.999 - 0.01 = 0.989). A forced, cost-gate-IGNORING switch is
+    // coming next turn anyway, and opencode re-sends the whole (only-growing)
+    // conversation each turn — so migrate NOW even though the request (5000 B) is far
+    // over the 1000 B gate. This is the whole point: the byte gate must never DELAY a
+    // switch into a MORE expensive forced one.
+    const a = account('a', { weekly: win(0.2, 5 * DAY) })
+    const b = account('b', { weekly: win(0.99, 5 * DAY) })
+    const cfg = { ...DEFAULT_CONFIG, cheapSwitchMaxBytes: 1000 }
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1', cfg, 5000)
+    expect(sel?.account.id).toBe('a')
+    expect(sel?.sticky).toBe(false)
+  })
+
+  test('below the imminent band, a proactive switch needs a real headroom margin (no A->B->A thrash)', () => {
+    // Pinned `b` (0.985) is over the weekly drain target (0.98) but below the imminent
+    // band (0.989). Alt `a` (0.98) is only 0.005 more headroom — under
+    // PROACTIVE_MIGRATE_MIN_DELTA (0.02) — so the pin is KEPT. Without the margin, two
+    // accounts hovering here ping-pong A->B->A across turns, each switch paying a full
+    // prompt-cache write. The request is cheap (0 B), so only the margin holds it.
+    const a = account('a', { weekly: win(0.98, 5 * DAY) })
+    const b = account('b', { weekly: win(0.985, 5 * DAY) })
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1')
+    expect(sel?.account.id).toBe('b')
+    expect(sel?.sticky).toBe(true)
+    expect(sel?.degraded).toBe(false)
+  })
+
+  test('in the imminent band, still will not switch to a worse-headroom account', () => {
+    // Even imminent, the alt must genuinely have MORE headroom: the bypass only lets
+    // us LOOK past the byte gate, it does not force a bad move. Pinned `b` (0.99,
+    // imminent) vs alt `a` (0.995, busier) on a huge request -> `altUtil < pinnedUtil`
+    // fails -> stay. Switching to a busier account would re-cache the whole context
+    // onto something even closer to the wall.
+    const a = account('a', { weekly: win(0.995, 5 * DAY) })
+    const b = account('b', { weekly: win(0.99, 5 * DAY) })
+    const cfg = { ...DEFAULT_CONFIG, cheapSwitchMaxBytes: 1000 }
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1', cfg, 5000)
+    expect(sel?.account.id).toBe('b')
+    expect(sel?.sticky).toBe(true)
   })
 })

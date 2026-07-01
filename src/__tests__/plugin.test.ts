@@ -235,6 +235,129 @@ describe('load-balanced fetch — edge paths', () => {
     expect(json.error?.message).toContain('auth-load-balancer pool')
   })
 
+  test('all accounts 429 within maxWaitMs: waits out the cooldown, then auto-resumes', async () => {
+    // The user-reported failure: the only account returns 429, so pre-fix the request
+    // died abruptly. Now the fetch waits out the (Retry-After) cooldown and retries,
+    // instead of throwing. retry-after 0.12 s -> ~120 ms cooldown, well inside the 2 s budget.
+    process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '2000'
+    try {
+      await mutatePool((pool) => {
+        pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      })
+      let n = 0
+      respond = () => {
+        n += 1
+        if (n === 1)
+          return new Response('limited', {
+            status: 429,
+            headers: { 'retry-after': '0.12' },
+          })
+        return new Response('ok', { status: 200 })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const start = Date.now()
+      const res = await lb('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: '{}',
+      })
+      expect(res.status).toBe(200)
+      expect(n).toBe(2) // 429, then (after waiting) the successful retry
+      expect(Date.now() - start).toBeGreaterThanOrEqual(50) // it actually waited
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
+    }
+  })
+
+  test('fails fast (no wait) when the soonest cooldown is beyond maxWaitMs', async () => {
+    // A quota-reset 429 (Retry-After 5 s) with a tiny 20 ms budget: blocking for the
+    // full 5 s would be worse than failing, so it throws immediately as before.
+    process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '20'
+    try {
+      await mutatePool((pool) => {
+        pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      })
+      let n = 0
+      respond = () => {
+        n += 1
+        return new Response('limited', {
+          status: 429,
+          headers: { 'retry-after': '5' },
+        })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const start = Date.now()
+      await expect(
+        lb('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          body: '{}',
+        }),
+      ).rejects.toThrow('returned 429')
+      expect(Date.now() - start).toBeLessThan(1000) // did NOT wait the 5 s cooldown
+      expect(n).toBe(1) // tried once, no wait-and-retry
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
+    }
+  })
+
+  test('a client abort during the cooldown wait propagates the abort and does not retry', async () => {
+    process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '5000'
+    try {
+      await mutatePool((pool) => {
+        pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      })
+      const ac = new AbortController()
+      let n = 0
+      respond = () => {
+        n += 1
+        return new Response('limited', {
+          status: 429,
+          headers: { 'retry-after': '2' },
+        })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const start = Date.now()
+      const p = lb('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: '{}',
+        signal: ac.signal,
+      })
+      setTimeout(() => ac.abort(), 30) // abort while the ~2 s wait is in progress
+      await expect(p).rejects.toBeDefined()
+      expect(Date.now() - start).toBeLessThan(1000) // woke on abort, not after 2 s
+      expect(n).toBe(1) // 429 once; the wait was interrupted, no retry
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
+    }
+  })
+
+  test('an auth (401) cooldown is NOT waited out — the request fails fast', async () => {
+    // Guard: only account-class (429/402) cooldowns are waitable. A 401 needs a
+    // re-login, not time, so despite a generous budget the request must fail fast.
+    process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '5000'
+    try {
+      await mutatePool((pool) => {
+        pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      })
+      let n = 0
+      respond = () => {
+        n += 1
+        return new Response('unauthorized', { status: 401 })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const start = Date.now()
+      await expect(
+        lb('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          body: '{}',
+        }),
+      ).rejects.toThrow('returned 401')
+      expect(Date.now() - start).toBeLessThan(1000) // no wait despite the 5 s budget
+      expect(n).toBe(1) // one 401, no wait-and-retry (auth is not waitable)
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
+    }
+  })
+
   test('honors retry-after when cooling down a rate-limited account', async () => {
     const now = Date.now()
     await mutatePool((pool) => {

@@ -22,15 +22,18 @@
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
+
 import type { TuiPluginApi, TuiSlotPlugin } from '@opencode-ai/plugin/tui'
+import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
+
 import {
+  compareRanked,
   displayUtil,
   isAvailable,
   loadScoreConfig,
   maxUtil,
-  scoreAccount,
   type ScoreAccount,
+  scoreAccount,
   type ScoreWindow,
   utilOf,
 } from './auth-load-balancer-scoring'
@@ -50,7 +53,13 @@ function poolFile(): string {
   if (override) return join(override, 'auth-load-balancer.json')
   const xdg = process.env.XDG_DATA_HOME?.trim()
   if (xdg) return join(xdg, 'opencode', 'auth-load-balancer.json')
-  return join(homedir(), '.local', 'share', 'opencode', 'auth-load-balancer.json')
+  return join(
+    homedir(),
+    '.local',
+    'share',
+    'opencode',
+    'auth-load-balancer.json',
+  )
 }
 
 interface UsageWindow {
@@ -216,7 +225,7 @@ function BottomBar(props: { api: TuiPluginApi }) {
   })
 
   return (
-    <box flexDirection="row" gap={2} paddingLeft={1} flexShrink={0}>
+    <box flexDirection="row" flexShrink={0} gap={2} paddingLeft={1}>
       <For each={chips()}>
         {(a) => (
           <text fg={color().textMuted} wrapMode="none">
@@ -272,11 +281,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
             weeklyUtil: utilOf(sa.usage.weekly, now),
           }
         })
-        .sort((x, y) => {
-          if (x.available !== y.available) return x.available ? -1 : 1
-          if (x.available) return y.score - x.score
-          return x.weeklyUtil - y.weeklyUtil
-        })
+        .sort(compareRanked)
       let rank = 0
       const rows: Row[] = ranked.map(({ a, available, score }) => {
         if (available) rank += 1
@@ -335,7 +340,11 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
       props.api.ui.DialogSelect({
         title: label,
         options: [
-          { title: 'Rename', value: 'rename', onSelect: () => openRename(id, label) },
+          {
+            title: 'Rename',
+            value: 'rename',
+            onSelect: () => openRename(id, label),
+          },
           {
             title: 'Delete — remove from pool',
             value: 'delete',
@@ -351,7 +360,10 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
       <box>
         <text fg={color().text}>
           <b>Auth accounts</b>
-          <span style={{ fg: color().textMuted }}> (click: rename / delete)</span>
+          <span style={{ fg: color().textMuted }}>
+            {' '}
+            (click: rename / delete)
+          </span>
         </text>
         <For each={groups()}>
           {(g) => (
@@ -360,15 +372,22 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
               <For each={g.rows}>
                 {(r) => (
                   <box onMouseUp={() => openMenu(r.id, r.label)}>
-                    <text fg={r.current ? color().primary : color().text} wrapMode="word">
-                      {(r.current ? '▶ ' : '  ') + (r.rank ? `${r.rank}. ` : '  ') + r.label}
+                    <text
+                      fg={r.current ? color().primary : color().text}
+                      wrapMode="word"
+                    >
+                      {(r.current ? '▶ ' : '  ') +
+                        (r.rank ? `${r.rank}. ` : '  ') +
+                        r.label}
                       <Show when={r.score !== null}>
                         <span style={{ fg: color().secondary }}>
                           {`  ${(r.score ?? 0).toFixed(2)}`}
                         </span>
                       </Show>
                       <Show when={r.state}>
-                        <span style={{ fg: color().warning }}>{` (${r.state})`}</span>
+                        <span
+                          style={{ fg: color().warning }}
+                        >{` (${r.state})`}</span>
                       </Show>
                     </text>
                     <text fg={color().textMuted}>

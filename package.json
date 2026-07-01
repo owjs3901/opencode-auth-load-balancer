@@ -22,7 +22,8 @@
     "sync:tui": "bun -e \"await Bun.write('tui/auth-load-balancer-scoring.ts', Bun.file('src/scheduler/score-core.ts'))\"",
     "build": "bun run sync:tui && bun build ./src/index.ts --outdir dist --target node --format esm && tsc -p tsconfig.build.json",
     "dev": "bun build ./src/index.ts --outdir dist --target node --format esm --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tui.json --noEmit",
+    "typecheck:tui": "tsc -p tsconfig.tui.json --noEmit",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "test": "bun test",
@@ -35,11 +36,15 @@
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.17.9",
+    "@opentui/core": "0.3.4",
+    "@opentui/keymap": "0.3.4",
+    "@opentui/solid": "0.3.4",
     "@types/bun": "^1.3.14",
     "@types/node": "^26.0.0",
     "eslint-plugin-devup": "^2.0.19",
     "husky": "^9.1",
     "oxlint": "1.64",
+    "solid-js": "1.9.12",
     "typescript": "^6.0.3"
   },
   "keywords": [

@@ -96,9 +96,8 @@ function cooldownUntilFrom(
 async function applyCooldown(
   accountId: string,
   fallbackMs: number,
-  res: Response | null,
 ): Promise<void> {
-  const until = cooldownUntilFrom(res, fallbackMs, Date.now())
+  const until = Date.now() + fallbackMs
   await bestEffort('cooldown', () =>
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
@@ -437,7 +436,7 @@ export function createLoadBalancedFetch(
           (error instanceof Error && error.name === 'AbortError')
         if (aborted) throw error
         if (!account.disabledReason)
-          await applyCooldown(account.id, AUTH_COOLDOWN_MS, null)
+          await applyCooldown(account.id, AUTH_COOLDOWN_MS)
         log(
           `!! ${account.label} threw: ${error instanceof Error ? error.message : String(error)}`,
         )

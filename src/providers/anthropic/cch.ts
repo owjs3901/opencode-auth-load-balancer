@@ -43,16 +43,14 @@ export function computeVersionSuffix(
 /** Build the complete billing header string for insertion into system[0]. */
 export function buildBillingHeaderValue(
   messages: Message[],
-  version: string | undefined,
   entrypoint: string,
 ): string {
-  const resolved = version ?? CLAUDE_CODE_VERSION
   const text = extractFirstUserMessageText(messages)
-  const suffix = computeVersionSuffix(text, resolved)
+  const suffix = computeVersionSuffix(text, CLAUDE_CODE_VERSION)
   const cch = computeCCH(text)
   return (
     'x-anthropic-billing-header: ' +
-    `cc_version=${resolved}.${suffix}; ` +
+    `cc_version=${CLAUDE_CODE_VERSION}.${suffix}; ` +
     `cc_entrypoint=${entrypoint}; ` +
     `cch=${cch};`
   )

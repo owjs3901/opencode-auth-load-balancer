@@ -239,7 +239,7 @@ export function rewriteRequestBody(body: string): string {
       : null
     const billingHeader =
       messages && messages.some((m) => m.role === 'user')
-        ? buildBillingHeaderValue(messages, undefined, CLAUDE_CODE_ENTRYPOINT)
+        ? buildBillingHeaderValue(messages, CLAUDE_CODE_ENTRYPOINT)
         : null
 
     const system = prependClaudeCodeIdentity(parsed.system)

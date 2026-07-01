@@ -308,7 +308,6 @@ describe('cch billing header', () => {
   test('buildBillingHeaderValue embeds version, entrypoint, and cch', () => {
     const v = buildBillingHeaderValue(
       [{ role: 'user', content: 'hi' }],
-      undefined,
       'sdk-cli',
     )
     expect(v).toContain('cc_entrypoint=sdk-cli')

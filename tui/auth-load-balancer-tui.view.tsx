@@ -30,8 +30,8 @@ import {
   compareRanked,
   displayUtil,
   isAvailable,
+  isExhausted,
   loadScoreConfig,
-  maxUtil,
   type ScoreAccount,
   scoreAccount,
   type ScoreWindow,
@@ -180,7 +180,7 @@ function winPct(w: UsageWindow | null | undefined, now: number): string {
 function stateOf(sa: ScoreAccount, now: number): string {
   if (sa.disabledReason) return 're-login'
   if (sa.cooldownUntil > now) return 'cooldown'
-  if (maxUtil(sa, now) >= cfg.exhaustedAt) return 'full'
+  if (isExhausted(sa, cfg, now)) return 'full'
   return ''
 }
 

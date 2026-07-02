@@ -97,7 +97,10 @@ export function readEnvNumber(
   dflt: number,
 ): number {
   const raw = env[key]
-  if (raw === undefined || raw === '') return dflt
+  // trim(): a whitespace-only value must fall back too — `Number('  ') === 0`
+  // (finite), so it would otherwise silently zero the knob instead of using
+  // the default. The bool parser in config.ts trims the same way.
+  if (raw === undefined || raw.trim() === '') return dflt
   const n = Number(raw)
   return Number.isFinite(n) ? n : dflt
 }

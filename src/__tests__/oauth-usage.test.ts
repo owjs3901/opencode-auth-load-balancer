@@ -169,6 +169,25 @@ describe('anthropic oauth', () => {
     await expect(aRefresh('r1')).rejects.toThrow('200 — malformed')
   })
 
+  test('refresh rejects a finite expires_in whose ms product overflows to Infinity', async () => {
+    // `1e306` IS finite, so it passes Number.isFinite(expires_in) — but every
+    // consumer computes `Date.now() + expires_in * 1000`, and `1e306 * 1000`
+    // exceeds Number.MAX_VALUE (~1.798e308), collapsing to +Infinity: the same
+    // never-stale soft-brick as the 1e999 case above. Mirrors the secondsToMs
+    // guard (util.ts) and cooldownUntilFrom's 1e308 retry-after guard
+    // (fetch.ts). The 200-status prefix keeps isInvalidGrant() false — the
+    // account is NOT disabled.
+    respond = () =>
+      new Response(JSON.stringify({ access_token: 'a', expires_in: 1e306 }), {
+        status: 200,
+      })
+    await expect(aRefresh('r1')).rejects.toThrow('200 — malformed')
+    // Exchange path shares the same validator: null, never a throw.
+    expect(
+      await aExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
+  })
+
   test('exchange rejects a non-positive expires_in (never commits an already-expired token)', async () => {
     // RFC 6749 §5.1 defines expires_in as a lifetime in seconds — 0/negative
     // is nonsensical. Pre-fix it passed Number.isFinite and wrote an
@@ -504,6 +523,15 @@ describe('openai oauth', () => {
     // `expires: Infinity` — never stale to needsRefresh, so never refreshed.
     respond = () =>
       new Response('{"access_token":"a","expires_in":1e999}', { status: 200 })
+    expect(
+      await oExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
+    // A FINITE expires_in whose ms product overflows (`1e306 * 1000` →
+    // +Infinity) must fail validation too — same soft-brick, different door.
+    respond = () =>
+      new Response(JSON.stringify({ access_token: 'a', expires_in: 1e306 }), {
+        status: 200,
+      })
     expect(
       await oExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
     ).toBeNull()

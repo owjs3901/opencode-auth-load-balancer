@@ -30,6 +30,12 @@ export interface BaseTokenResponse {
  * `expires` to the pool, making `needsRefresh` true on EVERY request (a
  * network refresh round-trip per request, each burning a single-use rotated
  * refresh token).
+ * Its MS PRODUCT must be finite too: a finite-but-huge value like `1e306`
+ * passes the checks above, yet every consumer computes
+ * `Date.now() + expires_in * 1000`, and `1e306 * 1000` collapses to
+ * `+Infinity` — the same never-stale soft-brick. Mirrors the `secondsToMs`
+ * guard in `src/util.ts` and `cooldownUntilFrom`'s retry-after guard in
+ * `src/fetch.ts`.
  * Callers decide the failure shape: exchange sites return null, refresh sites
  * throw their status-prefixed "malformed token response body" error.
  */
@@ -41,7 +47,8 @@ export async function readTokenResponse<
     !json ||
     typeof json.access_token !== 'string' ||
     !Number.isFinite(json.expires_in) ||
-    json.expires_in <= 0
+    json.expires_in <= 0 ||
+    !Number.isFinite(json.expires_in * 1000)
   )
     return null
   return json

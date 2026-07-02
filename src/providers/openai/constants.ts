@@ -8,21 +8,8 @@ export const AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
 export const TOKEN_URL = 'https://auth.openai.com/oauth/token'
 export const REDIRECT_URI = 'http://localhost:1455/auth/callback'
 
-/**
- * Bound every OAuth token-endpoint call (exchange/refresh) so a hung network never
- * holds the per-account refresh lock for its full stale window. Must stay below the
- * refresh lock's stale timeout (120s) so the lock is released by the abort first.
- */
-export const OAUTH_HTTP_TIMEOUT_MS = 30_000
-
-/**
- * Bound every usage-endpoint poll so a hung usage server never accumulates
- * fire-and-forget sockets. `fetchUsage` is called fire-and-forget from
- * `refreshUsageInBackground`; the `lastPoll` throttle prevents same-account
- * re-poll within SEED_TTL_MS but does NOT cancel an in-flight hung fetch.
- * Symmetric with `OAUTH_HTTP_TIMEOUT_MS` (30 s).
- */
-export const USAGE_HTTP_TIMEOUT_MS = 30_000
+// Shared HTTP timeout budgets (single-sourced; see src/providers/http-timeouts.ts).
+export { OAUTH_HTTP_TIMEOUT_MS, USAGE_HTTP_TIMEOUT_MS } from '../http-timeouts'
 
 export const OAUTH_SCOPES = ['openid', 'profile', 'email', 'offline_access']
 

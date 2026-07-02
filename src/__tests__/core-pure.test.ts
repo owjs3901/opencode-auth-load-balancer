@@ -157,6 +157,21 @@ describe('loadConfig', () => {
       DEFAULT_CONFIG.exhaustedAt,
     )
   })
+  test('treats whitespace-only numeric overrides as unset (fall back to default)', () => {
+    // `Number('  ') === 0` (finite), so pre-fix a whitespace-only value slipped
+    // past the `raw === ''` guard and silently zeroed the knob — e.g.
+    // `exhaustedAt=0` ranks every account with any usage as exhausted, and
+    // `sessionTtlMs=0` prunes every session-affinity entry on the next write.
+    // Both knobs parse through score-core's readEnvNumber (config.ts's num()
+    // delegates to it): exhaustedAt via loadScoreConfig, sessionTtlMs via
+    // loadConfig's server-only fields.
+    expect(loadConfig({ OPENCODE_AUTH_LB_EXHAUSTED_AT: ' ' }).exhaustedAt).toBe(
+      DEFAULT_CONFIG.exhaustedAt,
+    )
+    expect(
+      loadConfig({ OPENCODE_AUTH_LB_SESSION_TTL_MS: '\t ' }).sessionTtlMs,
+    ).toBe(DEFAULT_CONFIG.sessionTtlMs)
+  })
 })
 
 describe('deriveSessionKey', () => {

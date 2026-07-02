@@ -55,8 +55,8 @@ export function clamp01(n: number): number {
  * `pool.usage.{hourly,weekly}.resetAt` — breaking `isWindowExpired` (never
  * expires), `weeklyUrgency` (drainable / Infinity = 0 urgency, account sidelined
  * forever), and `relTime` rendering ('InfinitydNaNh' in the TUI / CLI). Returns
- * 0 to signal "no usable reset". Mirrors `applyCooldown`'s retry-after guard in
- * `fetch.ts` (cooldown's `until = now + delta` shape differs, so it is NOT
+ * 0 to signal "no usable reset". Mirrors `cooldownUntilFrom`'s retry-after guard
+ * in `fetch.ts` (cooldown's `until = now + delta` shape differs, so it is NOT
  * folded in here). Used by both provider header parsers and the OpenAI endpoint
  * helper. Anthropic's `parseResetAt` ms-vs-seconds heuristic (`value > 1e12`)
  * intentionally stays separate — different semantics.

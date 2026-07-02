@@ -185,19 +185,24 @@ async function runRefresh(
   )
 }
 
-/** Join an in-flight refresh started by another caller, updating our own object. */
-async function reuseRefresh(
+/**
+ * Settle a refresh job — apply the rotated tokens to OUR local account object,
+ * or mirror disabledReason and rethrow. Shared by the job creator and every
+ * in-flight joiner so the settle contract lives in one place.
+ */
+async function settleRefresh(
   adapter: ProviderAdapter,
   account: PoolAccount,
-  existing: Promise<TokenSet>,
+  job: Promise<TokenSet>,
 ): Promise<string> {
   try {
-    const tokens = await existing
+    const tokens = await job
     applyTokensTo(account, tokens)
     return tokens.access
   } catch (error) {
-    // The pool file is already updated by the job creator; mirror disabledReason
-    // onto our OWN local object so fetch.ts's `!account.disabledReason` gate holds.
+    // The pool file is already updated by the refresh job itself; mirror
+    // disabledReason onto our OWN local object so fetch.ts's
+    // `!account.disabledReason` gate holds.
     maybeDisableAndRethrow(adapter, account, error)
   }
 }
@@ -219,16 +224,12 @@ export async function ensureAccessToken(
   if (!needsRefresh(account, now)) return account.access
 
   const existing = inflight.get(account.id)
-  if (existing) return reuseRefresh(adapter, account, existing)
+  if (existing) return settleRefresh(adapter, account, existing)
 
   const job = runRefresh(adapter, account, now)
   inflight.set(account.id, job)
   try {
-    const tokens = await job
-    applyTokensTo(account, tokens)
-    return tokens.access
-  } catch (error) {
-    maybeDisableAndRethrow(adapter, account, error)
+    return await settleRefresh(adapter, account, job)
   } finally {
     inflight.delete(account.id)
   }

@@ -218,6 +218,34 @@ describe('pool store', () => {
     expect(row && needsRefresh(row, Date.now())).toBe(true)
   })
 
+  test('readPool heals non-string access/refresh to "" (forces a repairing refresh)', async () => {
+    // A hand-edited truthy non-string `access` (12345) passes needsRefresh's
+    // `!account.access` check, so every request sends `Bearer 12345` and
+    // 401-loops until `expires` lapses. Healing to '' makes needsRefresh true
+    // on first use so the valid refresh token repairs the row immediately; a
+    // non-string `refresh` healed to '' fails the next refresh loudly into a
+    // clear re-login state instead of posting garbage to the token endpoint.
+    const edited = JSON.parse(JSON.stringify(account())) as Record<
+      string,
+      unknown
+    >
+    edited.access = 12345
+    edited.refresh = null
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [edited],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const row = (await readPool()).accounts[0]
+    expect(row?.access).toBe('')
+    expect(row?.refresh).toBe('')
+    expect(row && needsRefresh(row, Date.now())).toBe(true)
+  })
+
   test('readPool heals Infinity (JSON `1e999`) in every numeric field — typeof alone is not enough', async () => {
     // JSON.parse cannot produce NaN, but `JSON.parse('1e999') === Infinity`,
     // and `typeof Infinity === 'number'`. Pre-fix each field soft-failed

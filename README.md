@@ -212,7 +212,7 @@ bun run lint:fix    # auto-fix
 bun test
 ```
 
-223 unit/integration tests run with coverage **gated at 100%** (lines and functions) via `bunfig.toml`. They mock the network and isolate the pool file per test, so **no real accounts are needed** to test the logic. Tests live in `src/__tests__/`.
+313 unit/integration tests run with coverage **gated at 100%** (lines and functions) via `bunfig.toml`. They mock the network and isolate the pool file per test, so **no real accounts are needed** to test the logic. Tests live in `src/__tests__/`.
 
 ### Dev loop (trying it in a real opencode)
 

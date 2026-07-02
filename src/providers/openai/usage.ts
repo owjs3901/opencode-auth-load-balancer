@@ -1,5 +1,5 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
-import { clamp01, secondsToMs } from '../../util'
+import { clamp01, isFiniteNumber, secondsToMs } from '../../util'
 import {
   parseWindowPairHeaders,
   type WindowPairHeaderSpec,
@@ -66,12 +66,11 @@ function endpointWindow(
   // Symmetric with parseUsageHeaders() / windowFromPercent above and the
   // Anthropic endpoint helper: a window that is PRESENT but malformed is
   // unusable. A non-finite `used_percent` (e.g. JSON `1e500` → Infinity)
-  // passes the typeof gate but then `clamp01(Infinity/100)` falls into the
-  // `!Number.isFinite ⇒ 0` branch in score-core, ranking the malformed
-  // account as "0% used" → selected first. Reject it as null (NOT 0%) so the
-  // scheduler keeps the last-known snapshot instead.
-  if (typeof w.used_percent !== 'number' || !Number.isFinite(w.used_percent))
-    return null
+  // would otherwise hit `clamp01(Infinity/100)`'s `!Number.isFinite ⇒ 0`
+  // branch in score-core, ranking the malformed account as "0% used" →
+  // selected first. Reject it as null (NOT 0%) so the scheduler keeps the
+  // last-known snapshot instead.
+  if (!isFiniteNumber(w.used_percent)) return null
   // secondsToMs absorbs the non-finite / overflow guard (util.ts); a missing /
   // non-number reset_at coerces to 0 → secondsToMs(0) → 0.
   return {

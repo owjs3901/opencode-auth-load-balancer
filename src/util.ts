@@ -49,6 +49,17 @@ export function clamp01(n: number): number {
 }
 
 /**
+ * Type guard: a real, finite number (rejects NaN/±Infinity AND non-numbers).
+ * Shared by both providers' `endpointWindow` malformed-window checks, where
+ * the `v is number` narrowing also handles optional fields. NOTE: the TUI
+ * view ships its OWN `isFiniteNumber` copy by design — the TUI runtime
+ * cannot import `src/`.
+ */
+export function isFiniteNumber(v: unknown): v is number {
+  return Number.isFinite(v)
+}
+
+/**
  * True for a plain JSON object (non-null `object`, not an array). Shared
  * trust-boundary predicate for the two consumers that accept arbitrary JSON
  * shapes: the user-editable pool file's `lastSelected` / `sessions`

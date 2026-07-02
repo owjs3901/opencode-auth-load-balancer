@@ -1,5 +1,5 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
-import { clamp01 } from '../../util'
+import { clamp01, isFiniteNumber } from '../../util'
 import {
   parseWindowPairHeaders,
   type WindowPairHeaderSpec,
@@ -108,9 +108,7 @@ function endpointWindow(
   // that is PRESENT but malformed (missing / non-finite utilization) is unusable
   // — return null (NOT 0%) so the scheduler does not treat a malformed response
   // as "full headroom" and rank the account first.
-  if (typeof w.utilization !== 'number' || !Number.isFinite(w.utilization)) {
-    return null
-  }
+  if (!isFiniteNumber(w.utilization)) return null
   return {
     utilization: clamp01(w.utilization / 100), // endpoint is a percent
     resetAt: parseResetAt(w.resets_at),

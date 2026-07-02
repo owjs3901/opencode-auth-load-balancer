@@ -139,6 +139,15 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     // and CLI until the user repairs the file. An empty label renders blank
     // but never throws; the next bookkeeping write heals the file.
     if (typeof row.label !== 'string') row.label = ''
+    // A hand-edited non-string truthy `access` (e.g. 12345) passes
+    // `!account.access`, so until `expires` lapses every request sends
+    // `authorization: Bearer 12345` → 401 → auth-cooldown loop; '' makes
+    // needsRefresh true so the valid refresh token repairs the row on first
+    // use (same self-heal contract as the `expires` coercion above). A
+    // non-string `refresh` heals to '' so the next refresh fails loudly into
+    // a clear re-login state instead of posting garbage to the token endpoint.
+    if (typeof row.access !== 'string') row.access = ''
+    if (typeof row.refresh !== 'string') row.refresh = ''
     accounts.push(row)
   }
   return accounts

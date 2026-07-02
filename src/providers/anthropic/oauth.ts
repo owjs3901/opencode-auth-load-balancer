@@ -1,6 +1,7 @@
 import type { TokenSet } from '../../types'
 import { ignore } from '../../util'
 import {
+  type BaseTokenResponse,
   generateState,
   parseCallbackInput,
   readRefreshResponse,
@@ -16,6 +17,24 @@ import {
   OAUTH_SCOPES,
   TOKEN_URL,
 } from './constants'
+
+/**
+ * Map a token-endpoint response body to a TokenSet (mirror of toTokenSet() in
+ * ../openai/oauth.ts). RFC 6749 §5.1: the server MAY omit refresh_token; fall
+ * back to `previousRefresh` then — `''` at exchange time (no previous token; a
+ * missing field still fails the next refresh loudly, but never writes
+ * `undefined` onto the pool account), the current token at refresh time.
+ */
+function toTokenSet(
+  json: BaseTokenResponse,
+  previousRefresh: string,
+): TokenSet {
+  return {
+    access: json.access_token,
+    refresh: json.refresh_token || previousRefresh,
+    expires: Date.now() + json.expires_in * 1000,
+  }
+}
 
 /**
  * POST a JSON body to TOKEN_URL with the shared Claude OAuth shell.
@@ -87,15 +106,7 @@ export async function exchange(
   // missing the required fields — see readTokenResponse.
   const json = await readTokenResponse(result)
   if (!json) return null
-  return {
-    access: json.access_token,
-    // RFC 6749 §5.1: server MAY omit refresh_token; at exchange time there is
-    // no previous token, so the empty-string fall-back matches the OpenAI
-    // exchange path (toTokenSet(json, '')) — a missing field still fails the
-    // next refresh loudly, but never writes `undefined` onto the pool account.
-    refresh: json.refresh_token || '',
-    expires: Date.now() + json.expires_in * 1000,
-  }
+  return toTokenSet(json, '')
 }
 
 /** Refresh an access token. Throws on failure; message includes the HTTP status. */
@@ -109,11 +120,5 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
   // readRefreshResponse throws the status-prefixed error contract on a non-OK
   // status or a malformed 200 body (see its doc comment in ../oauth-callback).
   const json = await readRefreshResponse(response)
-  return {
-    access: json.access_token,
-    // RFC 6749 §5.1: server MAY omit a rotated refresh_token; keep the previous
-    // one then (symmetric with toTokenSet() in ../openai/oauth.ts).
-    refresh: json.refresh_token || refreshToken,
-    expires: Date.now() + json.expires_in * 1000,
-  }
+  return toTokenSet(json, refreshToken)
 }

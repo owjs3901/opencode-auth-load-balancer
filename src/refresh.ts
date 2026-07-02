@@ -79,24 +79,6 @@ function disableReason(adapter: ProviderAdapter, label: string): string {
   return `invalid_grant: re-login required (${adapter.id}:${label})`
 }
 
-/**
- * Mirror the on-disk `disabledReason` write (done by `resolveInvalidGrant`)
- * onto the in-process `PoolAccount` so `fetch.ts`'s `!account.disabledReason`
- * gate still holds for callers that share this object, then rethrow. Used by
- * both the creator (`ensureAccessToken`) and reuser (`reuseRefresh`) paths so
- * the contract stays in lockstep — if `disableReason` ever grows a field, only
- * one site needs to change.
- */
-function maybeDisableAndRethrow(
-  adapter: ProviderAdapter,
-  account: PoolAccount,
-  error: unknown,
-): never {
-  if (isInvalidGrant(error))
-    account.disabledReason = disableReason(adapter, account.label)
-  throw error
-}
-
 /** Copy a rotated TokenSet onto a PoolAccount in place. */
 function applyTokensTo(account: PoolAccount, tokens: TokenSet): void {
   account.access = tokens.access
@@ -200,10 +182,13 @@ async function settleRefresh(
     applyTokensTo(account, tokens)
     return tokens.access
   } catch (error) {
-    // The pool file is already updated by the refresh job itself; mirror
-    // disabledReason onto our OWN local object so fetch.ts's
-    // `!account.disabledReason` gate holds.
-    maybeDisableAndRethrow(adapter, account, error)
+    // The pool file is already updated by the refresh job itself (via
+    // `resolveInvalidGrant`); mirror disabledReason onto our OWN local object
+    // so fetch.ts's `!account.disabledReason` gate holds for callers that
+    // share it.
+    if (isInvalidGrant(error))
+      account.disabledReason = disableReason(adapter, account.label)
+    throw error
   }
 }
 

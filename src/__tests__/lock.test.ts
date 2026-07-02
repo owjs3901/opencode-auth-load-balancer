@@ -124,13 +124,14 @@ describe('file lock', () => {
   })
 
   test('reclaims a stale lock whose owner.json is corrupt (holder crashed mid-write)', async () => {
-    // Pre-fix, readMeta returned null for a file that EXISTS but holds invalid
-    // JSON, so the stale gate (which needs non-null) never fired: every
-    // acquirer declined to reclaim and spun to LockTimeoutError forever —
-    // manual cleanup was the only way out. Post-fix a readable-but-corrupt
-    // meta reports its mtime, so a stale mtime reclaims it. A LIVE holder is
-    // still safe: its heartbeat keeps rewriting the file, so the mtime never
-    // goes stale.
+    // Pre-fix, the staleness probe parsed owner.json and returned null for a
+    // file that EXISTS but holds invalid JSON, so the stale gate (which needs
+    // non-null) never fired: every acquirer declined to reclaim and spun to
+    // LockTimeoutError forever — manual cleanup was the only way out. The
+    // stat-only lockMtime never reads the content at all: a readable-but-
+    // corrupt meta reports its mtime, so a stale mtime reclaims it. A LIVE
+    // holder is still safe: its heartbeat keeps rewriting the file, so the
+    // mtime never goes stale.
     const dir = lockPath('corrupt-owner')
     await mkdir(dir, { recursive: true })
     const meta = join(dir, 'owner.json')
@@ -150,7 +151,7 @@ describe('file lock', () => {
   test('times out against a lock dir with no owner metadata', async () => {
     const dir = lockPath('no-owner')
     // dir exists, but owner.json never written — a FRESH dir mtime is not
-    // stale, so readMeta's dir-mtime fallback must NOT let this be reclaimed
+    // stale, so lockMtime's dir-mtime fallback must NOT let this be reclaimed
     // (it is the exact disk state of a live tryClaim between mkdir and
     // writeFile(meta)).
     await mkdir(dir, { recursive: true })
@@ -167,12 +168,12 @@ describe('file lock', () => {
   test('reclaims a STALE lock dir whose owner.json is missing (holder hard-crashed between mkdir and meta write)', async () => {
     // A kill -9 / power loss between tryClaim's mkdir and its writeFile(meta)
     // leaves a dir with NO owner.json — tryClaim's in-process cleanup only
-    // covers thrown errors, not a dead process. Pre-fix readMeta returned
-    // null for that state, so the stale gate never fired: every acquirer spun
-    // to LockTimeoutError forever and every mutatePool was silently skipped
-    // by bestEffort until manual cleanup. Post-fix readMeta falls back to the
-    // DIR mtime, giving a meta-less dir the same "reclaimable once stale"
-    // contract as the corrupt-owner.json case above.
+    // covers thrown errors, not a dead process. Pre-fix the staleness probe
+    // returned null for that state, so the stale gate never fired: every
+    // acquirer spun to LockTimeoutError forever and every mutatePool was
+    // silently skipped by bestEffort until manual cleanup. Post-fix lockMtime
+    // falls back to the DIR mtime, giving a meta-less dir the same
+    // "reclaimable once stale" contract as the corrupt-owner.json case above.
     const dir = lockPath('missing-owner-stale')
     await mkdir(dir, { recursive: true })
     const old = new Date(Date.now() - 10_000)
@@ -219,7 +220,7 @@ describe('file lock', () => {
   test('release does NOT rm the lockDir when the owner meta is missing (race vs a concurrent reclaim mid-tryClaim)', async () => {
     // Regression lock for src/pool/lock.ts makeHandle.release. Pre-fix the
     // guard `if (current && current.meta.ownerId !== ownerId) return` treated
-    // `current === null` (readMeta failed: ENOENT / mid-write) as "we still
+    // `current === null` (the meta read failed: ENOENT / mid-write) as "we still
     // own it, safe to rm" — and fired during the tiny window between a
     // stale-reclaim's `rm + mkdir` and its `writeFile(meta)`, wiping the NEW
     // owner's freshly-mkdir'd lockDir. The new owner's pending `writeFile`
@@ -233,7 +234,7 @@ describe('file lock', () => {
     // Simulate the race by removing our meta file (the exact disk state a
     // concurrent reclaim mid-tryClaim produces between its rm+mkdir and its
     // writeFile(meta)). We do NOT pre-fill any new meta — the point is
-    // precisely that readMeta returns null here.
+    // precisely that readOwnerId returns null here.
     await rm(join(dir, 'owner.json'))
     await handle.release()
     expect(await dirExists(dir)).toBe(true)

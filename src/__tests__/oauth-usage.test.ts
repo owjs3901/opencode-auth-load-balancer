@@ -624,9 +624,10 @@ describe('openai usage', () => {
 
   test('parseUsageHeaders: falls back to zero resetAt when seconds-times-1000 overflows', () => {
     // Regression lock symmetric with applyCooldown's `1e308` retry-after test
-    // (plugin.test.ts:363) and the Anthropic header overflow test above:
-    // `windowFromPercent` must reject a reset value whose seconds form is finite
-    // but whose *1000 overflows to +Infinity, so the pool never stores Infinity.
+    // (plugin.test.ts:363) and the Anthropic header overflow test above: the
+    // shared `headerWindow` (providers/usage-headers.ts) must reject a reset
+    // value whose seconds form is finite but whose *1000 overflows to
+    // +Infinity, so the pool never stores Infinity.
     const u = oParse(
       new Headers({
         'x-codex-primary-used-percent': '12.5',
@@ -697,9 +698,10 @@ describe('openai usage', () => {
     // then clamp01(Infinity/100) collapsed to 0 — the scheduler then ranked
     // the malformed account as having FULL headroom and selected it first.
     // The OpenAI endpoint helper must enforce the same Number.isFinite gate
-    // that parseUsageHeaders() / windowFromPercent and the Anthropic endpoint
-    // helper already do (and that the comment on the Anthropic test
-    // explicitly claims is symmetric across the three).
+    // that parseUsageHeaders() (via the shared `headerWindow` in
+    // providers/usage-headers.ts) and the Anthropic endpoint helper already
+    // do (and that the comment on the Anthropic test explicitly claims is
+    // symmetric across the three).
     //
     // The body is a RAW JSON string, not JSON.stringify of a JS object:
     // `JSON.stringify({ used_percent: 1e500 })` collapses Infinity to `null`

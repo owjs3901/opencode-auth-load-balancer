@@ -63,7 +63,8 @@ function endpointWindow(
   // keeping the last-known snapshot). Scoring is unaffected:
   // utilOf/weeklyUrgency already read a missing window as 0.
   if (!w) return { utilization: 0, resetAt: 0 }
-  // Symmetric with parseUsageHeaders() / windowFromPercent above and the
+  // Symmetric with parseUsageHeaders() above (whose finite gate lives in the
+  // shared `headerWindow`, providers/usage-headers.ts) and the
   // Anthropic endpoint helper: a window that is PRESENT but malformed is
   // unusable. A non-finite `used_percent` (e.g. JSON `1e500` → Infinity)
   // would otherwise hit `clamp01(Infinity/100)`'s `!Number.isFinite ⇒ 0`

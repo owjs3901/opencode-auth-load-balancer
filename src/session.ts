@@ -11,9 +11,10 @@ export const SESSION_HEADER = 'x-allb-session'
 
 /**
  * Find the first user message's text in a messages/input list. Lifted to module
- * scope (like `parseHeaderWindow` / `windowFromPercent`) so we don't reallocate a
- * closure per call. Captures NOTHING from its caller — only its `list` argument
- * and the shared `joinBlockTexts`.
+ * scope (like `headerWindow` / `parseWindowPairHeaders` in
+ * providers/usage-headers.ts) so we don't reallocate a closure per call.
+ * Captures NOTHING from its caller — only its `list` argument and the shared
+ * `joinBlockTexts`.
  */
 function firstUserFromList(list: unknown): string | null {
   if (!Array.isArray(list)) return null

@@ -814,9 +814,9 @@ describe('refresh', () => {
     // ("singleflight propagates invalid_grant disabledReason to EVERY
     // concurrent caller's account, not just the one that started the
     // refresh"). That test pins the TRUE arm of
-    // `if (isInvalidGrant(error))` in BOTH the creator's catch
-    // (refresh.ts ensureAccessToken) AND the reuser's catch
-    // (refresh.ts reuseRefresh); this
+    // `if (isInvalidGrant(error))` in the shared settle path
+    // (refresh.ts settleRefresh) for BOTH the creator
+    // (ensureAccessToken) AND every in-flight joiner; this
     // pins the FALSE arm on BOTH — when the in-flight refresh rejects
     // with a non-invalid_grant error (refresh lock timeout, AbortError
     // from OAUTH_HTTP_TIMEOUT_MS, transient 5xx, DNS blip), NEITHER
@@ -859,8 +859,8 @@ describe('refresh', () => {
     expect(results[0]?.status).toBe('rejected')
     expect(results[1]?.status).toBe('rejected')
     // KEY ASSERTIONS — these break if `if (isInvalidGrant(error))` is
-    // flipped in EITHER the creator's catch (refresh.ts
-    // ensureAccessToken) or the reuser's catch (refresh.ts reuseRefresh).
+    // flipped in the shared settle path (refresh.ts settleRefresh) that
+    // both the creator (ensureAccessToken) and every joiner run through.
     expect(a1.disabledReason).toBeNull() // creator path
     expect(a2.disabledReason).toBeNull() // reuser path — previously unbound
     expect(

@@ -67,55 +67,44 @@ function metaFile(lockDir: string): string {
   return join(lockDir, 'owner.json')
 }
 
-async function readMeta(
-  lockDir: string,
-): Promise<{ meta: LockMeta | null; mtimeMs: number } | null> {
-  try {
-    const path = metaFile(lockDir)
-    const [text, info] = await Promise.all([readFile(path, 'utf8'), stat(path)])
-    let meta: LockMeta | null
-    try {
-      meta = JSON.parse(text) as LockMeta
-    } catch {
-      // READ fine but not valid JSON: the holder crashed mid-`writeFile` or the
-      // disk corrupted the file. Unlike the missing-file case below this state
-      // never heals on its own, so report the mtime with `meta: null` — the
-      // stale gate in acquireLock can then reclaim it once the mtime goes stale
-      // (a LIVE holder's heartbeat keeps rewriting the file, so a live lock is
-      // never stolen), instead of every acquirer spinning to LockTimeoutError
-      // forever.
-      meta = null
-    }
-    return { meta, mtimeMs: info.mtimeMs }
-  } catch {
-    // `owner.json` unreadable (missing entirely). Fall back to the DIR's
-    // mtime: a holder that hard-crashed between tryClaim's mkdir and its
-    // writeFile(meta) — kill -9, power loss, OOM; tryClaim's in-process
-    // cleanup only covers THROWN errors — leaves a meta-less dir that would
-    // otherwise never satisfy the stale gate, so every acquirer spins to
-    // LockTimeoutError forever (every `mutatePool` degrades to a 30 s timeout
-    // silently absorbed by `bestEffort`, until manual cleanup). Reporting the
-    // dir mtime gives that state the same "reclaimable once stale" contract
-    // as the corrupt-JSON case above. A LIVE holder is never stolen through
-    // this path: creating/deleting `owner.json` updates the dir mtime, the
-    // heartbeat re-CREATES a missing meta within heartbeatMs (« staleMs), and
-    // "dir mtime = mkdir time gone stale" is only reachable when the hold
-    // outlives staleMs — which no caller's hold does (pool lock: ms-scale
-    // hold vs 30 s stale; refresh lock: ≤ ~60 s hold vs 120 s stale). When
-    // the DIR is gone too (lock released between the caller's failed tryClaim
-    // and this read), report null — "not held".
-    const dirStat = await stat(lockDir).catch(ignore)
-    if (!dirStat) return null
-    return { meta: null, mtimeMs: dirStat.mtimeMs }
-  }
+/**
+ * The mtime the staleness gate keys on, via `stat` only — the meta file's
+ * CONTENT is irrelevant here (the gate never distinguishes valid from corrupt
+ * meta, so parsing it would be dead work on every contended acquisition poll).
+ * A corrupt `owner.json` (holder crashed mid-`writeFile`, disk corruption)
+ * still reports its mtime and is reclaimed once stale; a LIVE holder is never
+ * stolen because its heartbeat keeps rewriting the file, refreshing the mtime.
+ *
+ * When `owner.json` is missing entirely, fall back to the DIR's mtime: a
+ * holder that hard-crashed between tryClaim's mkdir and its writeFile(meta) —
+ * kill -9, power loss, OOM; tryClaim's in-process cleanup only covers THROWN
+ * errors — leaves a meta-less dir that would otherwise never satisfy the
+ * stale gate, so every acquirer spins to LockTimeoutError forever (every
+ * `mutatePool` degrades to a 30 s timeout silently absorbed by `bestEffort`,
+ * until manual cleanup). The dir mtime gives that state the same "reclaimable
+ * once stale" contract. A LIVE holder is never stolen through this path
+ * either: creating/deleting `owner.json` updates the dir mtime, the heartbeat
+ * re-CREATES a missing meta within heartbeatMs (« staleMs), and "dir mtime =
+ * mkdir time gone stale" is only reachable when the hold outlives staleMs —
+ * which no caller's hold does (pool lock: ms-scale hold vs 30 s stale;
+ * refresh lock: ≤ ~60 s hold vs 120 s stale). When the DIR is gone too (lock
+ * released between the caller's failed tryClaim and this read), return null —
+ * "not held".
+ */
+async function lockMtime(lockDir: string): Promise<number | null> {
+  const fileStat = await stat(metaFile(lockDir)).catch(ignore)
+  if (fileStat) return fileStat.mtimeMs
+  const dirStat = await stat(lockDir).catch(ignore)
+  return dirStat ? dirStat.mtimeMs : null
 }
 
 /**
- * Read ONLY the owner id from the lock's meta file. The release path just
- * compares ownership, so it skips the `stat` that `readMeta` pays for the
- * acquire path's staleness gate — `release()` runs once per `mutatePool`
- * (usage records, session pins, cooldowns, refresh commits), making that a
- * wasted fs syscall per pool mutation. Returns null when the file is missing,
+ * Read ONLY the owner id from the lock's meta file. The release path compares
+ * ownership, so it needs the file's CONTENT — unlike the acquire path's
+ * staleness gate (`lockMtime`), which needs only an mtime — but it skips the
+ * `stat` that gate pays: `release()` runs once per `mutatePool` (usage
+ * records, session pins, cooldowns, refresh commits), making that a wasted fs
+ * syscall per pool mutation. Returns null when the file is missing,
  * unreadable, or corrupt — exactly the states where release must leave the
  * dir intact.
  */
@@ -139,7 +128,7 @@ async function tryClaim(lockDir: string, meta: LockMeta): Promise<boolean> {
   }
   // If meta write fails after mkdir succeeded (disk full, EACCES, EROFS, or a
   // Windows AV/backup tool holding the dir handle), the propagating error would
-  // otherwise leave a dir-with-no-owner-meta behind. readMeta's dir-mtime
+  // otherwise leave a dir-with-no-owner-meta behind. lockMtime's dir-mtime
   // fallback does reclaim such a dir eventually, but only once it goes STALE —
   // every acquirer in between still spins to LockTimeoutError, degrading the
   // pool/refresh paths for up to staleMs. Cleaning up symmetrically with
@@ -223,8 +212,8 @@ export async function acquireLock(
         startHeartbeat(lockDir, meta, opts.heartbeatMs),
       )
     }
-    const current = await readMeta(lockDir)
-    if (current !== null && Date.now() - current.mtimeMs > opts.staleMs) {
+    const mtime = await lockMtime(lockDir)
+    if (mtime !== null && Date.now() - mtime > opts.staleMs) {
       // Holder crashed without releasing: reclaim and retry immediately.
       await rm(lockDir, { recursive: true, force: true }).catch(ignore)
       // Respect the acquisition deadline even on this fast path. The `rm` above

@@ -1,5 +1,5 @@
 import { mkdtempSync, statSync } from 'node:fs'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -176,6 +176,38 @@ describe('pool store', () => {
       }),
     )
     expect((await readPool()).accounts[0]).toEqual(source)
+  })
+
+  test('readPool heals an array-valued usage to emptyUsage() (usage writes must persist)', async () => {
+    // `typeof [] === 'object'`, so a hand-edited `"usage": []` evaded the
+    // field guard pre-fix: normalization grafted capturedAt/hourly/weekly as
+    // named properties onto the array, which works in memory but
+    // JSON.stringify serializes back to `[]` — every usage record from
+    // response headers and every usage-endpoint poll was silently dropped on
+    // write, so the account re-polled the rate-limited usage endpoint forever.
+    const edited = JSON.parse(JSON.stringify(account())) as Record<
+      string,
+      unknown
+    >
+    edited.usage = []
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [edited],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    expect((await readPool()).accounts[0]?.usage).toEqual(emptyUsage())
+    // The self-heal contract must hold THROUGH serialization: after a
+    // bookkeeping write, the file itself carries a plain object, not `[]`.
+    await mutatePool(() => undefined)
+    const raw = JSON.parse(await readFile(POOL, 'utf8')) as {
+      accounts: { usage: unknown }[]
+    }
+    expect(Array.isArray(raw.accounts[0]?.usage)).toBe(false)
+    expect(raw.accounts[0]?.usage).toEqual(emptyUsage())
   })
 
   test('readPool heals a non-number usage.capturedAt to 0 (keeps seeding eligible)', async () => {
@@ -360,6 +392,24 @@ describe('pool store', () => {
     const healed = await readPool()
     expect(healed.lastSelected).toEqual({})
     expect(healed.sessions).toEqual({})
+  })
+
+  test('readPool drops hand-edited non-string lastSelected VALUES (they would persist verbatim forever)', async () => {
+    // isPlainObject validates only the lastSelected CONTAINER; a hand-edited
+    // non-string value (`"anthropic": 123`) survived raw pre-fix — consumers
+    // compare `a.id === value` (never matches, dashboards show "(none yet)"),
+    // so the garbage entry was rewritten verbatim by every mutatePool until
+    // that provider happened to serve a request.
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [],
+        lastSelected: { anthropic: 123, openai: 'valid', bad: { id: 'x' } },
+        sessions: {},
+      }),
+    )
+    expect((await readPool()).lastSelected).toEqual({ openai: 'valid' })
   })
 
   test('readPool drops hand-edited garbage session ROWS (they would evade the TTL prune forever)', async () => {

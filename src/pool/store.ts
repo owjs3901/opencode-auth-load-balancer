@@ -126,7 +126,16 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     if (typeof row.id !== 'string' || typeof row.providerID !== 'string') {
       continue
     }
-    if (row.usage == null || typeof row.usage !== 'object') {
+    // Arrays need the same explicit reject as account rows above: grafting
+    // `capturedAt`/`hourly`/`weekly` as named properties onto a hand-edited
+    // `"usage": []` works in memory, but JSON.stringify serializes the array
+    // back to `[]` — every usage record silently fails to persist, so the
+    // row re-polls the usage endpoint forever and never self-heals.
+    if (
+      row.usage == null ||
+      typeof row.usage !== 'object' ||
+      Array.isArray(row.usage)
+    ) {
       row.usage = emptyUsage()
     } else {
       if (!Number.isFinite(row.usage.capturedAt)) row.usage.capturedAt = 0
@@ -210,6 +219,25 @@ function normalizeSessions(
   return rows
 }
 
+/**
+ * Value-level trust boundary for `lastSelected` (mirrors `normalizeSessions`'
+ * drop semantics). `isPlainObject` validates only the CONTAINER; a hand-edited
+ * non-string value (`"anthropic": 123`, or an object) would otherwise survive
+ * every read and be rewritten verbatim by every `mutatePool` until that
+ * provider happens to serve a request. Consumers tolerate it (`a.id === value`
+ * never matches, dashboards show "(none yet)"), so the impact is a permanent
+ * stray entry — drop it here instead; the file self-heals on the next
+ * bookkeeping write.
+ */
+function normalizeLastSelected(
+  rows: Record<string, string>,
+): Record<string, string> {
+  for (const key of Object.keys(rows)) {
+    if (typeof rows[key] !== 'string') delete rows[key]
+  }
+  return rows
+}
+
 async function readRaw(): Promise<PoolFile> {
   let text: string
   try {
@@ -239,7 +267,7 @@ async function readRaw(): Promise<PoolFile> {
       // normalized pool back on the next bookkeeping write, same self-heal
       // contract as `normalizeAccounts`.
       lastSelected: isPlainObject(parsed.lastSelected)
-        ? parsed.lastSelected
+        ? normalizeLastSelected(parsed.lastSelected)
         : {},
       sessions: isPlainObject(parsed.sessions)
         ? normalizeSessions(parsed.sessions)

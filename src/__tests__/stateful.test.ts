@@ -112,20 +112,47 @@ describe('pool store', () => {
     // (`a.label.length` / `a.label.padEnd`), so a deleted label crashed the
     // status tool and CLI. It must heal to '' (renders blank, never throws).
     delete edited.label
+    // Token metadata heals: a non-string `accountId` would flow into the
+    // `chatgpt-account-id` header as "[object Object]" (401 loop); a string
+    // `tokenGen` turns commitRefresh's `gen + 1` into string concatenation
+    // ("abc" → "abc1" → …); a truthy non-string `disabledReason` sidelines
+    // the account like a revocation with no legible reason.
+    edited.accountId = {}
+    edited.tokenGen = 'abc'
+    edited.disabledReason = 5
+    // Identity-broken rows are irreparable (ids/providers cannot be guessed)
+    // and pre-fix stayed SELECTABLE: an id-less row pinned
+    // `sessions[key].accountId = undefined` (dropped by normalizeSessions on
+    // every read — affinity silently dead), and a provider-less row rendered
+    // a permanent phantom `undefined` provider section. Both must be dropped.
+    const numericId = JSON.parse(JSON.stringify(account())) as Record<
+      string,
+      unknown
+    >
+    numericId.id = 5
+    const noProvider = JSON.parse(JSON.stringify(account())) as Record<
+      string,
+      unknown
+    >
+    delete noProvider.providerID
     await writeFile(
       POOL,
       JSON.stringify({
         version: 1,
-        accounts: [null, 'junk', [], edited],
+        accounts: [null, 'junk', [], numericId, noProvider, edited],
         lastSelected: {},
         sessions: {},
       }),
     )
     const pool = await readPool()
     expect(pool.accounts).toHaveLength(1)
+    expect(pool.accounts[0]?.id).toBe(source.id)
     expect(pool.accounts[0]?.usage).toEqual(emptyUsage())
     expect(pool.accounts[0]?.cooldownUntil).toBe(0)
     expect(pool.accounts[0]?.label).toBe('')
+    expect(pool.accounts[0]?.accountId).toBeNull()
+    expect(pool.accounts[0]?.tokenGen).toBe(0)
+    expect(pool.accounts[0]?.disabledReason).toBeNull()
     // The healed row is usable by the scheduler and renders in the dashboard.
     const picked = selectAccount(pool.accounts, 'anthropic', Date.now())
     expect(picked?.account.id).toBe(source.id)
@@ -135,6 +162,20 @@ describe('pool store', () => {
     expect(status).toHaveLength(1)
     expect(status[0]?.accounts).toHaveLength(1)
     expect(() => renderStatus(status)).not.toThrow()
+  })
+
+  test('readPool leaves a fully valid row untouched (the trust boundary heals, never rewrites)', async () => {
+    const source = account()
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [source],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    expect((await readPool()).accounts[0]).toEqual(source)
   })
 
   test('readPool heals a non-number usage.capturedAt to 0 (keeps seeding eligible)', async () => {

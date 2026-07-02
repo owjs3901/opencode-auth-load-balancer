@@ -116,6 +116,16 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     // named properties serializes back to `[]`), becoming a permanent phantom
     // account under an `undefined` provider in every dashboard.
     if (row == null || typeof row !== 'object' || Array.isArray(row)) continue
+    // Identity fields are irreparable: an id/providerID cannot be guessed
+    // (`makeAccount` always writes both), and a surviving id-less row is
+    // still SELECTABLE — fetch then pins `sessions[key].accountId =
+    // undefined`, which `normalizeSessions` silently drops on every read
+    // (session affinity permanently broken), while a provider-less row
+    // renders a phantom `undefined` provider section in every dashboard
+    // forever. Drop such rows like the null/primitive/array rows above.
+    if (typeof row.id !== 'string' || typeof row.providerID !== 'string') {
+      continue
+    }
     if (row.usage == null || typeof row.usage !== 'object') {
       row.usage = emptyUsage()
     } else {
@@ -148,6 +158,26 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     // a clear re-login state instead of posting garbage to the token endpoint.
     if (typeof row.access !== 'string') row.access = ''
     if (typeof row.refresh !== 'string') row.refresh = ''
+    // A hand-edited non-string `accountId` flows unchecked through
+    // `resolveAccountId` into the `chatgpt-account-id` header as
+    // "[object Object]" → guaranteed 401/403 → auth-cooldown loop. Healing to
+    // null restores the working JWT-decode fallback.
+    if (row.accountId !== null && typeof row.accountId !== 'string') {
+      row.accountId = null
+    }
+    // A hand-edited string `tokenGen` survives `genOf`'s `?? 0`, and
+    // `commitRefresh`'s `gen + 1` becomes string CONCATENATION ("abc" →
+    // "abc1" → "abc11"…) — growing on every refresh, never numeric again.
+    // Heal to 0, which `genOf` treats like absent.
+    if (row.tokenGen !== undefined && !Number.isFinite(row.tokenGen)) {
+      row.tokenGen = 0
+    }
+    // Any truthy non-string `disabledReason` (e.g. a hand-edited number)
+    // sidelines the account exactly like a revocation with no legible reason
+    // anywhere; the tokens may be perfectly valid. Heal to null.
+    if (row.disabledReason !== null && typeof row.disabledReason !== 'string') {
+      row.disabledReason = null
+    }
     accounts.push(row)
   }
   return accounts

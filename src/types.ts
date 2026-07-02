@@ -79,7 +79,12 @@ export interface SessionAssignment {
 export interface PoolFile {
   version: 1
   accounts: PoolAccount[]
-  /** providerID -> last selected account id (informational / debug). */
+  /**
+   * providerID -> account that most recently served a request. Drives the ▶
+   * "in use" marker in the status tool/CLI and the TUI bottom bar/sidebar;
+   * written on every fetch success and by `primeInUse` at startup. Never read
+   * by scheduling.
+   */
   lastSelected: Record<string, string>
   /** sessionKey -> assignment. Keeps a conversation pinned to one account. */
   sessions: Record<string, SessionAssignment>

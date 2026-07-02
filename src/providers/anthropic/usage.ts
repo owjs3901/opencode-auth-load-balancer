@@ -46,14 +46,18 @@ function parseHeaderWindow(
  */
 export function parseUsageHeaders(
   headers: Headers,
-  now: number,
 ): Partial<UsageSnapshot> | null {
   const h5 = headers.get('anthropic-ratelimit-unified-5h-utilization')
   const h7 = headers.get('anthropic-ratelimit-unified-7d-utilization')
   const status = headers.get('anthropic-ratelimit-unified-status')
   if (h5 === null && h7 === null && status === null) return null
 
-  const out: Partial<UsageSnapshot> = { capturedAt: now }
+  // Deliberately NO `capturedAt` here: `applyUsagePartial` (fetch.ts) stamps
+  // its own timestamp, and ONLY when a weekly window arrived — the staleness
+  // gate `refreshUsageInBackground` relies on. A parser-side stamp would be
+  // dead data at best and, if a future consumer trusted it, would resurrect
+  // the weekly-less-partial-marks-fresh bug locked by plugin.test.ts.
+  const out: Partial<UsageSnapshot> = {}
   // Short-circuit before `headers.get('...reset')` when the matching
   // utilization header is missing — `parseHeaderWindow` would only have
   // discarded the reset value via its now-removed null guard, so the

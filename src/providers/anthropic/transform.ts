@@ -226,7 +226,17 @@ function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
   if (isRecord(system)) {
     const type = typeof system.type === 'string' ? system.type : 'text'
     const text = typeof system.text === 'string' ? system.text : ''
-    return [identityBlock, { ...system, type, text: sanitizeSystemText(text) }]
+    const block: SystemBlock = {
+      ...system,
+      type,
+      text: sanitizeSystemText(text),
+    }
+    // Identity dedup, symmetric with the string branch above and the array
+    // branch below: a single object already carrying the identity text must
+    // not have a second identity block prepended. Keep the caller's extra
+    // fields (array-branch semantics).
+    if (block.text === CLAUDE_CODE_IDENTITY) return [block]
+    return [identityBlock, block]
   }
 
   if (!Array.isArray(system)) return [identityBlock]

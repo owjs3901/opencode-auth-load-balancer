@@ -439,7 +439,7 @@ export function createLoadBalancedFetch(
           `-> ${adapter.id} via ${account.label}${sticky ? ' (sticky)' : ''}${degraded ? ' (degraded)' : ''}`,
         )
 
-        const res = await fetch(transformedUrl as Parameters<typeof fetch>[0], {
+        const res = await fetch(transformedUrl, {
           ...init,
           body: transformedBody,
           headers,

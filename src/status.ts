@@ -161,7 +161,9 @@ export function pct(u: number | null | undefined): string {
 
 function relTime(at: number, now: number): string {
   if (at <= now) return '-'
-  const mins = Math.round((at - now) / 60_000)
+  // Floor at 1: a sub-30s future time would otherwise round to "0m", which
+  // reads as "already done" while the guard above reserves '-' for elapsed.
+  const mins = Math.max(1, Math.round((at - now) / 60_000))
   if (mins < 60) return `${mins}m`
   const hrs = Math.floor(mins / 60)
   if (hrs < 24) return `${hrs}h${mins % 60}m`

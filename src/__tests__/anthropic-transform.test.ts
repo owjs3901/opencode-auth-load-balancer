@@ -147,6 +147,21 @@ describe('rewriteRequestBody', () => {
     expect(out.system[1].text).toBe('hi')
   })
 
+  test('does not double-prepend when a record system IS the identity', () => {
+    const out = JSON.parse(
+      rewriteRequestBody(
+        JSON.stringify({
+          system: { type: 'text', text: CLAUDE_CODE_IDENTITY, extra: 'keep' },
+        }),
+      ),
+    )
+    const identityBlocks = out.system.filter(
+      (b: { text: string }) => b.text === CLAUDE_CODE_IDENTITY,
+    )
+    expect(identityBlocks).toHaveLength(1)
+    expect(identityBlocks[0].extra).toBe('keep')
+  })
+
   test('handles null system and no user message (no billing header)', () => {
     const out = JSON.parse(
       rewriteRequestBody(

@@ -25,13 +25,15 @@ function windowFromPercent(
  */
 export function parseUsageHeaders(
   headers: Headers,
-  now: number,
 ): Partial<UsageSnapshot> | null {
   const p = headers.get('x-codex-primary-used-percent')
   const s = headers.get('x-codex-secondary-used-percent')
   if (p === null && s === null) return null
 
-  const out: Partial<UsageSnapshot> = { capturedAt: now }
+  // Deliberately NO `capturedAt` (mirrors the Anthropic sibling): the sole
+  // production consumer, `applyUsagePartial` (fetch.ts), stamps its own
+  // timestamp only when a weekly window arrived — the staleness-gate contract.
+  const out: Partial<UsageSnapshot> = {}
   // Short-circuit before `headers.get('...reset-at')` when the matching
   // percent header is missing — `windowFromPercent` returns null on a null
   // percent anyway, so the map lookup was wasted work on every response that

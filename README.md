@@ -236,7 +236,7 @@ src/
   notify.ts             # toast on account switch
   usage-refresh.ts      # cold-start usage seeding via the usage endpoint
   prime.ts              # point the in-use marker at the top-ranked account at startup
-  scheduler/            # config, score-core (shared scorer) + score re-export, select
+  scheduler/            # config, score-core (shared scorer), select
   pool/                 # data-dir resolution + atomic, serialized pool store
   providers/            # ProviderAdapter contract + headers
     anthropic/          #   Claude OAuth + Claude Code request transforms + usage

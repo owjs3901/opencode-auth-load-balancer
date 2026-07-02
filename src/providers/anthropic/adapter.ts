@@ -64,9 +64,9 @@ export const anthropicAdapter: ProviderAdapter = {
 
   parseUsageHeaders(
     headers: Headers,
-    now: number,
+    _now: number,
   ): Partial<UsageSnapshot> | null {
-    return parseUsageHeaders(headers, now)
+    return parseUsageHeaders(headers)
   },
 
   fetchUsage(account: PoolAccount, now: number): Promise<UsageSnapshot | null> {

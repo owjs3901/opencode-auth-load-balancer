@@ -191,38 +191,32 @@ describe('anthropic usage', () => {
       'anthropic-ratelimit-unified-7d-reset': SEC(86400),
       'anthropic-ratelimit-unified-status': 'allowed_warning',
     })
-    const u = aParse(h, 1000)
+    const u = aParse(h)
     expect(u?.hourly?.utilization).toBeCloseTo(0.1, 5)
     expect(u?.weekly?.utilization).toBeCloseTo(0.5, 5)
     expect(u?.status).toBe('warning')
     expect(
-      aParse(
-        new Headers({ 'anthropic-ratelimit-unified-status': 'allowed' }),
-        0,
-      )?.status,
+      aParse(new Headers({ 'anthropic-ratelimit-unified-status': 'allowed' }))
+        ?.status,
     ).toBe('allowed')
     expect(
-      aParse(
-        new Headers({ 'anthropic-ratelimit-unified-status': 'rejected' }),
-        0,
-      )?.status,
+      aParse(new Headers({ 'anthropic-ratelimit-unified-status': 'rejected' }))
+        ?.status,
     ).toBe('rejected')
   })
 
   test('parseUsageHeaders: null when absent, ignores NaN, zero reset when missing', () => {
-    expect(aParse(new Headers(), 0)).toBeNull()
+    expect(aParse(new Headers())).toBeNull()
     const bad = aParse(
       new Headers({
         'anthropic-ratelimit-unified-5h-utilization': 'abc',
         'anthropic-ratelimit-unified-status': 'allowed',
       }),
-      0,
     )
     expect(bad?.hourly).toBeUndefined()
     expect(
       aParse(
         new Headers({ 'anthropic-ratelimit-unified-7d-utilization': '0.3' }),
-        0,
       )?.weekly?.resetAt,
     ).toBe(0)
   })
@@ -243,7 +237,6 @@ describe('anthropic usage', () => {
         'anthropic-ratelimit-unified-7d-utilization': '0.50',
         'anthropic-ratelimit-unified-7d-reset': '1e308',
       }),
-      0,
     )
     expect(u?.hourly?.resetAt).toBe(0)
     expect(u?.weekly?.resetAt).toBe(0)
@@ -543,18 +536,18 @@ describe('openai usage', () => {
       'x-codex-secondary-used-percent': '40',
       'x-codex-secondary-reset-at': '1900000000',
     })
-    const u = oParse(h, 0)
+    const u = oParse(h)
     expect(u?.hourly?.utilization).toBeCloseTo(0.125, 5)
     expect(u?.weekly?.utilization).toBeCloseTo(0.4, 5)
   })
 
   test('parseUsageHeaders: null when absent, NaN ignored, zero reset when missing', () => {
-    expect(oParse(new Headers(), 0)).toBeNull()
+    expect(oParse(new Headers())).toBeNull()
     expect(
-      oParse(new Headers({ 'x-codex-primary-used-percent': 'abc' }), 0)?.hourly,
+      oParse(new Headers({ 'x-codex-primary-used-percent': 'abc' }))?.hourly,
     ).toBeUndefined()
     expect(
-      oParse(new Headers({ 'x-codex-secondary-used-percent': '5' }), 0)?.weekly
+      oParse(new Headers({ 'x-codex-secondary-used-percent': '5' }))?.weekly
         ?.resetAt,
     ).toBe(0)
   })
@@ -571,7 +564,6 @@ describe('openai usage', () => {
         'x-codex-secondary-used-percent': '40',
         'x-codex-secondary-reset-at': '1e308',
       }),
-      0,
     )
     expect(u?.hourly?.resetAt).toBe(0)
     expect(u?.weekly?.resetAt).toBe(0)

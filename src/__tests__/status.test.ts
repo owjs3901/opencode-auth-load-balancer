@@ -159,6 +159,17 @@ describe('renderStatus', () => {
     expect(out).toContain('30m')
   })
 
+  test('floors a sub-minute future cooldown at 1m (never "0m")', () => {
+    // 20s from now would Math.round to 0 -> "cooldown 0m", which reads as
+    // "already done" while '-' is reserved for actually elapsed times.
+    const p = pool([
+      acc({ id: 'soon', weekly: win(0.5, HOUR), cooldownUntil: NOW + 20_000 }),
+    ])
+    const out = renderStatus(buildStatus(p, NOW), NOW)
+    expect(out).toContain('cooldown 1m')
+    expect(out).not.toContain('cooldown 0m')
+  })
+
   test('reports when no accounts are registered', () => {
     expect(renderStatus([], NOW)).toContain('no accounts registered')
   })

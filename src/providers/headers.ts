@@ -23,7 +23,7 @@ export function mergeHeaders(input: FetchInput, init?: RequestInit): Headers {
     })
   } else if (Array.isArray(initHeaders)) {
     for (const entry of initHeaders) {
-      const [key, value] = entry as [string, string]
+      const [key, value] = entry as [string, unknown]
       if (value !== undefined) headers.set(key, String(value))
     }
   } else {

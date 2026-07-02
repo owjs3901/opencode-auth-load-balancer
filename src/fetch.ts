@@ -90,12 +90,20 @@ function applyUsagePartial(
   }
 }
 
+// Real quota-driven Retry-After values are bounded by the weekly usage window
+// (≤ 7 days). Anything past this bound is a broken server/proxy and is treated
+// exactly like the +Infinity overflow case: fall through to the `fallbackMs`
+// default (which self-heals) instead of sidelining the account for years.
+const RETRY_AFTER_MAX_MS = 8 * 24 * 60 * 60 * 1000
+
 /**
  * Compute the absolute cooldown target (epoch ms) for a rejected response.
  * Defaults to `now + fallbackMs`, but honors `Retry-After` (RFC 9110 §10.2.3):
- * either delay-seconds or an HTTP-date. Pure (takes `now` explicitly) so both
- * the standalone `applyCooldown` and the folded `recordRotation` write share
- * the exact same parsing + overflow-guard math instead of re-implementing it.
+ * either delay-seconds or an HTTP-date — each bounded by `RETRY_AFTER_MAX_MS`,
+ * so a bogus value can never sideline an account past any real quota window.
+ * Pure (takes `now` explicitly) so both the standalone `applyCooldown` and the
+ * folded `recordRotation` write share the exact same parsing + overflow-guard
+ * math instead of re-implementing it.
  */
 function cooldownUntilFrom(
   res: Response | null,
@@ -110,14 +118,26 @@ function cooldownUntilFrom(
       // Guard: `secs` like 1e308 is itself finite, but `secs * 1000` exceeds
       // Number.MAX_VALUE (~1.798e308) and collapses to +Infinity, which would
       // set `cooldownUntil` to +Infinity and permanently sideline the account
-      // (`account.cooldownUntil > now` would be true forever). Fall through to
-      // the `fallbackMs` default in that case.
+      // (`account.cooldownUntil > now` would be true forever). A finite-but-
+      // absurd delta (e.g. `Retry-After: 1e10` → ~317 years) sidelines the
+      // account just as permanently, so both fall through to the `fallbackMs`
+      // default via the RETRY_AFTER_MAX_MS bound. (`NaN <= x` is false, so the
+      // single comparison also rejects the Infinity case; Number.isFinite stays
+      // for clarity.)
       const delta = secs * 1000
-      if (Number.isFinite(delta)) until = now + delta
+      if (Number.isFinite(delta) && delta <= RETRY_AFTER_MAX_MS)
+        until = now + delta
     } else {
       // RFC 9110 §10.2.3: Retry-After MAY be HTTP-date instead of delay-seconds.
+      // Same bound: a far-future date (broken server clock/proxy) must not
+      // sideline the account past any real quota window.
       const httpDate = Date.parse(retryAfter)
-      if (Number.isFinite(httpDate) && httpDate > now) until = httpDate
+      if (
+        Number.isFinite(httpDate) &&
+        httpDate > now &&
+        httpDate - now <= RETRY_AFTER_MAX_MS
+      )
+        until = httpDate
     }
   }
   return until

@@ -30,27 +30,16 @@ import { SESSION_HEADER } from '../session'
 import type { PoolAccount } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
 import { testAccount } from './fixtures/account'
+import { type Responder, responderFetch } from './fixtures/fetch-mock'
 
 const realFetch = globalThis.fetch
-type Responder = (
-  url: string,
-  init?: RequestInit,
-) => Response | Promise<Response>
 let respond: Responder
 
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_LB_DIR = DIR
   await rm(POOL, { force: true })
   respond = () => new Response('{}', { status: 200 })
-  globalThis.fetch = ((input: unknown, init?: RequestInit) => {
-    const url =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.href
-          : (input as Request).url
-    return Promise.resolve(respond(url, init))
-  }) as typeof fetch
+  globalThis.fetch = responderFetch(() => respond)
 })
 afterEach(() => {
   globalThis.fetch = realFetch

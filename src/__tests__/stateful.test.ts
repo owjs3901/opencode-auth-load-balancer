@@ -22,8 +22,14 @@ import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import type { ProviderAdapter } from '../providers/types'
 import { ensureAccessToken, needsRefresh } from '../refresh'
-import type { PoolAccount, TokenSet, UsageSnapshot } from '../types'
+import {
+  emptyUsage,
+  type PoolAccount,
+  type TokenSet,
+  type UsageSnapshot,
+} from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
+import { sleep } from '../util'
 import { testAccount } from './fixtures/account'
 
 beforeEach(async () => {
@@ -357,7 +363,7 @@ describe('refresh', () => {
     const adapter = fakeAdapter({
       refresh: async () => {
         called += 1
-        await new Promise((r) => setTimeout(r, 10))
+        await sleep(10)
         return {
           access: 'fresh',
           refresh: 'r2',
@@ -391,7 +397,7 @@ describe('refresh', () => {
     const adapter = fakeAdapter({
       refresh: async () => {
         called += 1
-        await new Promise((r) => setTimeout(r, 10))
+        await sleep(10)
         return {
           access: 'fresh',
           refresh: 'r-new',
@@ -435,7 +441,7 @@ describe('refresh', () => {
     const adapter = fakeAdapter({
       refresh: async () => {
         called += 1
-        await new Promise((r) => setTimeout(r, 10))
+        await sleep(10)
         throw new Error('invalid_grant')
       },
     })
@@ -485,7 +491,7 @@ describe('refresh', () => {
     const adapter = fakeAdapter({
       refresh: async () => {
         called += 1
-        await new Promise((r) => setTimeout(r, 10))
+        await sleep(10)
         // Status-anchored 503: isInvalidGrant returns false (not 400/401)
         // even though the body coincidentally contains "invalid_grant" —
         // mirrors the existing "5xx body coincidentally contains" tests
@@ -875,7 +881,7 @@ describe('accounts', () => {
 describe('usage-refresh', () => {
   test('seeds usage for a stale account via the usage endpoint', async () => {
     const a = account({
-      usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
+      usage: emptyUsage(),
     })
     await mutatePool((pool) => {
       pool.accounts.push({ ...a })
@@ -1009,7 +1015,7 @@ describe('usage-refresh', () => {
   test('swallows errors from the refresh/usage path', async () => {
     const a = account({
       expires: Date.now() - 1,
-      usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
+      usage: emptyUsage(),
     })
     await mutatePool((pool) => {
       pool.accounts.push({ ...a })
@@ -1038,15 +1044,15 @@ describe('usage-refresh', () => {
     // `polledRecently` and NOT re-poll fetchUsage.
     const a1 = account({
       providerID: 'anthropic',
-      usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
+      usage: emptyUsage(),
     })
     const a2 = account({
       providerID: 'anthropic',
-      usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
+      usage: emptyUsage(),
     })
     const o1 = account({
       providerID: 'openai',
-      usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
+      usage: emptyUsage(),
     })
     await mutatePool((pool) => {
       pool.accounts.push({ ...a1 }, { ...a2 }, { ...o1 })

@@ -20,26 +20,14 @@ import {
 } from '../providers/openai/usage'
 import type { PoolAccount } from '../types'
 import { testAccount } from './fixtures/account'
-
-type Responder = (
-  url: string,
-  init?: RequestInit,
-) => Response | Promise<Response>
+import { type Responder, responderFetch } from './fixtures/fetch-mock'
 
 const realFetch = globalThis.fetch
 let respond: Responder
 
 beforeEach(() => {
   respond = () => new Response('{}', { status: 200 })
-  globalThis.fetch = ((input: unknown, init?: RequestInit) => {
-    const url =
-      typeof input === 'string'
-        ? input
-        : input instanceof URL
-          ? input.href
-          : (input as Request).url
-    return Promise.resolve(respond(url, init))
-  }) as typeof fetch
+  globalThis.fetch = responderFetch(() => respond)
 })
 afterEach(() => {
   globalThis.fetch = realFetch

@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 
 import { acquireLock, LockTimeoutError, withLock } from '../pool/lock'
+import { sleep } from '../util'
 
 const ROOT = mkdtempSync(join(tmpdir(), 'auth-lb-lock-'))
 
@@ -13,10 +14,6 @@ let seq = 0
 function lockPath(name: string): string {
   seq += 1
   return join(ROOT, `${name}-${seq}.lock`)
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 async function dirExists(path: string): Promise<boolean> {

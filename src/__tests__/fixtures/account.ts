@@ -1,4 +1,4 @@
-import type { PoolAccount } from '../../types'
+import { emptyUsage, type PoolAccount } from '../../types'
 
 /**
  * Shared PoolAccount test fixture. Every test file's per-file builder
@@ -15,7 +15,7 @@ export function testAccount(over: Partial<PoolAccount> = {}): PoolAccount {
     refresh: 'r',
     expires: 0,
     accountId: null,
-    usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
+    usage: emptyUsage(),
     cooldownUntil: 0,
     disabledReason: null,
     createdAt: 0,

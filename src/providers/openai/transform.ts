@@ -119,9 +119,9 @@ export function rewriteRequestBody(body: string): string {
 
     const include = Array.isArray(obj.include) ? (obj.include as string[]) : []
     // Common steady-state case: opencode already sends the encrypted-reasoning
-    // entry with no duplicates, so the array is already correct — reuse it and
-    // skip the Set construction + spread. Only rebuild (de-dup + append) when the
-    // entry is missing or the array carries duplicates.
+    // entry with no duplicates, so the array is already correct — reuse it as
+    // is. One Set is always built to DETECT duplicates; what the guard skips in
+    // the steady state is the REBUILD (a second Set + two spreads + new array).
     obj.include =
       include.includes('reasoning.encrypted_content') &&
       new Set(include).size === include.length

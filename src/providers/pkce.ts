@@ -1,9 +1,8 @@
 /**
  * Shared PKCE (RFC 7636) helper used by both the Anthropic and OpenAI OAuth
- * flows. The per-provider files were byte-identical except that anthropic also
- * returned `method: 'S256'`. The unified shape always includes `method: 'S256'`;
- * the openai consumer simply ignores it, and the anthropic `oauth.ts` hard-codes
- * the literal `'S256'` into the URL params anyway.
+ * flows (the per-provider copies were byte-identical). Only the S256 method is
+ * supported; both consumers hard-code `code_challenge_method=S256` into their
+ * URL params, so the method is not part of the return shape.
  */
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -13,7 +12,6 @@ function base64UrlEncode(bytes: Uint8Array): string {
 export async function generatePKCE(): Promise<{
   verifier: string
   challenge: string
-  method: 'S256'
 }> {
   const buf = new Uint8Array(64)
   crypto.getRandomValues(buf)
@@ -25,6 +23,5 @@ export async function generatePKCE(): Promise<{
   return {
     verifier,
     challenge: base64UrlEncode(new Uint8Array(digest)),
-    method: 'S256',
   }
 }

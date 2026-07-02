@@ -185,6 +185,14 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
         name: tool.schema.string().describe('New label for the account'),
       },
       execute: async ({ account, name }) => {
+        // An empty label renders blank in the toast/dashboard/TUI and can never
+        // be matched by label again — reject before touching the pool.
+        const trimmed = name.trim()
+        if (!trimmed)
+          return {
+            title: 'Auth Load Balancer',
+            output: 'New label must not be empty.',
+          }
         const result = await mutatePool((pool) => {
           const target = pool.accounts.find(
             (a) => a.id === account || a.label === account,
@@ -192,22 +200,32 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
           if (!target)
             return {
               ok: false as const,
+              reason: 'missing' as const,
               labels: pool.accounts.map((a) => `${a.label} (${a.providerID})`),
             }
+          // Duplicate labels make rename-by-label ambiguous (the first match
+          // wins), so refuse to create a second account with the same label.
+          if (
+            pool.accounts.some((a) => a.id !== target.id && a.label === trimmed)
+          )
+            return { ok: false as const, reason: 'taken' as const }
           const previous = target.label
-          target.label = name
+          target.label = trimmed
           return { ok: true as const, previous }
         })
         if (!result.ok)
           return {
             title: 'Auth Load Balancer',
-            output: `No account matching "${account}". Available: ${
-              result.labels.join(', ') || '(none)'
-            }`,
+            output:
+              result.reason === 'taken'
+                ? `Label "${trimmed}" is already used by another account.`
+                : `No account matching "${account}". Available: ${
+                    result.labels.join(', ') || '(none)'
+                  }`,
           }
         return {
           title: 'Auth Load Balancer',
-          output: `Renamed "${result.previous}" → "${name}".`,
+          output: `Renamed "${result.previous}" → "${trimmed}".`,
         }
       },
     }),

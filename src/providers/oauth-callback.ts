@@ -5,8 +5,38 @@
  * (95%-identical: the Anthropic variant also accepts the legacy `code#state`
  * hash-split format pasted manually by users). Keeping two copies meant every
  * future tweak (new callback format, whitespace normalization) had to be made
- * in two places to stay consistent.
+ * in two places to stay consistent. `readTokenResponse` unifies the same way:
+ * the token-endpoint 200-body validation was copy-pasted four times (exchange
+ * + refresh, per provider).
  */
+
+/** The fields every provider's token-endpoint response must carry. */
+export interface BaseTokenResponse {
+  access_token: string
+  refresh_token?: string
+  expires_in: number
+}
+
+/**
+ * Parse and validate an OAuth token-endpoint 200 body. Returns null when the
+ * body is not JSON or is missing `access_token`/`expires_in` — otherwise a
+ * SyntaxError escapes into the login flow, or a missing `expires_in` poisons
+ * the pool with `expires: NaN` (which `needsRefresh` never treats as stale).
+ * Callers decide the failure shape: exchange sites return null, refresh sites
+ * throw their status-prefixed "malformed token response body" error.
+ */
+export async function readTokenResponse<
+  T extends BaseTokenResponse = BaseTokenResponse,
+>(res: Response): Promise<T | null> {
+  const json = (await res.json().catch(() => null)) as T | null
+  if (
+    !json ||
+    typeof json.access_token !== 'string' ||
+    typeof json.expires_in !== 'number'
+  )
+    return null
+  return json
+}
 
 /** Generate an opaque OAuth `state` parameter (32-char hex, no hyphens). */
 export function generateState(): string {

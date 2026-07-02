@@ -1,5 +1,11 @@
 import { LockTimeoutError } from './pool/lock'
-import { findAccount, mutatePool, PoolWriteError, readPool } from './pool/store'
+import {
+  findAccount,
+  mutatePool,
+  PoolReadError,
+  PoolWriteError,
+  readPool,
+} from './pool/store'
 import { PROVIDER_ID as ANTHROPIC_PROVIDER_ID } from './providers/anthropic/constants'
 import { mergeHeaders } from './providers/headers'
 import type { FetchInput, ProviderAdapter } from './providers/types'
@@ -36,7 +42,11 @@ export async function bestEffort(
   try {
     await op()
   } catch (error) {
-    if (error instanceof LockTimeoutError || error instanceof PoolWriteError) {
+    if (
+      error instanceof LockTimeoutError ||
+      error instanceof PoolReadError ||
+      error instanceof PoolWriteError
+    ) {
       log(`bookkeeping skipped (${what}): ${error.message}`)
       return
     }

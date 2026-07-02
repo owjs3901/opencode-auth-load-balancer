@@ -336,8 +336,7 @@ describe('cch billing header', () => {
 
 describe('pkce', () => {
   test('generates a base64url verifier + challenge', async () => {
-    const { verifier, challenge, method } = await generatePKCE()
-    expect(method).toBe('S256')
+    const { verifier, challenge } = await generatePKCE()
     expect(verifier).not.toMatch(/[+/=]/)
     expect(challenge).not.toMatch(/[+/=]/)
     expect(verifier.length).toBeGreaterThan(40)

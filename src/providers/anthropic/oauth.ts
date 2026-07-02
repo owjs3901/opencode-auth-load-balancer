@@ -1,6 +1,10 @@
 import type { TokenSet } from '../../types'
 import { ignore } from '../../util'
-import { generateState, parseCallbackInput } from '../oauth-callback'
+import {
+  generateState,
+  parseCallbackInput,
+  readTokenResponse,
+} from '../oauth-callback'
 import { generatePKCE } from '../pkce'
 import type { AuthorizeRequest } from '../types'
 import {
@@ -11,12 +15,6 @@ import {
   OAUTH_SCOPES,
   TOKEN_URL,
 } from './constants'
-
-interface TokenResponse {
-  access_token: string
-  refresh_token?: string
-  expires_in: number
-}
 
 /**
  * POST a JSON body to TOKEN_URL with the shared Claude OAuth shell.
@@ -87,16 +85,9 @@ export async function exchange(
   }
 
   // "Returns null on failure" includes a 200 whose body is not JSON or is
-  // missing the required fields — otherwise a SyntaxError escapes into the
-  // login flow, or a missing expires_in poisons the pool with `expires: NaN`
-  // (which needsRefresh never treats as stale).
-  const json = (await result.json().catch(() => null)) as TokenResponse | null
-  if (
-    !json ||
-    typeof json.access_token !== 'string' ||
-    typeof json.expires_in !== 'number'
-  )
-    return null
+  // missing the required fields — see readTokenResponse.
+  const json = await readTokenResponse(result)
+  if (!json) return null
   return {
     access: json.access_token,
     // RFC 6749 §5.1: server MAY omit refresh_token; at exchange time there is
@@ -121,18 +112,13 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
     throw new Error(`Token refresh failed: ${response.status} — ${body}`)
   }
 
-  // Validate the 200 body like exchange() does: a non-JSON 200 or a JSON 200
-  // missing access_token/expires_in must never reach commitRefresh, or the
-  // account gets `expires: NaN` (which needsRefresh never treats as stale) and
-  // soft-bricks into a perpetual auth-cooldown loop that survives restarts.
-  // The status-prefixed message keeps isInvalidGrant() false (200 ≠ 400/401),
-  // so the failure stays transient — the account is NOT disabled.
-  const json = (await response.json().catch(() => null)) as TokenResponse | null
-  if (
-    !json ||
-    typeof json.access_token !== 'string' ||
-    typeof json.expires_in !== 'number'
-  )
+  // A malformed 200 body must never reach commitRefresh, or the account gets
+  // `expires: NaN` (which needsRefresh never treats as stale) and soft-bricks
+  // into a perpetual auth-cooldown loop that survives restarts. The
+  // status-prefixed message keeps isInvalidGrant() false (200 ≠ 400/401), so
+  // the failure stays transient — the account is NOT disabled.
+  const json = await readTokenResponse(response)
+  if (!json)
     throw new Error(
       `Token refresh failed: ${response.status} — malformed token response body`,
     )

@@ -87,10 +87,18 @@ function prefixToolNames(parsed: Record<string, unknown>): string {
   return JSON.stringify(parsed)
 }
 
+/**
+ * Runs once per SSE chunk (createStrippedStream's pull loop), so the regex is
+ * hoisted to module scope to avoid re-creating the RegExp object per chunk.
+ * Sharing one `/g` instance is safe here: `String.prototype.replace` resets
+ * `lastIndex` before scanning, leaving no cross-call state.
+ */
+const MCP_TOOL_NAME_RE = /"name"\s*:\s*"mcp_([^"]+)"/g
+
 /** Strip the tool prefix from tool names in streaming response text. */
 export function stripToolPrefix(text: string): string {
   return text.replace(
-    /"name"\s*:\s*"mcp_([^"]+)"/g,
+    MCP_TOOL_NAME_RE,
     (_m, name: string) => `"name": "${unprefixName(name)}"`,
   )
 }

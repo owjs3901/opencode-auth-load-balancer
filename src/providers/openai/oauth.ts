@@ -1,6 +1,11 @@
 import type { TokenSet } from '../../types'
 import { ignore } from '../../util'
-import { generateState, parseCallbackInput } from '../oauth-callback'
+import {
+  type BaseTokenResponse,
+  generateState,
+  parseCallbackInput,
+  readTokenResponse,
+} from '../oauth-callback'
 import { generatePKCE } from '../pkce'
 import type { AuthorizeRequest } from '../types'
 import {
@@ -14,11 +19,8 @@ import {
 } from './constants'
 import { extractAccountId } from './jwt'
 
-interface TokenResponse {
-  access_token: string
-  refresh_token?: string
+interface TokenResponse extends BaseTokenResponse {
   id_token?: string
-  expires_in: number
 }
 
 function toTokenSet(json: TokenResponse, previousRefresh: string): TokenSet {
@@ -101,17 +103,10 @@ export async function exchange(
   }
 
   // "Returns null on failure" includes a 200 whose body is not JSON or is
-  // missing the required fields — otherwise a SyntaxError escapes into the
-  // login flow, or a missing expires_in poisons the pool with `expires: NaN`
-  // (which needsRefresh never treats as stale). Symmetric with
+  // missing the required fields — see readTokenResponse. Symmetric with
   // ../anthropic/oauth.ts.
-  const json = (await res.json().catch(() => null)) as TokenResponse | null
-  if (
-    !json ||
-    typeof json.access_token !== 'string' ||
-    typeof json.expires_in !== 'number'
-  )
-    return null
+  const json = await readTokenResponse<TokenResponse>(res)
+  if (!json) return null
   return toTokenSet(json, '')
 }
 
@@ -129,19 +124,14 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
     throw new Error(`Token refresh failed: ${res.status} — ${text}`)
   }
 
-  // Validate the 200 body like exchange() does: a non-JSON 200 or a JSON 200
-  // missing access_token/expires_in must never reach commitRefresh, or the
-  // account gets `expires: NaN` (which needsRefresh never treats as stale) and
-  // soft-bricks into a perpetual auth-cooldown loop that survives restarts.
-  // The status-prefixed message keeps isInvalidGrant() false (200 ≠ 400/401),
-  // so the failure stays transient — the account is NOT disabled. Symmetric
-  // with ../anthropic/oauth.ts.
-  const json = (await res.json().catch(() => null)) as TokenResponse | null
-  if (
-    !json ||
-    typeof json.access_token !== 'string' ||
-    typeof json.expires_in !== 'number'
-  )
+  // A malformed 200 body must never reach commitRefresh, or the account gets
+  // `expires: NaN` (which needsRefresh never treats as stale) and soft-bricks
+  // into a perpetual auth-cooldown loop that survives restarts. The
+  // status-prefixed message keeps isInvalidGrant() false (200 ≠ 400/401), so
+  // the failure stays transient — the account is NOT disabled. Symmetric with
+  // ../anthropic/oauth.ts.
+  const json = await readTokenResponse<TokenResponse>(res)
+  if (!json)
     throw new Error(
       `Token refresh failed: ${res.status} — malformed token response body`,
     )

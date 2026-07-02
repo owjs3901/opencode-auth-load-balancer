@@ -16,7 +16,12 @@ import {
 } from '../index'
 import type { ToastClient } from '../notify'
 import { LockTimeoutError } from '../pool/lock'
-import { mutatePool, PoolWriteError, readPool } from '../pool/store'
+import {
+  mutatePool,
+  PoolReadError,
+  PoolWriteError,
+  readPool,
+} from '../pool/store'
 import { primeInUse } from '../prime'
 import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
@@ -1041,6 +1046,70 @@ describe('toast on switch + status tool', () => {
     )
   })
 
+  test('auth_lb_rename: rejects an empty or whitespace-only new label without mutating', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'r1', label: 'keep-me' }))
+    })
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+
+    const empty = await hooks.tool.auth_lb_rename.execute({
+      account: 'r1',
+      name: '',
+    })
+    expect(empty.output).toContain('must not be empty')
+
+    const blank = await hooks.tool.auth_lb_rename.execute({
+      account: 'r1',
+      name: '   ',
+    })
+    expect(blank.output).toContain('must not be empty')
+    expect((await readPool()).accounts.find((a) => a.id === 'r1')?.label).toBe(
+      'keep-me',
+    )
+  })
+
+  test('auth_lb_rename: rejects a label already used by ANOTHER account (rename-by-label stays unambiguous), but allows renaming an account to its own label', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({ id: 'r1', label: 'alpha' }),
+        account({ id: 'r2', label: 'beta' }),
+      )
+    })
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+
+    const clash = await hooks.tool.auth_lb_rename.execute({
+      account: 'r2',
+      name: 'alpha',
+    })
+    expect(clash.output).toContain('already used by another account')
+    expect((await readPool()).accounts.find((a) => a.id === 'r2')?.label).toBe(
+      'beta',
+    )
+
+    // Self-rename (e.g. re-applying the same label) is not a collision.
+    const self = await hooks.tool.auth_lb_rename.execute({
+      account: 'r1',
+      name: 'alpha',
+    })
+    expect(self.output).toContain('Renamed "alpha" → "alpha"')
+  })
+
+  test('auth_lb_rename: trims surrounding whitespace before persisting the new label', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'r1', label: 'old' }))
+    })
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+
+    const result = await hooks.tool.auth_lb_rename.execute({
+      account: 'r1',
+      name: '  spaced-name  ',
+    })
+    expect(result.output).toContain('Renamed "old" → "spaced-name"')
+    expect((await readPool()).accounts.find((a) => a.id === 'r1')?.label).toBe(
+      'spaced-name',
+    )
+  })
+
   test('primeInUse points the in-use marker at the top-ranked (soonest-reset) account', async () => {
     await mutatePool((pool) => {
       pool.accounts.push(
@@ -1290,6 +1359,14 @@ describe('bestEffort bookkeeping', () => {
     await expect(
       bestEffort('x', async () => {
         throw new PoolWriteError('/tmp/pool.json', new Error('disk full'))
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  test('swallows a PoolReadError (a transient read fault must not fail a served response)', async () => {
+    await expect(
+      bestEffort('x', async () => {
+        throw new PoolReadError('/tmp/pool.json', new Error('EBUSY'))
       }),
     ).resolves.toBeUndefined()
   })

@@ -1,5 +1,5 @@
-import { mkdtempSync } from 'node:fs'
-import { rm, writeFile } from 'node:fs/promises'
+import { mkdtempSync, statSync } from 'node:fs'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -13,6 +13,7 @@ import {
   findAccount,
   type FsOps,
   mutatePool,
+  PoolReadError,
   PoolWriteError,
   readPool,
   writeJsonAtomic,
@@ -78,6 +79,30 @@ describe('pool store', () => {
   test('readPool returns empty on a corrupt/unknown-version file', async () => {
     await writeFile(POOL, JSON.stringify({ version: 2, accounts: [] }))
     expect((await readPool()).accounts).toHaveLength(0)
+  })
+
+  test('readPool tolerates hand-broken (non-JSON) file contents as an empty pool', async () => {
+    await writeFile(POOL, 'not json {{')
+    expect((await readPool()).accounts).toHaveLength(0)
+  })
+
+  test('mutatePool rejects with PoolReadError on a non-ENOENT read fault instead of wiping the pool', async () => {
+    // A DIRECTORY at the pool path makes readFile fail with EISDIR on every OS —
+    // a stand-in for the transient EACCES/EMFILE/EBUSY/EPERM family. Pre-fix,
+    // readRaw swallowed this into an EMPTY pool which mutatePool then wrote
+    // back, atomically destroying every registered account.
+    await mkdir(POOL)
+    try {
+      await expect(
+        mutatePool((pool) => {
+          pool.accounts.push(account())
+        }),
+      ).rejects.toThrow(PoolReadError)
+      // The path was NOT replaced by an empty pool file — still the directory.
+      expect(statSync(POOL).isDirectory()).toBe(true)
+    } finally {
+      await rm(POOL, { recursive: true, force: true })
+    }
   })
 
   test('mutatePool persists, readPool reflects, findAccount locates', async () => {

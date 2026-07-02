@@ -42,6 +42,24 @@ export class PoolWriteError extends Error {
 }
 
 /**
+ * Thrown when the pool file exists but cannot be READ (EACCES, EMFILE, Windows
+ * EBUSY/EPERM from an AV tool, EISDIR…). Deliberately distinct from the two
+ * tolerated read outcomes (missing file, corrupt JSON → empty pool): inside
+ * `mutatePool` a swallowed transient read fault would mutate an EMPTY pool and
+ * write it back — atomically WIPING every registered account. Bubbling a typed
+ * error lets `bestEffort` skip the bookkeeping write instead.
+ */
+export class PoolReadError extends Error {
+  constructor(
+    readonly path: string,
+    readonly reason: unknown,
+  ) {
+    super(`Failed to read pool file: ${path}`)
+    this.name = 'PoolReadError'
+  }
+}
+
+/**
  * In-process mutex. opencode issues many concurrent requests through one process,
  * and every request may read-modify-write the pool (usage updates, cooldowns,
  * token refresh). Serializing those mutations prevents lost updates.
@@ -54,8 +72,17 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 async function readRaw(): Promise<PoolFile> {
+  let text: string
   try {
-    const text = await readFile(poolFilePath(), 'utf8')
+    text = await readFile(poolFilePath(), 'utf8')
+  } catch (error) {
+    // Only "file absent" means an empty pool. Any other fs failure (EACCES,
+    // EMFILE, Windows EBUSY/EPERM, EISDIR…) is transient/environmental — see
+    // PoolReadError above for why it must NOT be treated as an empty pool.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyPool()
+    throw new PoolReadError(poolFilePath(), error)
+  }
+  try {
     const parsed = JSON.parse(text) as Partial<PoolFile>
     if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.accounts)) {
       return emptyPool()
@@ -69,6 +96,7 @@ async function readRaw(): Promise<PoolFile> {
       sessions: parsed.sessions ?? {},
     }
   } catch {
+    // The pool file is user-editable; tolerate hand-broken JSON as empty.
     return emptyPool()
   }
 }
@@ -127,7 +155,9 @@ export async function writeJsonAtomic(
       return
     } catch (error) {
       lastError = error
-      await sleep(RENAME_RETRY_MS)
+      // The sleep separates ATTEMPTS; after the final failure there is nothing
+      // left to wait for — throw immediately instead of one useless backoff.
+      if (attempt < RENAME_RETRIES - 1) await sleep(RENAME_RETRY_MS)
     }
   }
   await ops.unlink(tmp).catch(ignore)

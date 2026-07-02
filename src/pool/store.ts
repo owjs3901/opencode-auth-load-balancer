@@ -240,7 +240,8 @@ export async function writeJsonAtomic(
   ops: FsOps = realFsOps,
 ): Promise<void> {
   // mkdir and writeFile failures must also surface as PoolWriteError, otherwise
-  // `bestEffort` (which only swallows LockTimeoutError | PoolWriteError) lets a
+  // `bestEffort` (which only swallows LockTimeoutError | PoolReadError |
+  // PoolWriteError) lets a
   // raw fs error escape and kill an already-served request. EACCES/ENOSPC/EROFS,
   // and Windows EBUSY/EPERM when a virus scanner holds the file or dir, all hit
   // these two paths. The rename-failure branch below already wraps the same way.

@@ -94,19 +94,17 @@ function toPoolShape(parsed: unknown): PoolShape {
     return {}
   }
   const pool = parsed as PoolShape
-  if (pool.accounts !== undefined && !Array.isArray(pool.accounts)) {
-    pool.accounts = undefined
-  } else if (pool.accounts !== undefined) {
-    // Row-level mirror of the server's `normalizeAccounts` drop: a hand-edited
-    // `accounts: [null, …]` (or a primitive element) otherwise throws inside
-    // the BottomBar/SidebarPanel memos (`x.id` on null) every poll until the
-    // file is repaired by hand — the server only heals it on its next write.
-    pool.accounts = pool.accounts.filter(
-      (r) => r !== null && typeof r === 'object' && !Array.isArray(r),
-    )
-  }
+  // Row-level mirror of the server's `normalizeAccounts` drop: a hand-edited
+  // `accounts: [null, …]` (or a primitive element) otherwise throws inside
+  // the BottomBar/SidebarPanel memos (`x.id` on null) every poll until the
+  // file is repaired by hand — the server only heals it on its next write.
+  pool.accounts = Array.isArray(pool.accounts)
+    ? pool.accounts.filter(
+        (r) => r !== null && typeof r === 'object' && !Array.isArray(r),
+      )
+    : undefined
   // `lastSelected` / `sessions` must be plain records (the server heals these
-  // via `isPlainRecord`). A hand-edited primitive (`"lastSelected": "oops"`)
+  // via `isPlainObject`). A hand-edited primitive (`"lastSelected": "oops"`)
   // or array otherwise survives: `Object.entries` on a string iterates
   // per-character garbage every poll, and `mutatePoolFile` writes the corrupt
   // shape back. Reject to `undefined` so the `?? {}` fallbacks apply and the
@@ -116,7 +114,7 @@ function toPoolShape(parsed: unknown): PoolShape {
   return pool
 }
 
-/** True for a plain JSON object — mirrors `isPlainRecord` in src/pool/store.ts. */
+/** True for a plain JSON object — mirrors `isPlainObject` (src/util.ts), used by src/pool/store.ts. */
 function isPlainRecordValue(value: unknown): boolean {
   return (
     value === undefined ||

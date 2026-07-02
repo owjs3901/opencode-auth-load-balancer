@@ -294,7 +294,7 @@ describe('pool store', () => {
   })
 
   test('readPool drops hand-edited garbage session ROWS (they would evade the TTL prune forever)', async () => {
-    // isPlainRecord validates only the sessions CONTAINER; a garbage row
+    // isPlainObject validates only the sessions CONTAINER; a garbage row
     // (`"k": "oops"`, or `updatedAt: "yesterday"`) survived raw. The TTL
     // prune computes `now - pin.updatedAt` = NaN, and `NaN > ttlMs` is false
     // — so the row was never pruned, rewritten verbatim by every mutatePool.

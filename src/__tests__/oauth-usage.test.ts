@@ -165,6 +165,21 @@ describe('anthropic oauth', () => {
     expect(tok.access).toBe('a2')
     expect(tok.refresh).toBe('r1')
   })
+
+  test('refresh throws (never commits expires: NaN) on a malformed 200 body', async () => {
+    // Symmetric with the exchange hardening above: a 200 whose body is not
+    // JSON, or a JSON 200 missing access_token/expires_in, must throw a
+    // status-prefixed error instead of returning `expires: NaN` — which
+    // commitRefresh would persist and needsRefresh would never treat as stale,
+    // soft-bricking the account into a perpetual auth-cooldown loop. Status
+    // 200 in the message keeps isInvalidGrant() false, so the failure stays
+    // transient (the account is NOT disabled).
+    respond = () => new Response('<html>not json</html>', { status: 200 })
+    await expect(aRefresh('r1')).rejects.toThrow('malformed')
+    respond = () =>
+      new Response(JSON.stringify({ access_token: 'a2' }), { status: 200 })
+    await expect(aRefresh('r1')).rejects.toThrow('malformed')
+  })
 })
 
 describe('anthropic usage', () => {
@@ -504,6 +519,19 @@ describe('openai oauth', () => {
     expect(tok.refresh).toBe('r1')
     respond = () => new Response('bad', { status: 401 })
     await expect(oRefresh('r1')).rejects.toThrow('401')
+  })
+
+  test('refresh throws (never commits expires: NaN) on a malformed 200 body', async () => {
+    // Symmetric with the anthropic refresh hardening: a non-JSON 200 or a
+    // JSON 200 missing expires_in must throw a status-prefixed error instead
+    // of committing `expires: NaN` via commitRefresh (needsRefresh never
+    // treats NaN as stale → perpetual auth-cooldown loop). Status 200 keeps
+    // isInvalidGrant() false, so the account is NOT disabled.
+    respond = () => new Response('<html>not json</html>', { status: 200 })
+    await expect(oRefresh('r1')).rejects.toThrow('malformed')
+    respond = () =>
+      new Response(JSON.stringify({ access_token: 'a2' }), { status: 200 })
+    await expect(oRefresh('r1')).rejects.toThrow('malformed')
   })
 })
 

@@ -50,14 +50,15 @@ export function setOAuthHeaders(headers: Headers, accessToken: string): void {
 function prefixToolNames(parsed: Record<string, unknown>): string {
   // `parsed` is freshly produced by `JSON.parse(body)` in `rewriteRequestBody`
   // (sole caller, codegraph verified) and never aliased, so mutating its
-  // `tools` / `messages` arrays in place is safe. The PREVIOUS shape allocated
-  // a brand new outer `tools` array (with a fresh shallow-copy per tool, even
-  // when `tool.name` was missing) AND a brand new outer `messages` array
-  // (whose `.map` callback simply returned each `msg` unchanged) per request
-  // on the inference hot path. Only the INNER `msg.content.map` still
-  // allocates — and only conditionally, for the tool_use blocks that need a
-  // renamed clone — because mutating `block.name` would rename the upstream
-  // assistant turn's recorded tool name.
+  // `tools` / `messages` / `content` arrays in place is safe. The PREVIOUS
+  // shape allocated a brand new outer `tools` array (with a fresh shallow-copy
+  // per tool, even when `tool.name` was missing), a brand new outer `messages`
+  // array, AND a brand new `content` array per message (via `.map`) even when
+  // no block needed renaming — per request on the inference hot path. Now the
+  // only remaining allocation is the shallow clone of each tool_use block that
+  // actually needs a renamed copy (element REPLACEMENT in the content array,
+  // never mutation of the block object itself — mutating `block.name` would
+  // rename the upstream assistant turn's recorded tool name).
   if (Array.isArray(parsed.tools)) {
     for (const tool of parsed.tools as {
       name?: string
@@ -73,11 +74,12 @@ function prefixToolNames(parsed: Record<string, unknown>): string {
       [k: string]: unknown
     }[]) {
       if (Array.isArray(msg.content)) {
-        msg.content = msg.content.map((block) =>
-          block.type === 'tool_use' && block.name
-            ? { ...block, name: prefixName(block.name) }
-            : block,
-        )
+        const content = msg.content
+        for (let i = 0; i < content.length; i++) {
+          const block = content[i]
+          if (block?.type === 'tool_use' && block.name)
+            content[i] = { ...block, name: prefixName(block.name) }
+        }
       }
     }
   }

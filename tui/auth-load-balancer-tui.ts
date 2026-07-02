@@ -13,8 +13,15 @@
  *     runtime where the transform is registered), so the server plugin worker never
  *     evaluates the SolidJS/@opentui module graph.
  *
- * Install: copy BOTH this file and `auth-load-balancer-tui.view.tsx` into
- * `~/.config/opencode/plugins/` (or a project `.opencode/plugins/`) and restart.
+ * Install: copy all THREE files (this entry, `auth-load-balancer-tui.view.tsx`,
+ * and `auth-load-balancer-scoring.ts`) into a directory the server does NOT
+ * scan — anything other than `plugin/`/`plugins/`, e.g.
+ * `~/.config/opencode/tui-plugins/` — then register THIS entry in
+ * `~/.config/opencode/tui.json`'s `plugin` array (`file:///…/auth-load-balancer-tui.ts`)
+ * and restart. Do NOT drop these files in a `plugins/` dir: the server globs
+ * `{plugin,plugins}/*.{ts,js}` and would load the entry as a server plugin,
+ * reject it (`must default export … server()`), and log an error on every
+ * launch — see the README's "Why this shape (it matters)" section.
  */
 import type { TuiPlugin, TuiPluginModule } from '@opencode-ai/plugin/tui'
 

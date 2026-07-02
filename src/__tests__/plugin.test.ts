@@ -133,6 +133,30 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
   }
 }
 
+/**
+ * Shared two-account fixture for the rotation/cooldown tests: account A
+ * (fresh, usage-less) plus account B (weekly 50%, resets in 30 h) so the
+ * scheduler tries A first and has B to rotate onto.
+ */
+async function seedAB(now: number): Promise<void> {
+  await mutatePool((pool) => {
+    pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+    pool.accounts.push(
+      account({
+        id: 'B',
+        access: 'tokB',
+        label: 'B',
+        usage: {
+          hourly: null,
+          weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
+          status: null,
+          capturedAt: now,
+        },
+      }),
+    )
+  })
+}
+
 describe('plugin factory', () => {
   test('exposes auth + chat.headers for each provider', async () => {
     const a = await loadHooks(AnthropicLoadBalancerPlugin)
@@ -232,6 +256,32 @@ describe('load-balanced fetch — edge paths', () => {
     const json = (await res.json()) as {
       error?: { type?: string; message?: string }
     }
+    expect(json.error?.type).toBe('authentication_error')
+    expect(json.error?.message).toContain('auth-load-balancer pool')
+  })
+
+  test('the empty-pool 401 uses the OpenAI envelope ({ error }, no Anthropic wrapper) for the openai adapter', async () => {
+    // Locks the provider-shape ternary in noUsableAccountResponse: only the
+    // Anthropic branch wraps the body as { type: 'error', error }; the Codex
+    // SDK expects a bare { error }. A regression that always emitted the
+    // Anthropic envelope would pass the anthropic-only test above.
+    let hit = false
+    respond = () => {
+      hit = true
+      return new Response('default', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(openaiAdapter)
+    const res = await lb('https://chatgpt.com/backend-api/codex/responses', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(hit).toBe(false) // global fetch never called
+    expect(res.status).toBe(401)
+    const json = (await res.json()) as {
+      type?: string
+      error?: { type?: string; message?: string }
+    }
+    expect(json.type).toBeUndefined() // no Anthropic { type: 'error' } wrapper
     expect(json.error?.type).toBe('authentication_error')
     expect(json.error?.message).toContain('auth-load-balancer pool')
   })
@@ -361,22 +411,7 @@ describe('load-balanced fetch — edge paths', () => {
 
   test('honors retry-after when cooling down a rate-limited account', async () => {
     const now = Date.now()
-    await mutatePool((pool) => {
-      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
-      pool.accounts.push(
-        account({
-          id: 'B',
-          access: 'tokB',
-          label: 'B',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
-            capturedAt: now,
-          },
-        }),
-      )
-    })
+    await seedAB(now)
     let n = 0
     respond = () => {
       n += 1
@@ -404,22 +439,7 @@ describe('load-balanced fetch — edge paths', () => {
     // and FAIL this assertion. Only the HTTP-date branch can satisfy the ±2s window.
     const futureMs = now + 90 * 60_000
     const httpDate = new Date(futureMs).toUTCString()
-    await mutatePool((pool) => {
-      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
-      pool.accounts.push(
-        account({
-          id: 'B',
-          access: 'tokB',
-          label: 'B',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
-            capturedAt: now,
-          },
-        }),
-      )
-    })
+    await seedAB(now)
     let n = 0
     respond = () => {
       n += 1
@@ -445,22 +465,7 @@ describe('load-balanced fetch — edge paths', () => {
 
   test('falls back to default cooldown when retry-after is unparseable', async () => {
     const now = Date.now()
-    await mutatePool((pool) => {
-      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
-      pool.accounts.push(
-        account({
-          id: 'B',
-          access: 'tokB',
-          label: 'B',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
-            capturedAt: now,
-          },
-        }),
-      )
-    })
+    await seedAB(now)
     let n = 0
     respond = () => {
       n += 1
@@ -493,22 +498,7 @@ describe('load-balanced fetch — edge paths', () => {
     // Post-fix the overflowing delta falls through to the ACCOUNT_COOLDOWN_MS
     // (5 min) fallback, just like the unparseable-retry-after branch above.
     const now = Date.now()
-    await mutatePool((pool) => {
-      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
-      pool.accounts.push(
-        account({
-          id: 'B',
-          access: 'tokB',
-          label: 'B',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
-            capturedAt: now,
-          },
-        }),
-      )
-    })
+    await seedAB(now)
     let n = 0
     respond = () => {
       n += 1
@@ -544,22 +534,7 @@ describe('load-balanced fetch — edge paths', () => {
     // flipped `httpDate > now` to `<` would silently pass the 'garbage' test
     // (NaN trips Number.isFinite first) but cool A out to the year 2000 here.
     const now = Date.now()
-    await mutatePool((pool) => {
-      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
-      pool.accounts.push(
-        account({
-          id: 'B',
-          access: 'tokB',
-          label: 'B',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
-            capturedAt: now,
-          },
-        }),
-      )
-    })
+    await seedAB(now)
     let n = 0
     respond = () => {
       n += 1
@@ -591,22 +566,7 @@ describe('load-balanced fetch — edge paths', () => {
     // the parser falls through to ACCOUNT_COOLDOWN_MS. Same regression family as
     // the '0' case: a flipped comparison would cool A out to a past date.
     const now = Date.now()
-    await mutatePool((pool) => {
-      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
-      pool.accounts.push(
-        account({
-          id: 'B',
-          access: 'tokB',
-          label: 'B',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
-            capturedAt: now,
-          },
-        }),
-      )
-    })
+    await seedAB(now)
     let n = 0
     respond = () => {
       n += 1
@@ -639,22 +599,7 @@ describe('load-balanced fetch — edge paths', () => {
     // A regression that ANDed `Number.isFinite(delta)` with `delta < some_cap`
     // would silently pass '30' but break '86400'.
     const now = Date.now()
-    await mutatePool((pool) => {
-      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
-      pool.accounts.push(
-        account({
-          id: 'B',
-          access: 'tokB',
-          label: 'B',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
-            capturedAt: now,
-          },
-        }),
-      )
-    })
+    await seedAB(now)
     let n = 0
     respond = () => {
       n += 1
@@ -692,22 +637,7 @@ describe('load-balanced fetch — edge paths', () => {
     // transformResponse wrapping an auth-error stream and breaking rotation) would
     // still pass every existing test.
     const now = Date.now()
-    await mutatePool((pool) => {
-      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
-      pool.accounts.push(
-        account({
-          id: 'B',
-          access: 'tokB',
-          label: 'B',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
-            capturedAt: now,
-          },
-        }),
-      )
-    })
+    await seedAB(now)
     let n = 0
     respond = () => {
       n += 1
@@ -750,22 +680,7 @@ describe('load-balanced fetch — edge paths', () => {
     // asserted too: a 5xx pinned to the served account means the next turn retries
     // on the SAME account, preserving prompt cache.
     const now = Date.now()
-    await mutatePool((pool) => {
-      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
-      pool.accounts.push(
-        account({
-          id: 'B',
-          access: 'tokB',
-          label: 'B',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
-            capturedAt: now,
-          },
-        }),
-      )
-    })
+    await seedAB(now)
     let calls = 0
     respond = () => {
       calls += 1

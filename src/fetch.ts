@@ -441,7 +441,12 @@ export function createLoadBalancedFetch(
         const cls = adapter.classifyError(res.status)
         if (cls === 'account' || cls === 'auth') {
           const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
-          await recordRotation(adapter, account.id, res, ms, now)
+          // Fresh Date.now(), NOT the loop-start `now`: that was captured before
+          // ensureAccessToken (up to a 30 s network refresh) and the upstream
+          // fetch, so basing the cooldown on it would understate `Retry-After`
+          // by the request latency and retry the account before the server
+          // said it may be. The success path already stamps response time.
+          await recordRotation(adapter, account.id, res, ms, Date.now())
           // Only an `account`-class (429/402) cooldown is worth waiting out; an auth
           // (401/403) failure needs a re-login, not time, so it stays out of the set.
           if (cls === 'account') waitableCooldownIds.add(account.id)

@@ -129,6 +129,21 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
     throw new Error(`Token refresh failed: ${res.status} — ${text}`)
   }
 
-  const json = (await res.json()) as TokenResponse
+  // Validate the 200 body like exchange() does: a non-JSON 200 or a JSON 200
+  // missing access_token/expires_in must never reach commitRefresh, or the
+  // account gets `expires: NaN` (which needsRefresh never treats as stale) and
+  // soft-bricks into a perpetual auth-cooldown loop that survives restarts.
+  // The status-prefixed message keeps isInvalidGrant() false (200 ≠ 400/401),
+  // so the failure stays transient — the account is NOT disabled. Symmetric
+  // with ../anthropic/oauth.ts.
+  const json = (await res.json().catch(() => null)) as TokenResponse | null
+  if (
+    !json ||
+    typeof json.access_token !== 'string' ||
+    typeof json.expires_in !== 'number'
+  )
+    throw new Error(
+      `Token refresh failed: ${res.status} — malformed token response body`,
+    )
   return toTokenSet(json, refreshToken)
 }

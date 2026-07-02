@@ -121,7 +121,21 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
     throw new Error(`Token refresh failed: ${response.status} — ${body}`)
   }
 
-  const json = (await response.json()) as TokenResponse
+  // Validate the 200 body like exchange() does: a non-JSON 200 or a JSON 200
+  // missing access_token/expires_in must never reach commitRefresh, or the
+  // account gets `expires: NaN` (which needsRefresh never treats as stale) and
+  // soft-bricks into a perpetual auth-cooldown loop that survives restarts.
+  // The status-prefixed message keeps isInvalidGrant() false (200 ≠ 400/401),
+  // so the failure stays transient — the account is NOT disabled.
+  const json = (await response.json().catch(() => null)) as TokenResponse | null
+  if (
+    !json ||
+    typeof json.access_token !== 'string' ||
+    typeof json.expires_in !== 'number'
+  )
+    throw new Error(
+      `Token refresh failed: ${response.status} — malformed token response body`,
+    )
   return {
     access: json.access_token,
     // RFC 6749 §5.1: server MAY omit a rotated refresh_token; keep the previous

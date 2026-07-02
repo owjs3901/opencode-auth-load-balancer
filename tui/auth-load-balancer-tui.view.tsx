@@ -76,7 +76,6 @@ interface PoolAccount {
 }
 /** Loosely-typed view of the on-disk pool JSON (one shape for reads AND read-modify-writes). */
 interface PoolShape {
-  version?: number
   accounts?: PoolAccount[]
   lastSelected?: Record<string, string>
   sessions?: Record<string, { accountId?: string }>
@@ -288,9 +287,14 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           current: p.lastSelected?.[providerID] === a.id,
           score: available ? score : null,
           rank: available ? rank : null,
-          wk: winPct(a.usage?.weekly, now),
+          // Reuse the windows `toScore(a)` already normalized instead of
+          // re-running toScoreWindow on the raw window (winPct) a second time.
+          // `until()` deliberately stays on the RAW resetAt: a malformed
+          // window with a reset but no utilization normalizes to null in `sa`,
+          // yet the countdown should still render.
+          wk: pct(displayUtil(sa.usage.weekly, now)),
           wkReset: until(a.usage?.weekly?.resetAt, now),
-          h: winPct(a.usage?.hourly, now),
+          h: pct(displayUtil(sa.usage.hourly, now)),
           hReset: until(a.usage?.hourly?.resetAt, now),
           state: stateOf(sa, now),
         }

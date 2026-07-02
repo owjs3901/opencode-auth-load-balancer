@@ -49,8 +49,12 @@ interface UsageEndpointResponse {
  * note there): `secondsToMs` ALWAYS multiplies by 1000, so it cannot accept the
  * already-ms inputs this `> 1e12` heuristic must pass through unchanged. The two
  * have different semantics (seconds-only vs seconds-or-ms) — do not unify them.
+ * Non-positive values map to 0 ("no usable reset"), mirroring `secondsToMs`
+ * (util.ts) so a garbage negative resets_at never becomes a negative epoch-ms
+ * anchor in the pool.
  */
-const msFromLoose = (n: number): number => (n > 1e12 ? n : n * 1000)
+const msFromLoose = (n: number): number =>
+  n <= 0 ? 0 : n > 1e12 ? n : n * 1000
 
 /** Decode resets_at which Anthropic has shipped as ISO string, epoch seconds, or epoch ms. */
 function parseResetAt(value: string | number | null | undefined): number {

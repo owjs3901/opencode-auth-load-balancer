@@ -336,6 +336,27 @@ describe('anthropic usage', () => {
     expect(Number.isFinite(u?.weekly?.resetAt ?? Infinity)).toBe(true)
   })
 
+  test('fetchUsage maps negative endpoint resets_at (number and numeric string) to zero', async () => {
+    // Regression lock: every sibling reset parser maps non-positive values to 0
+    // ("no usable reset") via secondsToMs (util.ts) — the Anthropic endpoint
+    // path was the single exception. Pre-fix, msFromLoose passed a negative
+    // resets_at through (`-5 ≤ 1e12` → `-5000`), committing a negative epoch-ms
+    // anchor that weeklyUrgency then treated as an ELAPSED anchor rolled
+    // forward from a garbage origin instead of the documented unknown-anchor
+    // convention (resetAt === 0 → imminent-probe). Covers both the number
+    // branch and the numeric-string branch, which share msFromLoose.
+    respond = () =>
+      new Response(
+        '{"five_hour":{"utilization":10,"resets_at":-5},"seven_day":{"utilization":20,"resets_at":"-5"}}',
+        { status: 200 },
+      )
+    const u = await aFetchUsage(acct('anthropic', null), 0)
+    expect(u?.hourly?.resetAt).toBe(0)
+    expect(u?.weekly?.resetAt).toBe(0)
+    expect(u?.hourly?.utilization).toBeCloseTo(0.1, 5)
+    expect(u?.weekly?.utilization).toBeCloseTo(0.2, 5)
+  })
+
   test('fetchUsage rejects endpoint windows with missing or non-finite utilization', async () => {
     // Missing utilization (undefined after JSON.parse) on a PRESENT window: the
     // pre-fix code silently produced { utilization: 0 } and the scheduler then

@@ -173,6 +173,14 @@ describe('extractAccountId', () => {
       'org_1',
     )
   })
+  test('rejects an organizations fallback with a non-string id or no entries', () => {
+    // A numeric/object id must NOT be coerced into the chatgpt-account-id
+    // header ("[object Object]" / "42" would guarantee a 401 loop).
+    expect(
+      extractAccountId(jwt({ organizations: [{ id: 42 }] })),
+    ).toBeUndefined()
+    expect(extractAccountId(jwt({ organizations: [] }))).toBeUndefined()
+  })
   test('returns undefined when no account claim exists', () => {
     expect(extractAccountId(jwt({ sub: 'u' }))).toBeUndefined()
   })

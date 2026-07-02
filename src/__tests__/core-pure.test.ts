@@ -255,6 +255,17 @@ describe('mergeHeaders', () => {
     expect(h.get('c')).toBe('3')
     expect(h.get('d')).toBeNull()
   })
+  test('copies an array init and skips undefined keys', () => {
+    // Without the `key !== undefined` guard the pair would coerce into a
+    // literal "undefined" header name — assert exactly one key survives.
+    const arr = [
+      [undefined, 'v'],
+      ['k', '1'],
+    ] as unknown as HeadersInit
+    const h = mergeHeaders('https://x', { headers: arr })
+    expect(h.get('k')).toBe('1')
+    expect([...h.keys()]).toHaveLength(1)
+  })
   test('copies an object init and skips undefined values', () => {
     const obj = { e: '4', f: undefined } as Record<
       string,

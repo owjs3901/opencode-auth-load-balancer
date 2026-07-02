@@ -232,6 +232,9 @@ src/
   refresh.ts            # singleflight OAuth refresh, invalid_grant handling
   accounts.ts           # append / bootstrap accounts into the pool
   session.ts            # derive a stable session key (affinity)
+  types.ts              # provider-agnostic data model (accounts, usage windows, pool file)
+  usage-merge.ts        # fixed weekly-anchor preservation / roll-forward
+  util.ts               # shared helpers (sleep, clamp01, JSON guards)
   status.ts             # ranked status model + text renderer
   notify.ts             # toast on account switch
   usage-refresh.ts      # cold-start usage seeding via the usage endpoint

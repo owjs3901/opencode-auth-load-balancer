@@ -83,6 +83,17 @@ describe('anthropic oauth', () => {
     expect(await aExchange('code=C2&state=S', 'v', 'cb', 'S')).not.toBeNull()
   })
 
+  test('exchange rejects hash inputs with an empty code or state segment', async () => {
+    // '#S' / 'C#' must fall through the legacy hash branch (empty-segment
+    // truthiness guards) and fail the key=value parse — BEFORE any network
+    // call. A throwing responder proves the token endpoint is never hit.
+    respond = () => {
+      throw new Error('network must not be hit')
+    }
+    expect(await aExchange('#S', 'v', 'cb', 'S')).toBeNull()
+    expect(await aExchange('C#', 'v', 'cb', 'S')).toBeNull()
+  })
+
   test('exchange returns null on unparsable input, state mismatch, and non-ok', async () => {
     expect(await aExchange('garbage', 'v', 'cb', 'S')).toBeNull()
     expect(

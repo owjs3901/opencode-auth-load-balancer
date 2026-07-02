@@ -104,14 +104,17 @@ function isPlainRecordValue(value: unknown): boolean {
 function toPoolShape(parsed: unknown): PoolShape {
   if (!isPlainRecordValue(parsed)) return {}
   const pool = parsed as PoolShape
-  // Row-level mirror of the server's `normalizeAccounts` drop: a hand-edited
-  // `accounts: [null, …]` (or a primitive element) otherwise throws inside
-  // the BottomBar/SidebarPanel memos (`x.id` on null) every poll until the
-  // file is repaired by hand — the server only heals it on its next write.
-  // Non-string `id`/`label` rows are dropped too (store.ts treats a
-  // non-string id as irreparable): they flow into code typed as `string`,
-  // so the sidebar renders the literal `undefined` and the click menu passes
-  // `undefined` ids into renameInPool/deleteFromPool (silent no-ops). The
+  // Row-level mirror of the server's `normalizeAccounts` trust boundary
+  // (store.ts): a hand-edited `accounts: [null, …]` (or a primitive element)
+  // otherwise throws inside the BottomBar/SidebarPanel memos (`x.id` on null)
+  // every poll until the file is repaired by hand — the server only heals it
+  // on its next write. Only the IDENTITY fields are irreparable: store.ts:126
+  // drops rows with a non-string `id` OR `providerID` (they cannot be
+  // guessed), so drop exactly those here too. A non-string `label` is
+  // REPARABLE — store.ts:156 heals it to `''` and KEEPS the row — so healing
+  // (not dropping) below keeps the bar/sidebar consistent with the server
+  // dashboards AND keeps `mutatePoolFile` (which re-serializes this shape)
+  // from permanently deleting an account the server would have healed. The
   // inline arrow (not a type-guard predicate) keeps the `PoolAccount[]`
   // element type — see the isPlainRecordValue note.
   pool.accounts = Array.isArray(pool.accounts)
@@ -119,9 +122,15 @@ function toPoolShape(parsed: unknown): PoolShape {
         (row) =>
           isPlainRecordValue(row) &&
           typeof row.id === 'string' &&
-          typeof row.label === 'string',
+          typeof row.providerID === 'string',
       )
     : undefined
+  if (pool.accounts) {
+    for (const row of pool.accounts) {
+      // Mirror store.ts:156 — an empty label renders blank but never throws.
+      if (typeof (row as { label?: unknown }).label !== 'string') row.label = ''
+    }
+  }
   // `lastSelected` / `sessions` must be plain records (the server heals these
   // via `isPlainObject`). A hand-edited primitive (`"lastSelected": "oops"`)
   // or array otherwise survives: `Object.entries` on a string iterates

@@ -191,7 +191,22 @@ export function rewriteUrl(input: FetchInput): FetchInput {
  */
 const PARAGRAPH_SPLIT_RE = /\n\n+/
 
+/**
+ * Bounded memo for `sanitizeSystemText` (same rationale as `cachedBetas` /
+ * `cachedBase` above): opencode's system prompt is multi-KB and constant for
+ * the life of a conversation, yet each request would otherwise re-pay ~6-7
+ * full scans of it (split + per-paragraph includes + join + replaceAll×2 +
+ * trim) per system block. The function is pure, so a memo is an exact
+ * identity. A Map (not a one-slot memo) because `system` routinely arrives as
+ * an ARRAY of blocks — a one-slot cache would thrash between them every
+ * request. Tiny cap with clear-on-full keeps worst-case memory bounded.
+ */
+const SANITIZE_CACHE_MAX = 8
+const sanitizeCache = new Map<string, string>()
+
 function sanitizeSystemText(text: string): string {
+  const hit = sanitizeCache.get(text)
+  if (hit !== undefined) return hit
   const paragraphs = text.split(PARAGRAPH_SPLIT_RE)
   const filtered = paragraphs.filter((paragraph) => {
     if (paragraph.includes(OPENCODE_IDENTITY_PREFIX)) return false
@@ -209,7 +224,10 @@ function sanitizeSystemText(text: string): string {
     // otherwise leave the second copy intact and risk a disguised 400.
     // `rule.match` is a literal string, so this is a safe global literal replace.
     result = result.replaceAll(rule.match, rule.replacement)
-  return result.trim()
+  const sanitized = result.trim()
+  if (sanitizeCache.size >= SANITIZE_CACHE_MAX) sanitizeCache.clear()
+  sanitizeCache.set(text, sanitized)
+  return sanitized
 }
 
 interface SystemBlock {

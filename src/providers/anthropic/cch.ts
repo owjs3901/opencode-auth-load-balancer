@@ -42,6 +42,17 @@ export function computeVersionSuffix(
 }
 
 /**
+ * One-slot memo (same pattern as `cachedDecode` in openai/jwt.ts): the header
+ * is fully determined by the FIRST user message's text — constant across every
+ * turn of a conversation — and the entrypoint, yet each request would
+ * otherwise re-run two SHA-256 hashes (one over the full message text, which
+ * can be pasted-file-sized). The keying string compare is O(n) but ~10× cheaper
+ * per byte than hashing, and hits on every follow-up turn.
+ */
+let cachedHeader: { text: string; entrypoint: string; value: string } | null =
+  null
+
+/**
  * Build the complete billing header string for insertion into system[0], or
  * null when no user-role message exists (the single prefix scan here is both
  * the has-user-message gate and the text-extraction source).
@@ -62,12 +73,19 @@ export function buildBillingHeaderValue(
   if (!userMsg) return null
 
   const text = messageText(userMsg)
+  if (
+    cachedHeader &&
+    cachedHeader.text === text &&
+    cachedHeader.entrypoint === entrypoint
+  )
+    return cachedHeader.value
   const suffix = computeVersionSuffix(text)
   const cch = computeCCH(text)
-  return (
+  const value =
     'x-anthropic-billing-header: ' +
     `cc_version=${CLAUDE_CODE_VERSION}.${suffix}; ` +
     `cc_entrypoint=${entrypoint}; ` +
     `cch=${cch};`
-  )
+  cachedHeader = { text, entrypoint, value }
+  return value
 }

@@ -142,6 +142,9 @@ export const AnthropicLoadBalancerPlugin =
   createProviderPlugin(anthropicAdapter)
 export const OpenAILoadBalancerPlugin = createProviderPlugin(openaiAdapter)
 
+/** The tool-result shape shared by every auth_lb_* tool response below. */
+const lbResult = (output: string) => ({ title: 'Auth Load Balancer', output })
+
 /**
  * A standalone plugin that registers the `auth_lb_status` tool — an on-demand
  * dashboard (in-use account per provider, each account's weekly/5h usage,
@@ -176,10 +179,7 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
         // countdowns from the ranks printed beside them. Taken AFTER the
         // awaited refresh so the freshly polled numbers are in this render.
         const renderedAt = Date.now()
-        return {
-          title: 'Auth Load Balancer',
-          output: renderStatus(await readStatus(renderedAt), renderedAt),
-        }
+        return lbResult(renderStatus(await readStatus(renderedAt), renderedAt))
       },
     }),
     auth_lb_rename: tool({
@@ -195,11 +195,7 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
         // An empty label renders blank in the toast/dashboard/TUI and can never
         // be matched by label again — reject before touching the pool.
         const trimmed = name.trim()
-        if (!trimmed)
-          return {
-            title: 'Auth Load Balancer',
-            output: 'New label must not be empty.',
-          }
+        if (!trimmed) return lbResult('New label must not be empty.')
         const result = await mutatePool((pool) => {
           const target = pool.accounts.find(
             (a) => a.id === account || a.label === account,
@@ -221,19 +217,14 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
           return { ok: true as const, previous }
         })
         if (!result.ok)
-          return {
-            title: 'Auth Load Balancer',
-            output:
-              result.reason === 'taken'
-                ? `Label "${trimmed}" is already used by another account.`
-                : `No account matching "${account}". Available: ${
-                    result.labels.join(', ') || '(none)'
-                  }`,
-          }
-        return {
-          title: 'Auth Load Balancer',
-          output: `Renamed "${result.previous}" → "${trimmed}".`,
-        }
+          return lbResult(
+            result.reason === 'taken'
+              ? `Label "${trimmed}" is already used by another account.`
+              : `No account matching "${account}". Available: ${
+                  result.labels.join(', ') || '(none)'
+                }`,
+          )
+        return lbResult(`Renamed "${result.previous}" → "${trimmed}".`)
       },
     }),
   },

@@ -280,6 +280,36 @@ describe('rewriteRequestBody', () => {
   test('returns the original body on invalid JSON', () => {
     expect(rewriteRequestBody('{not json')).toBe('{not json')
   })
+
+  test('memoized sanitize returns identical output on a repeat call (cache hit)', () => {
+    const body = JSON.stringify({
+      system:
+        'Memo-hit sentinel paragraph.\n\nSee https://opencode.ai/docs for help.',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    const first = rewriteRequestBody(body)
+    // Second call with the SAME system text exercises the sanitizeCache hit
+    // branch; output must be byte-identical to the cold-path result.
+    expect(rewriteRequestBody(body)).toBe(first)
+    expect(JSON.parse(first).system.at(-1).text).toBe(
+      'Memo-hit sentinel paragraph.',
+    )
+  })
+
+  test('sanitize cache clears when full and keeps producing correct output', () => {
+    // Feed more distinct system texts than SANITIZE_CACHE_MAX (8) to drive
+    // the clear-on-full branch, then verify sanitization still holds.
+    for (let i = 0; i < 10; i++) {
+      const out = JSON.parse(
+        rewriteRequestBody(
+          JSON.stringify({
+            system: `Distinct block ${i}.\n\nSee https://opencode.ai/docs now.`,
+          }),
+        ),
+      )
+      expect(out.system.at(-1).text).toBe(`Distinct block ${i}.`)
+    }
+  })
 })
 
 describe('createStrippedStream', () => {
@@ -399,6 +429,16 @@ describe('cch billing header', () => {
     expect(computeCCH('hello')).toHaveLength(5)
     expect(computeVersionSuffix('hello')).toHaveLength(3)
     expect(computeVersionSuffix('hello', '9.9.9')).toHaveLength(3)
+  })
+  test('buildBillingHeaderValue memo returns the identical header on a repeat call', () => {
+    const messages = [{ role: 'user', content: 'memo-repeat sentinel' }]
+    const first = buildBillingHeaderValue(messages, 'e')
+    // Same text + entrypoint → one-slot memo hit; must be byte-identical.
+    expect(buildBillingHeaderValue(messages, 'e')).toBe(first!)
+    // Different entrypoint with the same text must MISS the memo (recompute).
+    expect(buildBillingHeaderValue(messages, 'other')).toContain(
+      'cc_entrypoint=other',
+    )
   })
   test('buildBillingHeaderValue embeds version, entrypoint, and cch', () => {
     const v = buildBillingHeaderValue(

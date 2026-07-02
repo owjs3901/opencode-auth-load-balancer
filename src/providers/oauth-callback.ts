@@ -79,7 +79,7 @@ export async function readRefreshResponse<
 
 /** Generate an opaque OAuth `state` parameter (32-char hex, no hyphens). */
 export function generateState(): string {
-  return crypto.randomUUID().replace(/-/g, '')
+  return crypto.randomUUID().replaceAll('-', '')
 }
 
 /**

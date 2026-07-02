@@ -253,6 +253,12 @@ describe('mergeHeaders', () => {
   test('returns empty headers when there is no init', () => {
     expect([...mergeHeaders('https://x').keys()]).toHaveLength(0)
   })
+  test('init headers override same-named Request headers; others survive', () => {
+    const req = new Request('https://x', { headers: { a: '1', keep: 'r' } })
+    const h = mergeHeaders(req, { headers: { a: '2' } })
+    expect(h.get('a')).toBe('2')
+    expect(h.get('keep')).toBe('r')
+  })
 })
 
 describe('sleepAbortable', () => {

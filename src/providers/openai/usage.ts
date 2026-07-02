@@ -1,5 +1,6 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
-import { clamp01, ignore, secondsToMs } from '../../util'
+import { clamp01, secondsToMs } from '../../util'
+import { fetchUsageJson } from '../usage-http'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 import { resolveAccountId } from './jwt'
 
@@ -119,23 +120,11 @@ export async function fetchUsage(
   const accountId = resolveAccountId(account)
   if (accountId) headers['chatgpt-account-id'] = accountId
 
-  let response: Response
-  try {
-    response = await fetch(USAGE_URL, {
-      headers,
-      signal: AbortSignal.timeout(USAGE_HTTP_TIMEOUT_MS),
-    })
-  } catch {
-    return null
-  }
-  if (!response.ok) {
-    await response.body?.cancel().catch(ignore)
-    return null
-  }
-
-  const json = (await response
-    .json()
-    .catch(() => null)) as UsageEndpointResponse | null
+  const json = await fetchUsageJson<UsageEndpointResponse>(
+    USAGE_URL,
+    headers,
+    USAGE_HTTP_TIMEOUT_MS,
+  )
   if (!json?.rate_limit) return null
 
   return {

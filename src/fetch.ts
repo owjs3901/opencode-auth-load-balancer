@@ -56,7 +56,7 @@ export async function bestEffort(
 
 /**
  * Merge a parsed usage partial into an account's usage snapshot in place. Shared
- * by `recordUsage` (rotation path) and `recordSuccess` (success path) so the
+ * by `recordRotation` (rotation path) and `recordSuccess` (success path) so the
  * field-merge contract lives in ONE place and the two paths can never diverge.
  * Only defined fields overwrite.
  *
@@ -161,8 +161,8 @@ async function applyCooldown(
 }
 
 /**
- * Fold the rotation path's two pool writes (`recordUsage` + `applyCooldown`)
- * into ONE atomic `mutatePool`. On a 429/`account` rotation the response carries
+ * Fold the rotation path's usage record + cooldown into ONE atomic
+ * `mutatePool`. On a 429/`account` rotation the response carries
  * usage headers AND we must cool the account down before the next attempt; the
  * two effects touch disjoint fields (`usage.*` vs `cooldownUntil`), are
  * commutative, and both must land before retrying — so a single lock+rewrite
@@ -202,7 +202,7 @@ async function recordRotation(
  *
  * Semantics are preserved exactly:
  *  - `findAccount` returns null (account deleted mid-write) -> skip usage AND
- *    `lastSelected` (matches `recordUsage`'s `if (!account) return` guard) but
+ *    `lastSelected` (matches the old `recordUsage`'s `if (!account) return` guard) but
  *    still update the session pin (matches the old `assignSession`'s behavior,
  *    which never consulted the account list).
  *  - `sessionKey === null` -> skip the session pin entirely (matches
@@ -210,9 +210,9 @@ async function recordRotation(
  *  - `bestEffort` still swallows `LockTimeoutError` / `PoolWriteError` so a
  *    bookkeeping failure never fails an already-served response.
  *
- * The failure path keeps using the standalone `recordUsage` + `applyCooldown`
- * pair (recordUsage now lives inside the rotation branch so we don't pay it on
- * a request that succeeds first try).
+ * The failure paths differ: the thrown-error path uses the standalone
+ * `applyCooldown` (no response headers to record), while the 429/auth rotation
+ * path folds usage + cooldown into `recordRotation`.
  *
  * `partial` arrives PRE-PARSED from the success branch (which also applies it
  * to its local account object before `hooks.onUse`, so the switch toast shows

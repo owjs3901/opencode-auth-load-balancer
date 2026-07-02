@@ -4,7 +4,8 @@ import type {
   UsageStatus,
   UsageWindow,
 } from '../../types'
-import { clamp01, ignore, secondsToMs } from '../../util'
+import { clamp01, secondsToMs } from '../../util'
+import { fetchUsageJson } from '../usage-http'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 
 function mapStatus(raw: string | null): UsageStatus | null {
@@ -178,29 +179,16 @@ export async function fetchUsage(
   account: PoolAccount,
   now: number,
 ): Promise<UsageSnapshot | null> {
-  let response: Response
-  try {
-    response = await fetch(USAGE_URL, {
-      headers: {
-        authorization: `Bearer ${account.access}`,
-        'anthropic-beta': 'oauth-2025-04-20',
-        'user-agent': USAGE_USER_AGENT,
-        'content-type': 'application/json',
-      },
-      signal: AbortSignal.timeout(USAGE_HTTP_TIMEOUT_MS),
-    })
-  } catch {
-    return null
-  }
-
-  if (!response.ok) {
-    await response.body?.cancel().catch(ignore)
-    return null
-  }
-
-  const json = (await response
-    .json()
-    .catch(() => null)) as UsageEndpointResponse | null
+  const json = await fetchUsageJson<UsageEndpointResponse>(
+    USAGE_URL,
+    {
+      authorization: `Bearer ${account.access}`,
+      'anthropic-beta': 'oauth-2025-04-20',
+      'user-agent': USAGE_USER_AGENT,
+      'content-type': 'application/json',
+    },
+    USAGE_HTTP_TIMEOUT_MS,
+  )
   if (!json) return null
   // Shape guard: a 200 whose body carries NEITHER window key is NOT the usage
   // endpoint's shape (schema drift, an error payload, a proxy page that

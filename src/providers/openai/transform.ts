@@ -32,11 +32,14 @@ export function rewriteUrl(input: FetchInput): FetchInput {
   if (!url) return input
   if (!url.pathname.includes('/responses')) return input
 
-  const target = new URL(CODEX_RESPONSES_URL)
-  if (url.href === target.href) return input
+  // CODEX_RESPONSES_URL is already normalized (`new URL(it).href` === itself),
+  // so compare hrefs directly and return the constant string (a valid
+  // FetchInput) — no per-request URL parse/allocation. Any query string on the
+  // incoming URL is deliberately dropped by the rewrite, as before.
+  if (url.href === CODEX_RESPONSES_URL) return input
   return input instanceof Request
-    ? new Request(target.toString(), input)
-    : target
+    ? new Request(CODEX_RESPONSES_URL, input)
+    : CODEX_RESPONSES_URL
 }
 
 function extractText(content: unknown): string {

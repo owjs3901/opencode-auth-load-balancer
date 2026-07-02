@@ -30,9 +30,19 @@ function unprefixName(name: string): string {
   return `${name.charAt(0).toLowerCase()}${name.slice(1)}`
 }
 
+/**
+ * Precomputed result for the common no-incoming-beta case: `setOAuthHeaders`
+ * runs `mergeBetaHeaders` on every attempt of every Anthropic request, and
+ * when the request carries no `anthropic-beta` header the merge is just this
+ * constant — no need to pay the split/map/filter/Set/spread/join chain.
+ */
+const REQUIRED_BETAS_HEADER = REQUIRED_BETAS.join(',')
+
 /** Merge incoming beta headers with the required OAuth betas, deduplicating. */
 export function mergeBetaHeaders(headers: Headers): string {
-  const incoming = (headers.get('anthropic-beta') || '')
+  const raw = headers.get('anthropic-beta')
+  if (!raw) return REQUIRED_BETAS_HEADER
+  const incoming = raw
     .split(',')
     .map((b) => b.trim())
     .filter(Boolean)

@@ -57,13 +57,7 @@ interface Call {
   body: string | null
 }
 
-function mockFetch(
-  handler: (
-    url: string,
-    init: RequestInit | undefined,
-    calls: Call[],
-  ) => Response,
-): Call[] {
+function mockFetch(handler: (url: string) => Response): Call[] {
   const calls: Call[] = []
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url =
@@ -79,7 +73,7 @@ function mockFetch(
       headers,
       body: typeof init?.body === 'string' ? init.body : null,
     })
-    return handler(url, init, calls)
+    return handler(url)
   }) as typeof fetch
   return calls
 }

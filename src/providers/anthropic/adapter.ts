@@ -1,11 +1,5 @@
-import type { PoolAccount, TokenSet, UsageSnapshot } from '../../types'
-import {
-  type AuthorizeRequest,
-  classifyHttpStatus,
-  type ErrorClass,
-  type FetchInput,
-  type ProviderAdapter,
-} from '../types'
+import type { PoolAccount } from '../../types'
+import { classifyHttpStatus, type ProviderAdapter } from '../types'
 import { PROVIDER_ID } from './constants'
 import {
   authorize as oauthAuthorize,
@@ -29,46 +23,21 @@ import { fetchUsage, parseUsageHeaders } from './usage'
 export const anthropicAdapter: ProviderAdapter = {
   id: PROVIDER_ID,
 
-  authorize(): Promise<AuthorizeRequest> {
-    return oauthAuthorize()
-  },
+  authorize: oauthAuthorize,
+  exchange: oauthExchange,
+  refresh: oauthRefresh,
 
-  exchange(
-    input: string,
-    verifier: string,
-    redirectUri: string,
-    state: string,
-  ): Promise<TokenSet | null> {
-    return oauthExchange(input, verifier, redirectUri, state)
-  },
-
-  refresh(refreshToken: string): Promise<TokenSet> {
-    return oauthRefresh(refreshToken)
-  },
-
+  // Sole wrapper left: adapts (headers, account) → (headers, account.access).
   applyAuth(headers: Headers, account: PoolAccount): void {
     setOAuthHeaders(headers, account.access)
   },
 
-  transformUrl(input: FetchInput): FetchInput {
-    return rewriteUrl(input)
-  },
-
-  transformBody(body: string): string {
-    return rewriteRequestBody(body)
-  },
-
-  transformResponse(response: Response): Response {
-    return createStrippedStream(response)
-  },
+  transformUrl: rewriteUrl,
+  transformBody: rewriteRequestBody,
+  transformResponse: createStrippedStream,
 
   parseUsageHeaders,
+  fetchUsage,
 
-  fetchUsage(account: PoolAccount, now: number): Promise<UsageSnapshot | null> {
-    return fetchUsage(account, now)
-  },
-
-  classifyError(status: number): ErrorClass {
-    return classifyHttpStatus(status)
-  },
+  classifyError: classifyHttpStatus,
 }

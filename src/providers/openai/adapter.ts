@@ -1,11 +1,4 @@
-import type { PoolAccount, TokenSet, UsageSnapshot } from '../../types'
-import {
-  type AuthorizeRequest,
-  classifyHttpStatus,
-  type ErrorClass,
-  type FetchInput,
-  type ProviderAdapter,
-} from '../types'
+import { classifyHttpStatus, type ProviderAdapter } from '../types'
 import { PROVIDER_ID } from './constants'
 import {
   authorize as oauthAuthorize,
@@ -25,46 +18,21 @@ import { fetchUsage, parseUsageHeaders } from './usage'
 export const openaiAdapter: ProviderAdapter = {
   id: PROVIDER_ID,
 
-  authorize(): Promise<AuthorizeRequest> {
-    return oauthAuthorize()
-  },
+  authorize: oauthAuthorize,
+  exchange: oauthExchange,
+  refresh: oauthRefresh,
 
-  exchange(
-    input: string,
-    verifier: string,
-    redirectUri: string,
-    state: string,
-  ): Promise<TokenSet | null> {
-    return oauthExchange(input, verifier, redirectUri, state)
-  },
+  applyAuth,
+  transformUrl: rewriteUrl,
+  transformBody: rewriteRequestBody,
 
-  refresh(refreshToken: string): Promise<TokenSet> {
-    return oauthRefresh(refreshToken)
-  },
-
-  applyAuth(headers: Headers, account: PoolAccount): void {
-    applyAuth(headers, account)
-  },
-
-  transformUrl(input: FetchInput): FetchInput {
-    return rewriteUrl(input)
-  },
-
-  transformBody(body: string): string {
-    return rewriteRequestBody(body)
-  },
-
+  // Sole method body left: no named identity function exists to reference.
   transformResponse(response: Response): Response {
     return response
   },
 
   parseUsageHeaders,
+  fetchUsage,
 
-  fetchUsage(account: PoolAccount, now: number): Promise<UsageSnapshot | null> {
-    return fetchUsage(account, now)
-  },
-
-  classifyError(status: number): ErrorClass {
-    return classifyHttpStatus(status)
-  },
+  classifyError: classifyHttpStatus,
 }

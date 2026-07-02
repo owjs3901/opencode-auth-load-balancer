@@ -38,15 +38,26 @@ function unprefixName(name: string): string {
  */
 const REQUIRED_BETAS_HEADER = REQUIRED_BETAS.join(',')
 
+/**
+ * One-slot memo keyed by the raw incoming `anthropic-beta` value (same pattern
+ * as `cachedBase` in `resolveBaseUrl` below): the client's beta header is
+ * effectively a constant string for the life of an opencode session, yet the
+ * merge chain would otherwise re-run per attempt of every Anthropic request.
+ */
+let cachedBetas: { raw: string; merged: string } | null = null
+
 /** Merge incoming beta headers with the required OAuth betas, deduplicating. */
 export function mergeBetaHeaders(headers: Headers): string {
   const raw = headers.get('anthropic-beta')
   if (!raw) return REQUIRED_BETAS_HEADER
+  if (cachedBetas?.raw === raw) return cachedBetas.merged
   const incoming = raw
     .split(',')
     .map((b) => b.trim())
     .filter(Boolean)
-  return [...new Set([...REQUIRED_BETAS, ...incoming])].join(',')
+  const merged = [...new Set([...REQUIRED_BETAS, ...incoming])].join(',')
+  cachedBetas = { raw, merged }
+  return merged
 }
 
 /** Set OAuth auth + Claude Code headers; remove x-api-key (we use Bearer). */

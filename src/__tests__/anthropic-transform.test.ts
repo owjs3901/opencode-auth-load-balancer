@@ -34,6 +34,12 @@ describe('mergeBetaHeaders / setOAuthHeaders', () => {
       merged.split(',').filter((b) => b === 'oauth-2025-04-20'),
     ).toHaveLength(1)
     expect(merged).toContain('foo')
+    // Repeat call with the same raw header exercises the one-slot memo hit path.
+    expect(
+      mergeBetaHeaders(
+        new Headers({ 'anthropic-beta': 'foo, oauth-2025-04-20' }),
+      ),
+    ).toBe(merged)
   })
 
   test('setOAuthHeaders sets bearer + beta + UA and drops x-api-key', () => {

@@ -205,12 +205,14 @@ describe('anthropic usage', () => {
     expect(
       aParse(new Headers({ 'anthropic-ratelimit-unified-status': 'allowed' })),
     ).toBeNull()
+    // A header that IS present but unparsable must yield null (NOT a truthy
+    // empty `{}` "partial" that consumers then merge as a guaranteed no-op).
     const bad = aParse(
       new Headers({
         'anthropic-ratelimit-unified-5h-utilization': 'abc',
       }),
     )
-    expect(bad?.hourly).toBeUndefined()
+    expect(bad).toBeNull()
     expect(
       aParse(
         new Headers({ 'anthropic-ratelimit-unified-7d-utilization': '0.3' }),
@@ -560,9 +562,11 @@ describe('openai usage', () => {
 
   test('parseUsageHeaders: null when absent, NaN ignored, zero reset when missing', () => {
     expect(oParse(new Headers())).toBeNull()
+    // Present-but-unparsable header → null, not a truthy empty `{}` partial
+    // (mirrors the Anthropic assertion above).
     expect(
-      oParse(new Headers({ 'x-codex-primary-used-percent': 'abc' }))?.hourly,
-    ).toBeUndefined()
+      oParse(new Headers({ 'x-codex-primary-used-percent': 'abc' })),
+    ).toBeNull()
     expect(
       oParse(new Headers({ 'x-codex-secondary-used-percent': '5' }))?.weekly
         ?.resetAt,

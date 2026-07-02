@@ -169,9 +169,16 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
             refreshUsageInBackground(adapter, now).catch(ignore),
           ),
         )
+        // ONE clock for ranking (readStatus → available/rank/displayUtil) AND
+        // rendering (renderStatus → stateOf/relTime): two separate Date.now()
+        // stamps let an account whose cooldown expires between them rank as
+        // unavailable yet render `exhausted` instead of `cooldown …`, and skew
+        // countdowns from the ranks printed beside them. Taken AFTER the
+        // awaited refresh so the freshly polled numbers are in this render.
+        const renderedAt = Date.now()
         return {
           title: 'Auth Load Balancer',
-          output: renderStatus(await readStatus()),
+          output: renderStatus(await readStatus(renderedAt), renderedAt),
         }
       },
     }),

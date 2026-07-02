@@ -67,7 +67,10 @@ export function parseUsageHeaders(
         )
   if (hourly) out.hourly = hourly
   if (weekly) out.weekly = weekly
-  return out
+  // Headers were present but NEITHER window parsed (e.g. a malformed
+  // utilization value): return null, not a truthy empty `{}` — the contract
+  // consumers gate on (`if (partial)`) is "null = nothing usable".
+  return hourly || weekly ? out : null
 }
 
 /** A window from the usage endpoint: utilization is a 0..100 PERCENT; resets_at varies. */

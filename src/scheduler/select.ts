@@ -121,11 +121,13 @@ function findPinned(
   // already pins a single account; the `&& a.providerID === providerID`
   // conjunct is a deliberate guard against a stale CROSS-PROVIDER pin (e.g. an
   // older session-key scheme) — keep it, it is not redundant.
-  return (
-    pool.accounts.find(
-      (a) => a.id === assigned.accountId && a.providerID === providerID,
-    ) ?? null
-  )
+  // Closure-free single-pass loop (not `.find`) — this is the dominant
+  // steady-state path of `selectForSession`, which runs on every request;
+  // `selectAccount` above made the same conversion for the same reason.
+  for (const a of pool.accounts) {
+    if (a.id === assigned.accountId && a.providerID === providerID) return a
+  }
+  return null
 }
 
 function withExcluded(

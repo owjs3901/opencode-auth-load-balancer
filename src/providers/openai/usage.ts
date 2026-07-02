@@ -55,7 +55,9 @@ export function parseUsageHeaders(
       : windowFromPercent(s, headers.get('x-codex-secondary-reset-at'))
   if (hourly) out.hourly = hourly
   if (weekly) out.weekly = weekly
-  return out
+  // Headers were present but NEITHER window parsed: return null, not a truthy
+  // empty `{}` (mirrors the Anthropic sibling; "null = nothing usable").
+  return hourly || weekly ? out : null
 }
 
 /**

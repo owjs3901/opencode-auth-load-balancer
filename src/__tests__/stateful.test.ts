@@ -149,6 +149,44 @@ describe('pool store', () => {
     expect((await readPool()).accounts[0]?.usage.capturedAt).toBe(0)
   })
 
+  test('readPool heals hand-edited usage window shapes (no NaNdNaNh in the dashboard)', async () => {
+    // A weekly window missing a numeric `resetAt` survived normalization
+    // pre-fix: `relTime(undefined, now)` computed `Math.round((undefined -
+    // now) / 60_000)` = NaN and rendered the literal string "NaNdNaNh" in the
+    // auth_lb_status tool / `bun run status` CLI. A non-object window and a
+    // string `utilization` are unusable — they must heal to null (the
+    // providers' "malformed window is unusable" rule), not leak strings into
+    // buildStatus's ranked-fallback tie-breaker.
+    const edited = JSON.parse(JSON.stringify(account())) as {
+      usage: Record<string, unknown>
+    }
+    edited.usage.weekly = { utilization: 0.5 } // missing resetAt
+    edited.usage.hourly = 'soon' // non-object window
+    const other = JSON.parse(JSON.stringify(account())) as {
+      usage: Record<string, unknown>
+    }
+    other.usage.weekly = { utilization: '50%', resetAt: '2026-01-01' }
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [edited, other],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const pool = await readPool()
+    expect(pool.accounts[0]?.usage.weekly).toEqual({
+      utilization: 0.5,
+      resetAt: 0,
+    })
+    expect(pool.accounts[0]?.usage.hourly).toBeNull()
+    expect(pool.accounts[1]?.usage.weekly).toBeNull()
+    const rendered = renderStatus(buildStatus(pool, Date.now()))
+    expect(rendered).not.toContain('NaN')
+    expect(rendered).toContain('50%') // the healed weekly window still renders
+  })
+
   test('readPool heals a non-number expires to 0 (forces a repairing refresh)', async () => {
     // A hand-edited `"expires": "never"` makes needsRefresh's
     // `expires - skew <= now` compare NaN -> false forever: the stale access
@@ -901,6 +939,32 @@ describe('accounts', () => {
     const labels = (await readPool()).accounts
       .filter((a) => a.providerID === 'anthropic')
       .map((a) => a.label)
+    expect(new Set(labels).size).toBe(labels.length) // no duplicate labels
+  })
+
+  test('addAccount default label never duplicates ANOTHER provider\u2019s label (pool-wide uniqueness)', async () => {
+    // Regression: the used-label set was built only from same-provider rows,
+    // but `auth_lb_rename` (and the TUI rename) can move a provider-prefixed
+    // label ACROSS providers — rename an OpenAI account to `anthropic-1`, then
+    // log in a new Anthropic account, and pre-fix it was ALSO labeled
+    // `anthropic-1`: exactly the pool-wide ambiguity the rename tool refuses
+    // to create (rename/toast/dashboard all address by first label match).
+    const o1 = await addAccount('openai', {
+      access: 'o1',
+      refresh: 'ro1',
+      expires: 1,
+    })
+    await mutatePool((pool) => {
+      const row = pool.accounts.find((a) => a.id === o1.id)
+      if (row) row.label = 'anthropic-1' // mimic auth_lb_rename / TUI rename
+    })
+    const fresh = await addAccount('anthropic', {
+      access: 'a1',
+      refresh: 'ra1',
+      expires: 1,
+    })
+    expect(fresh.label).toBe('anthropic-2')
+    const labels = (await readPool()).accounts.map((a) => a.label)
     expect(new Set(labels).size).toBe(labels.length) // no duplicate labels
   })
 

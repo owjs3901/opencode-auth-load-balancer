@@ -71,11 +71,14 @@ export async function addAccount(
       if (tokens.accountId) existing.accountId = tokens.accountId
       return existing
     }
-    const used = new Set(
-      pool.accounts
-        .filter((a) => a.providerID === providerID)
-        .map((a) => a.label),
-    )
+    // Pool-WIDE label set (not per-provider): `auth_lb_rename` enforces
+    // pool-wide label uniqueness (rename-by-label picks the first match), and
+    // renames can move a `${providerID}-${n}` style label across providers —
+    // e.g. an OpenAI account renamed to `anthropic-1`. A per-provider set then
+    // let the next Anthropic login mint a duplicate `anthropic-1`, creating
+    // exactly the ambiguity the rename tool refuses to create. The generated
+    // names are provider-prefixed, so same-provider numbering is unchanged.
+    const used = new Set(pool.accounts.map((a) => a.label))
     let n = 1
     while (used.has(`${providerID}-${n}`)) n++
     const account = makeAccount(

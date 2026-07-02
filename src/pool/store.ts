@@ -1,7 +1,12 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-import { emptyUsage, type PoolAccount, type PoolFile } from '../types'
+import {
+  emptyUsage,
+  type PoolAccount,
+  type PoolFile,
+  type UsageWindow,
+} from '../types'
 import { ignore, sleep } from '../util'
 import { type LockOptions, withLock as withFileLock } from './lock'
 import { poolFilePath } from './paths'
@@ -84,14 +89,34 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
  * persists `NaN` → JSON `null`). `mutatePool` writes the normalized pool back,
  * so the file self-heals on the next bookkeeping write.
  */
+/**
+ * Heal a hand-edited usage window shape. A window missing a numeric
+ * `utilization` is unusable — map it to `null` (the same "malformed window is
+ * unusable" rule the providers' `endpointWindow` helpers apply). A usable
+ * window whose `resetAt` is not a number (deleted, or `"2026-01-01"`) would
+ * otherwise flow into `relTime`'s `Math.round((undefined - now) / 60_000)`
+ * and render the literal string `NaNdNaNh` in the status tool/CLI dashboards —
+ * coerce it to `0` ("no reset scheduled"). Scoring is already safe
+ * (`clamp01`/`?? 0` absorb these), so this is purely a display/type boundary.
+ */
+function normalizeWindow(w: unknown): UsageWindow | null {
+  if (w == null || typeof w !== 'object') return null
+  const win = w as Partial<UsageWindow>
+  if (typeof win.utilization !== 'number') return null
+  if (typeof win.resetAt !== 'number') win.resetAt = 0
+  return win as UsageWindow
+}
+
 function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
   const accounts: PoolAccount[] = []
   for (const row of rows) {
     if (row == null || typeof row !== 'object') continue
     if (row.usage == null || typeof row.usage !== 'object') {
       row.usage = emptyUsage()
-    } else if (typeof row.usage.capturedAt !== 'number') {
-      row.usage.capturedAt = 0
+    } else {
+      if (typeof row.usage.capturedAt !== 'number') row.usage.capturedAt = 0
+      row.usage.hourly = normalizeWindow(row.usage.hourly)
+      row.usage.weekly = normalizeWindow(row.usage.weekly)
     }
     if (typeof row.cooldownUntil !== 'number') row.cooldownUntil = 0
     // A hand-edited non-number `expires` ("tomorrow") makes `needsRefresh`'s

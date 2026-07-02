@@ -497,6 +497,14 @@ export function createLoadBalancedFetch(
         const cls = adapter.classifyError(res.status)
         if (cls === 'account' || cls === 'auth') {
           const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
+          // Release the rejected response's body stream — and its HTTP
+          // connection — BEFORE the `recordRotation` pool write below: rate-
+          // limit storms are exactly when the pool lock is most contended
+          // (worst case a 30 s POOL_WRITE_LOCK timeout), and the immediate
+          // retry should not wait behind a socket pinned to a dead response.
+          // `recordRotation` reads only `res.headers` (usage + retry-after),
+          // which stay readable after a body cancel.
+          await res.body?.cancel().catch(ignore)
           // Fresh Date.now(), NOT the loop-start `now`: that was captured before
           // ensureAccessToken (up to a 30 s network refresh) and the upstream
           // fetch, so basing the cooldown on it would understate `Retry-After`
@@ -510,7 +518,6 @@ export function createLoadBalancedFetch(
             `${adapter.id} account "${account.label}" returned ${res.status}`,
           )
           log(`!! ${account.label} ${res.status} (${cls}) -> rotating`)
-          await res.body?.cancel().catch(ignore)
           continue
         }
 

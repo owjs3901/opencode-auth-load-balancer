@@ -62,35 +62,50 @@ export function selectAccount(
   cfg: SchedulerConfig = DEFAULT_CONFIG,
   exclude: ReadonlySet<string> = new Set(),
 ): Selection | null {
-  const pool = accounts.filter(
-    (a) =>
-      a.providerID === providerID && !a.disabledReason && !exclude.has(a.id),
-  )
-  if (pool.length === 0) return null
-
-  const available = pool.filter((a) => isAvailable(a, cfg, now))
-  const degraded = available.length === 0
-  const candidates = degraded ? pool : available
-
-  // `degraded` is loop-invariant (fixed above before the loop), so pick the scoring
-  // function ONCE rather than re-branching the ternary per candidate on this
-  // per-request hot path. The degraded fallback ranks by least weekly
-  // utilization; the normal path uses the full urgency scorer.
-  const scoreOf = degraded
-    ? (account: PoolAccount) => -weeklyUtil(account)
-    : (account: PoolAccount) => scoreAccount(account, cfg, now)
-
-  let best: PoolAccount | null = null
-  let bestScore = Number.NEGATIVE_INFINITY
-  for (const account of candidates) {
-    const score = scoreOf(account)
-    if (score > bestScore) {
-      bestScore = score
-      best = account
+  // Single pass over `accounts` on this per-request hot path — no intermediate
+  // filtered arrays, no per-call scoring closure. Both bests use a strict
+  // comparison so ties keep the FIRST candidate (matching the old arg-max
+  // loop's first-wins order); the fallback minimizes raw `weeklyUtil`, which is
+  // the old `-weeklyUtil` maximization written directly.
+  let sawAvailable = false
+  let bestAvail: PoolAccount | null = null
+  let bestAvailScore = Number.NEGATIVE_INFINITY
+  let bestFallback: PoolAccount | null = null
+  let lowestWeeklyUtil = Number.POSITIVE_INFINITY
+  for (const account of accounts) {
+    if (
+      account.providerID !== providerID ||
+      account.disabledReason ||
+      exclude.has(account.id)
+    )
+      continue
+    if (isAvailable(account, cfg, now)) {
+      sawAvailable = true
+      const score = scoreAccount(account, cfg, now)
+      if (score > bestAvailScore) {
+        bestAvailScore = score
+        bestAvail = account
+      }
+    } else {
+      const util = weeklyUtil(account)
+      if (util < lowestWeeklyUtil) {
+        lowestWeeklyUtil = util
+        bestFallback = account
+      }
     }
   }
 
-  return best ? { account: best, degraded, sticky: false } : null
+  // `degraded` means "no account was AVAILABLE" (not "the winner came from the
+  // fallback"), so it keys off `sawAvailable` — exactly the old
+  // `available.length === 0`. The degraded fallback ranks the unavailable set
+  // by least-bad weekly use.
+  if (sawAvailable)
+    return bestAvail
+      ? { account: bestAvail, degraded: false, sticky: false }
+      : null
+  return bestFallback
+    ? { account: bestFallback, degraded: true, sticky: false }
+    : null
 }
 
 /** The account currently pinned to a session, if any (ignores availability). */

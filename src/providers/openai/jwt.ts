@@ -9,9 +9,10 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   const parts = jwt.split('.')
   // We read only the payload segment (`parts[1]`); the header and signature are
   // intentionally ignored (see doc above — no signature verification). The guard
-  // is deliberately lenient (`< 2`, not `=== 3`) so a token shape with extra
-  // segments still decodes; the `try/catch` below rejects anything non-JSON.
-  if (parts.length < 2 || !parts[1]) return null
+  // is deliberately lenient (`!parts[1]` covers both "too few segments" and an
+  // empty payload segment — NOT `=== 3`) so a token shape with extra segments
+  // still decodes; the `try/catch` below rejects anything non-JSON.
+  if (!parts[1]) return null
   try {
     const json = Buffer.from(parts[1], 'base64url').toString('utf8')
     return JSON.parse(json) as Record<string, unknown>

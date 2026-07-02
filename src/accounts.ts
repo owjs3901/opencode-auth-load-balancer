@@ -61,8 +61,8 @@ export async function addAccount(
         )
       : undefined
     if (existing) {
+      // No refresh write: it is the match key above, so it is already equal.
       existing.access = tokens.access
-      existing.refresh = tokens.refresh
       existing.expires = tokens.expires
       existing.disabledReason = null
       // A re-login may decode a fresh accountId from the id_token (OpenAI);

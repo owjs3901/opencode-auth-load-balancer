@@ -180,6 +180,18 @@ describe('anthropic oauth', () => {
       new Response(JSON.stringify({ access_token: 'a2' }), { status: 200 })
     await expect(aRefresh('r1')).rejects.toThrow('malformed')
   })
+
+  test('refresh rejects a non-finite expires_in (never commits expires: Infinity)', async () => {
+    // `JSON.parse('{"expires_in":1e999}')` legally yields `Infinity`, which IS
+    // `typeof number` — pre-fix it slipped past validation and every consumer
+    // computed `expires: Date.now() + Infinity * 1000 = Infinity`, which
+    // needsRefresh never treats as stale: the account soft-bricks into a
+    // perpetual auth-cooldown loop that survives restarts. The 200-status
+    // prefix keeps isInvalidGrant() false, so the account is NOT disabled.
+    respond = () =>
+      new Response('{"access_token":"a","expires_in":1e999}', { status: 200 })
+    await expect(aRefresh('r1')).rejects.toThrow('200 — malformed')
+  })
 })
 
 describe('anthropic usage', () => {
@@ -497,6 +509,14 @@ describe('openai oauth', () => {
     ).toBeNull()
     respond = () =>
       new Response(JSON.stringify({ access_token: 'a' }), { status: 200 })
+    expect(
+      await oExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
+    // A non-finite expires_in (`1e999` parses to Infinity, which IS `typeof
+    // number`) must fail validation too, or the pool row gets
+    // `expires: Infinity` — never stale to needsRefresh, so never refreshed.
+    respond = () =>
+      new Response('{"access_token":"a","expires_in":1e999}', { status: 200 })
     expect(
       await oExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
     ).toBeNull()

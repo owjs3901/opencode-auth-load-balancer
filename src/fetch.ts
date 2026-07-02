@@ -435,9 +435,12 @@ export function createLoadBalancedFetch(
         const headers = new Headers(baseHeaders)
         adapter.applyAuth(headers, account)
 
-        log(
-          `-> ${adapter.id} via ${account.label}${sticky ? ' (sticky)' : ''}${degraded ? ' (degraded)' : ''}`,
-        )
+        // Call-site DEBUG gate: `log()` re-checks internally, but the template
+        // literal argument would otherwise be BUILT on every successful request
+        // (the dominant path) even with debugging off. Kept on ONE line so the
+        // line still executes (condition evaluated) under the coverage gate.
+        // prettier-ignore
+        if (DEBUG) log(`-> ${adapter.id} via ${account.label}${sticky ? ' (sticky)' : ''}${degraded ? ' (degraded)' : ''}`)
 
         const res = await fetch(transformedUrl, {
           ...init,

@@ -22,6 +22,9 @@ export interface BaseTokenResponse {
  * body is not JSON or is missing `access_token`/`expires_in` — otherwise a
  * SyntaxError escapes into the login flow, or a missing `expires_in` poisons
  * the pool with `expires: NaN` (which `needsRefresh` never treats as stale).
+ * `expires_in` must be FINITE, not just a number: `JSON.parse('1e999')`
+ * legally yields `Infinity`, which would poison the pool with
+ * `expires: Infinity` — the same never-stale soft-brick as NaN.
  * Callers decide the failure shape: exchange sites return null, refresh sites
  * throw their status-prefixed "malformed token response body" error.
  */
@@ -32,7 +35,7 @@ export async function readTokenResponse<
   if (
     !json ||
     typeof json.access_token !== 'string' ||
-    typeof json.expires_in !== 'number'
+    !Number.isFinite(json.expires_in)
   )
     return null
   return json

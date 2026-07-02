@@ -25,6 +25,11 @@ export interface BaseTokenResponse {
  * `expires_in` must be FINITE, not just a number: `JSON.parse('1e999')`
  * legally yields `Infinity`, which would poison the pool with
  * `expires: Infinity` — the same never-stale soft-brick as NaN.
+ * It must also be POSITIVE: RFC 6749 §5.1 defines it as a lifetime in
+ * seconds, so 0/negative is nonsensical — and would write an already-expired
+ * `expires` to the pool, making `needsRefresh` true on EVERY request (a
+ * network refresh round-trip per request, each burning a single-use rotated
+ * refresh token).
  * Callers decide the failure shape: exchange sites return null, refresh sites
  * throw their status-prefixed "malformed token response body" error.
  */
@@ -35,7 +40,8 @@ export async function readTokenResponse<
   if (
     !json ||
     typeof json.access_token !== 'string' ||
-    !Number.isFinite(json.expires_in)
+    !Number.isFinite(json.expires_in) ||
+    json.expires_in <= 0
   )
     return null
   return json

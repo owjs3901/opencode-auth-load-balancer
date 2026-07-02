@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { mutatePool, readPool } from '../pool/store'
 import type { PoolAccount } from '../types'
+import { testAccount } from './fixtures/account'
 
 interface TokenServer {
   url: string
@@ -45,20 +46,15 @@ function startSingleUseTokenServer(): TokenServer {
 
 function staleAccount(id: string): PoolAccount {
   const now = Date.now()
-  return {
+  return testAccount({
     id,
-    providerID: 'anthropic',
     label: id,
     access: 'stale-access',
     refresh: 'refresh-0',
     expires: now - 1, // already expired -> needsRefresh
     tokenGen: 0,
-    accountId: null,
-    usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
-    cooldownUntil: 0,
-    disabledReason: null,
     createdAt: now,
-  }
+  })
 }
 
 async function runWorker(

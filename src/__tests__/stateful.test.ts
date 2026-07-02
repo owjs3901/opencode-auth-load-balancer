@@ -24,6 +24,7 @@ import type { ProviderAdapter } from '../providers/types'
 import { ensureAccessToken, needsRefresh } from '../refresh'
 import type { PoolAccount, TokenSet, UsageSnapshot } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
+import { testAccount } from './fixtures/account'
 
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_LB_DIR = DIR
@@ -33,20 +34,15 @@ beforeEach(async () => {
 let seq = 0
 function account(over: Partial<PoolAccount> = {}): PoolAccount {
   seq += 1
-  return {
+  return testAccount({
     id: `acc-${seq}`,
-    providerID: 'anthropic',
     label: `acc-${seq}`,
-    access: 'tok',
     refresh: 'ref',
     expires: Date.now() + 60 * 60 * 1000,
-    accountId: null,
     usage: { hourly: null, weekly: null, status: null, capturedAt: Date.now() },
-    cooldownUntil: 0,
-    disabledReason: null,
     createdAt: Date.now(),
     ...over,
-  }
+  })
 }
 
 function fakeAdapter(over: Partial<ProviderAdapter> = {}): ProviderAdapter {

@@ -19,6 +19,7 @@ import {
   parseUsageHeaders as oParse,
 } from '../providers/openai/usage'
 import type { PoolAccount } from '../types'
+import { testAccount } from './fixtures/account'
 
 type Responder = (
   url: string,
@@ -45,31 +46,18 @@ afterEach(() => {
 })
 
 function acct(providerID: string, accountId: string | null): PoolAccount {
-  return {
-    id: 'x',
-    providerID,
-    label: 'x',
-    access: 'tok',
-    refresh: 'r',
-    expires: 0,
-    accountId,
-    usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
-    cooldownUntil: 0,
-    disabledReason: null,
-    createdAt: 0,
-  }
+  return testAccount({ providerID, accountId })
 }
 
 const SEC = (offsetSec: number) =>
   String(Math.floor(Date.now() / 1000) + offsetSec)
 
 describe('anthropic oauth', () => {
-  test('authorize builds max and console PKCE urls', async () => {
-    expect((await aAuthorize('max')).url).toContain('claude.ai/oauth/authorize')
-    const c = await aAuthorize('console')
-    expect(c.url).toContain('platform.claude.com/oauth/authorize')
-    expect(c.url).toContain('code_challenge=')
-    expect(c.verifier).toBeTruthy()
+  test('authorize builds the max PKCE url', async () => {
+    const a = await aAuthorize()
+    expect(a.url).toContain('claude.ai/oauth/authorize')
+    expect(a.url).toContain('code_challenge=')
+    expect(a.verifier).toBeTruthy()
   })
 
   test('exchange returns tokens for a valid callback url', async () => {
@@ -191,6 +179,21 @@ describe('anthropic oauth', () => {
     respond = () =>
       new Response('{"access_token":"a","expires_in":1e999}', { status: 200 })
     await expect(aRefresh('r1')).rejects.toThrow('200 — malformed')
+  })
+
+  test('exchange rejects a non-positive expires_in (never commits an already-expired token)', async () => {
+    // RFC 6749 §5.1 defines expires_in as a lifetime in seconds — 0/negative
+    // is nonsensical. Pre-fix it passed Number.isFinite and wrote an
+    // already-expired `expires` to the pool, so needsRefresh was true on
+    // EVERY subsequent request: a network refresh round-trip per request,
+    // each burning a single-use rotated refresh token.
+    respond = () =>
+      new Response(JSON.stringify({ access_token: 'a', expires_in: 0 }), {
+        status: 200,
+      })
+    expect(
+      await aExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
   })
 })
 
@@ -545,6 +548,18 @@ describe('openai oauth', () => {
     respond = () =>
       new Response(JSON.stringify({ access_token: 'a2' }), { status: 200 })
     await expect(oRefresh('r1')).rejects.toThrow('malformed')
+  })
+
+  test('refresh rejects a non-positive expires_in (never commits an already-expired token)', async () => {
+    // Symmetric with the anthropic exchange non-positive test: a negative
+    // expires_in (RFC 6749 §5.1 lifetime in seconds) would write an
+    // already-expired `expires`, making needsRefresh true on every request.
+    // The 200-status prefix keeps isInvalidGrant() false — not disabled.
+    respond = () =>
+      new Response(JSON.stringify({ access_token: 'a2', expires_in: -1 }), {
+        status: 200,
+      })
+    await expect(oRefresh('r1')).rejects.toThrow('200 — malformed')
   })
 })
 

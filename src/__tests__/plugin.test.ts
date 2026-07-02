@@ -29,6 +29,7 @@ import { loadConfig } from '../scheduler/config'
 import { SESSION_HEADER } from '../session'
 import type { PoolAccount } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
+import { testAccount } from './fixtures/account'
 
 const realFetch = globalThis.fetch
 type Responder = (
@@ -117,25 +118,21 @@ async function loadHooks<T = PluginHooks>(
 }
 
 function account(over: Partial<PoolAccount> = {}): PoolAccount {
-  return {
+  return testAccount({
     id: 'A',
-    providerID: 'anthropic',
     label: 'A',
     access: 'tokA',
     refresh: 'ref',
     expires: Date.now() + 60 * 60 * 1000,
-    accountId: null,
     usage: {
       hourly: null,
       weekly: { utilization: 0.1, resetAt: Date.now() + 30 * 60 * 60 * 1000 },
       status: null,
       capturedAt: Date.now(),
     },
-    cooldownUntil: 0,
-    disabledReason: null,
     createdAt: Date.now(),
     ...over,
-  }
+  })
 }
 
 /**

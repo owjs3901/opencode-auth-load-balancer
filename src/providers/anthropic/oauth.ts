@@ -9,7 +9,7 @@ import {
 import { generatePKCE } from '../pkce'
 import type { AuthorizeRequest } from '../types'
 import {
-  AUTHORIZE_URLS,
+  AUTHORIZE_URL,
   CLIENT_ID,
   CODE_CALLBACK_URL,
   OAUTH_HTTP_TIMEOUT_MS,
@@ -35,14 +35,12 @@ async function postToken(body: object): Promise<Response> {
   })
 }
 
-/** Begin the PKCE authorization flow for the given login mode. */
-export async function authorize(
-  mode: 'max' | 'console',
-): Promise<AuthorizeRequest> {
+/** Begin the PKCE authorization flow (Claude Pro/Max subscription accounts). */
+export async function authorize(): Promise<AuthorizeRequest> {
   const pkce = await generatePKCE()
   const state = generateState()
 
-  const url = new URL(AUTHORIZE_URLS[mode])
+  const url = new URL(AUTHORIZE_URL)
   url.searchParams.set('code', 'true')
   url.searchParams.set('client_id', CLIENT_ID)
   url.searchParams.set('response_type', 'code')

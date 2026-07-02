@@ -10,6 +10,7 @@ const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-status-'))
 import { mutatePool } from '../pool/store'
 import { buildStatus, readStatus, renderStatus } from '../status'
 import type { PoolAccount, PoolFile, UsageWindow } from '../types'
+import { testAccount } from './fixtures/account'
 
 const NOW = 1_000_000_000_000
 const MIN = 60_000
@@ -27,14 +28,12 @@ function acc(o: {
   cooldownUntil?: number
   disabled?: string | null
 }): PoolAccount {
-  return {
+  return testAccount({
     id: o.id,
     providerID: o.providerID ?? 'anthropic',
     label: o.id,
     access: 't',
-    refresh: 'r',
     expires: NOW + HOUR,
-    accountId: null,
     usage: {
       hourly: o.hourly ?? null,
       weekly: o.weekly ?? null,
@@ -44,7 +43,7 @@ function acc(o: {
     cooldownUntil: o.cooldownUntil ?? 0,
     disabledReason: o.disabled ?? null,
     createdAt: NOW,
-  }
+  })
 }
 
 function pool(

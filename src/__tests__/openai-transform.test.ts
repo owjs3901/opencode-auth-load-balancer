@@ -8,21 +8,10 @@ import {
 } from '../providers/openai/transform'
 import { generatePKCE } from '../providers/pkce'
 import type { PoolAccount } from '../types'
+import { testAccount } from './fixtures/account'
 
 function acct(accountId: string | null): PoolAccount {
-  return {
-    id: 'x',
-    providerID: 'openai',
-    label: 'x',
-    access: 'tokO',
-    refresh: 'r',
-    expires: 0,
-    accountId,
-    usage: { hourly: null, weekly: null, status: null, capturedAt: 0 },
-    cooldownUntil: 0,
-    disabledReason: null,
-    createdAt: 0,
-  }
+  return testAccount({ providerID: 'openai', access: 'tokO', accountId })
 }
 
 function jwt(claims: Record<string, unknown>): string {

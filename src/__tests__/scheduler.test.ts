@@ -13,6 +13,7 @@ import type {
   SessionAssignment,
   UsageWindow,
 } from '../types'
+import { testAccount } from './fixtures/account'
 
 const NOW = 1_000_000_000_000 // fixed epoch ms
 const HOUR = 60 * 60 * 1000
@@ -32,14 +33,12 @@ function account(
     providerID?: string
   } = {},
 ): PoolAccount {
-  return {
+  return testAccount({
     id,
     providerID: opts.providerID ?? 'anthropic',
     label: id,
     access: 'a',
-    refresh: 'r',
     expires: NOW + 8 * HOUR,
-    accountId: null,
     usage: {
       hourly: opts.hourly ?? null,
       weekly: opts.weekly ?? null,
@@ -49,7 +48,7 @@ function account(
     cooldownUntil: opts.cooldownUntil ?? 0,
     disabledReason: opts.disabled ?? null,
     createdAt: NOW,
-  }
+  })
 }
 
 const pick = (accts: PoolAccount[], exclude?: Set<string>) =>

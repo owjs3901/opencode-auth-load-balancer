@@ -2,10 +2,7 @@ export const PROVIDER_ID = 'anthropic'
 
 export const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 
-export const AUTHORIZE_URLS = {
-  console: 'https://platform.claude.com/oauth/authorize',
-  max: 'https://claude.ai/oauth/authorize',
-} as const
+export const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
 
 export const CODE_CALLBACK_URL =
   'https://platform.claude.com/oauth/code/callback'

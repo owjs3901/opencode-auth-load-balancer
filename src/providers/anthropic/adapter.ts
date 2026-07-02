@@ -30,7 +30,7 @@ export const anthropicAdapter: ProviderAdapter = {
   id: PROVIDER_ID,
 
   authorize(): Promise<AuthorizeRequest> {
-    return oauthAuthorize('max')
+    return oauthAuthorize()
   },
 
   exchange(

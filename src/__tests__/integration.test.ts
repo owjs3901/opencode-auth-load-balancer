@@ -14,6 +14,7 @@ import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import { SESSION_HEADER } from '../session'
 import type { PoolAccount } from '../types'
+import { testAccount } from './fixtures/account'
 
 const HOUR = 60 * 60 * 1000
 
@@ -25,7 +26,7 @@ function acct(o: {
   accountId?: string
 }): PoolAccount {
   const now = Date.now()
-  return {
+  return testAccount({
     id: o.id,
     providerID: o.providerID,
     label: o.id,
@@ -39,10 +40,8 @@ function acct(o: {
       status: null,
       capturedAt: now, // fresh -> background seeding skips it
     },
-    cooldownUntil: 0,
-    disabledReason: null,
     createdAt: now,
-  }
+  })
 }
 
 async function seed(accounts: PoolAccount[]): Promise<void> {

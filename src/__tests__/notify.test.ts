@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { notifyOnSwitch, type ToastClient } from '../notify'
 import type { PoolAccount } from '../types'
+import { testAccount } from './fixtures/account'
 
 function acc(
   id: string,
@@ -10,14 +11,11 @@ function acc(
   weeklyResetAt = 0,
   hourlyResetAt = 0,
 ): PoolAccount {
-  return {
+  return testAccount({
     id,
     providerID: 'x',
     label: id,
     access: 't',
-    refresh: 'r',
-    expires: 0,
-    accountId: null,
     usage: {
       weekly:
         weekly === null
@@ -30,10 +28,7 @@ function acc(
       status: null,
       capturedAt: 0,
     },
-    cooldownUntil: 0,
-    disabledReason: null,
-    createdAt: 0,
-  }
+  })
 }
 
 function spyClient() {

@@ -119,12 +119,25 @@ async function readOwnerId(lockDir: string): Promise<string | null> {
   }
 }
 
-/** Atomically claim the lock dir, writing owner metadata. Returns false if held. */
-async function tryClaim(lockDir: string, meta: LockMeta): Promise<boolean> {
+/**
+ * Atomically claim the lock dir, writing owner metadata. `'held'` means the
+ * mkdir lost to a current holder (EEXIST — the common contended case);
+ * `'noparent'` means it failed because the PARENT dir is missing (ENOENT — a
+ * once-ever cold-start case), so the caller knows a parent-ensure + retry can
+ * succeed where "wait for the holder" cannot. Collapsing both into one
+ * `false` forced `acquireLock` to pay an unconditional parent mkdir plus a
+ * whole extra claim round on every contended acquisition.
+ */
+async function tryClaim(
+  lockDir: string,
+  meta: LockMeta,
+): Promise<'claimed' | 'held' | 'noparent'> {
   try {
     await mkdir(lockDir, { recursive: false })
-  } catch {
-    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? 'noparent'
+      : 'held'
   }
   // If meta write fails after mkdir succeeded (disk full, EACCES, EROFS, or a
   // Windows AV/backup tool holding the dir handle), the propagating error would
@@ -141,7 +154,7 @@ async function tryClaim(lockDir: string, meta: LockMeta): Promise<boolean> {
     await rm(lockDir, { recursive: true, force: true }).catch(ignore)
     throw error
   }
-  return true
+  return 'claimed'
 }
 
 function startHeartbeat(
@@ -203,25 +216,28 @@ export async function acquireLock(
     acquiredAt: Date.now(),
   }
   const deadline = Date.now() + opts.timeoutMs
-  // Parent-dir self-heal is paid ONLY after a failed claim, at most once per
-  // acquisition. `acquireLock` sits under every `mutatePool` (usage records,
-  // cooldowns, session pins, refresh commits) plus every per-account refresh
-  // lock, and in the steady state the parent (the pool data dir) always
-  // exists and the first `tryClaim` succeeds — an unconditional prologue
-  // mkdir was a pure wasted fs syscall on the hottest lock path. When the
-  // parent IS missing, `tryClaim`'s non-recursive mkdir fails ENOENT, the
-  // branch below creates the parent, and the immediate retry claims — the
-  // "can't spin forever on a missing parent" guarantee is preserved.
+  // Parent-dir self-heal runs ONLY when a claim failed BECAUSE the parent is
+  // missing (`'noparent'`), at most once per acquisition. `acquireLock` sits
+  // under every `mutatePool` (usage records, cooldowns, session pins, refresh
+  // commits) plus every per-account refresh lock; in the steady state the
+  // parent (the pool data dir) always exists, so a failed claim means "held"
+  // and goes straight to the stale check — no wasted parent mkdir or extra
+  // claim round on the contended path. When the parent IS missing,
+  // `tryClaim`'s non-recursive mkdir fails ENOENT, the branch below creates
+  // the parent, and the immediate retry claims. The `parentEnsured` guard
+  // keeps an UNCREATABLE parent (mkdir keeps failing) converging to
+  // LockTimeoutError via the deadline path instead of self-heal spinning.
   let parentEnsured = false
   for (;;) {
-    if (await tryClaim(lockDir, meta)) {
+    const claim = await tryClaim(lockDir, meta)
+    if (claim === 'claimed') {
       return makeHandle(
         lockDir,
         meta.ownerId,
         startHeartbeat(lockDir, meta, opts.heartbeatMs),
       )
     }
-    if (!parentEnsured) {
+    if (claim === 'noparent' && !parentEnsured) {
       parentEnsured = true
       await mkdir(dirname(lockDir), { recursive: true }).catch(ignore)
       continue

@@ -16,8 +16,14 @@ function messageText({ content }: Message): string {
     // via rewriteRequestBody — same hot-path convention as selectAccount /
     // findPinned. Semantics preserved exactly: the FIRST text-type block
     // decides (a later block's text must not win when the first one is empty).
+    // `block?.type`, not `block.type`: the body is JSON.parse'd from an
+    // untrusted string, so a `null` element here would throw a TypeError
+    // that rewriteRequestBody's catch swallows — silently disabling the
+    // WHOLE Claude-Code transform for that request (no identity block, no
+    // billing header, no tool prefixing → opaque upstream 400). Matches the
+    // `block?.type` guard in transform.ts's prefixToolNames.
     for (const block of content) {
-      if (block.type === 'text') return block.text || ''
+      if (block?.type === 'text') return block.text || ''
     }
   }
 

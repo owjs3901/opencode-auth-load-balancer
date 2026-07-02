@@ -211,6 +211,49 @@ describe('pool store', () => {
     expect(row && needsRefresh(row, Date.now())).toBe(true)
   })
 
+  test('readPool heals Infinity (JSON `1e999`) in every numeric field — typeof alone is not enough', async () => {
+    // JSON.parse cannot produce NaN, but `JSON.parse('1e999') === Infinity`,
+    // and `typeof Infinity === 'number'`. Pre-fix each field soft-failed
+    // FOREVER: `"expires": 1e999` → needsRefresh never true → 401 loop;
+    // `"cooldownUntil": 1e999` → permanently sidelined + `InfinitydNaNh` in
+    // the dashboards; `"capturedAt": 1e999` → usage re-poll suppressed;
+    // `"resetAt": 1e999` → window never expires, urgency 0, relTime garbage.
+    const edited = JSON.parse(JSON.stringify(account())) as Record<
+      string,
+      unknown
+    >
+    edited.expires = 'INF_EXPIRES'
+    edited.cooldownUntil = 'INF_COOLDOWN'
+    edited.usage = {
+      capturedAt: 'INF_CAPTURED',
+      hourly: { utilization: 'INF_UTIL', resetAt: 100 },
+      weekly: { utilization: 0.5, resetAt: 'INF_RESET' },
+    }
+    const text = JSON.stringify({
+      version: 1,
+      accounts: [edited],
+      lastSelected: {},
+      sessions: {},
+    })
+      .replaceAll('"INF_EXPIRES"', '1e999')
+      .replaceAll('"INF_COOLDOWN"', '1e999')
+      .replaceAll('"INF_CAPTURED"', '1e999')
+      .replaceAll('"INF_RESET"', '1e999')
+      .replaceAll('"INF_UTIL"', '-1e999') // -Infinity: isFinite catches both signs
+    await writeFile(POOL, text)
+    const pool = await readPool()
+    const row = pool.accounts[0]
+    expect(row?.expires).toBe(0)
+    expect(row && needsRefresh(row, Date.now())).toBe(true) // repairing refresh
+    expect(row?.cooldownUntil).toBe(0) // no permanent sideline
+    expect(row?.usage.capturedAt).toBe(0) // seeding stays eligible
+    expect(row?.usage.hourly).toBeNull() // non-finite utilization → unusable
+    expect(row?.usage.weekly).toEqual({ utilization: 0.5, resetAt: 0 })
+    const rendered = renderStatus(buildStatus(pool, Date.now()))
+    expect(rendered).not.toContain('Infinity')
+    expect(rendered).not.toContain('NaN')
+  })
+
   test('readPool heals hand-edited primitive/array sessions and lastSelected to {}', async () => {
     // `??` only replaces null/undefined, so a hand-edited `"sessions": "oops"`
     // survived into the pool object — and recordSuccess's property assignment
@@ -241,6 +284,32 @@ describe('pool store', () => {
     const healed = await readPool()
     expect(healed.lastSelected).toEqual({})
     expect(healed.sessions).toEqual({})
+  })
+
+  test('readPool drops hand-edited garbage session ROWS (they would evade the TTL prune forever)', async () => {
+    // isPlainRecord validates only the sessions CONTAINER; a garbage row
+    // (`"k": "oops"`, or `updatedAt: "yesterday"`) survived raw. The TTL
+    // prune computes `now - pin.updatedAt` = NaN, and `NaN > ttlMs` is false
+    // — so the row was never pruned, rewritten verbatim by every mutatePool.
+    const valid = { accountId: 'a1', updatedAt: Date.now() }
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [],
+        lastSelected: {},
+        sessions: {
+          k: 'oops',
+          j: { accountId: 'a1', updatedAt: 'yesterday' },
+          n: { accountId: 42, updatedAt: Date.now() },
+          arr: [1, 2],
+          nul: null,
+          ok: valid,
+        },
+      }).replace('"updatedAt":"yesterday"', '"updatedAt":1e999'),
+    )
+    const pool = await readPool()
+    expect(pool.sessions).toEqual({ ok: valid })
   })
 
   test('mutatePool rejects with PoolReadError on a non-ENOENT read fault instead of wiping the pool', async () => {

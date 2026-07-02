@@ -167,6 +167,26 @@ describe('rewriteRequestBody', () => {
     expect(identityBlocks[0].extra).toBe('keep')
   })
 
+  test('a null content block in the first user message does not disable the transform', () => {
+    // messageText dereferenced `block.type` without a null guard; a null
+    // element in the JSON.parse'd content array threw a TypeError that
+    // rewriteRequestBody's catch swallowed, returning the body UNTRANSFORMED
+    // (no identity, no billing header, no tool prefixing → opaque 400).
+    const out = JSON.parse(
+      rewriteRequestBody(
+        JSON.stringify({
+          tools: [{ name: 'bash' }],
+          messages: [
+            { role: 'user', content: [null, { type: 'text', text: 'hi' }] },
+          ],
+        }),
+      ),
+    )
+    expect(out.system[0].text).toContain('x-anthropic-billing-header')
+    expect(out.system[1].text).toBe(CLAUDE_CODE_IDENTITY)
+    expect(out.tools[0].name).toBe('mcp_Bash')
+  })
+
   test('handles null system and no user message (no billing header)', () => {
     const out = JSON.parse(
       rewriteRequestBody(

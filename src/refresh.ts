@@ -52,7 +52,7 @@ function isInvalidGrant(error: unknown): boolean {
     return status === 400 || status === 401
   }
   // No status prefix (e.g. a test fake throwing `new Error('invalid_grant')`).
-  return /invalid_grant/.test(error.message)
+  return error.message.includes('invalid_grant')
 }
 
 function genOf(account: PoolAccount): number {

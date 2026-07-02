@@ -5,6 +5,7 @@ import {
   emptyUsage,
   type PoolAccount,
   type PoolFile,
+  type SessionAssignment,
   type UsageWindow,
 } from '../types'
 import { ignore, sleep } from '../util'
@@ -89,8 +90,8 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
 function normalizeWindow(w: unknown): UsageWindow | null {
   if (w == null || typeof w !== 'object') return null
   const win = w as Partial<UsageWindow>
-  if (typeof win.utilization !== 'number') return null
-  if (typeof win.resetAt !== 'number') win.resetAt = 0
+  if (!Number.isFinite(win.utilization)) return null
+  if (!Number.isFinite(win.resetAt)) win.resetAt = 0
   return win as UsageWindow
 }
 
@@ -114,18 +115,20 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     if (row.usage == null || typeof row.usage !== 'object') {
       row.usage = emptyUsage()
     } else {
-      if (typeof row.usage.capturedAt !== 'number') row.usage.capturedAt = 0
+      if (!Number.isFinite(row.usage.capturedAt)) row.usage.capturedAt = 0
       row.usage.hourly = normalizeWindow(row.usage.hourly)
       row.usage.weekly = normalizeWindow(row.usage.weekly)
     }
-    if (typeof row.cooldownUntil !== 'number') row.cooldownUntil = 0
+    if (!Number.isFinite(row.cooldownUntil)) row.cooldownUntil = 0
     // A hand-edited non-number `expires` ("tomorrow") makes `needsRefresh`'s
     // `expires - skew <= now` compare NaN → false FOREVER: the long-expired
     // access token is treated as eternally fresh, every request 401s into an
     // auth cooldown, and the account soft-bricks despite a valid refresh
     // token. Coercing to 0 forces a refresh that repairs the row on first use.
-    // (JSON.parse cannot produce NaN, so the typeof check is complete.)
-    if (typeof row.expires !== 'number') row.expires = 0
+    // (JSON.parse cannot produce NaN, but it CAN produce Infinity —
+    // `JSON.parse('1e999') === Infinity` — which fails the same way forever,
+    // so the guard must be Number.isFinite, not typeof.)
+    if (!Number.isFinite(row.expires)) row.expires = 0
     // The dashboard dereferences `label` unconditionally (`renderStatus`
     // computes `a.label.length` / `a.label.padEnd(...)`), so a hand-edited row
     // whose `label` was deleted (or set to a number) crashes the status tool
@@ -147,6 +150,33 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
  */
 function isPlainRecord<T>(value: T | null | undefined): value is T {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Row-level trust boundary for `sessions` (mirrors `normalizeAccounts`' drop
+ * semantics). `isPlainRecord` validates only the CONTAINER; a hand-edited row
+ * (`"k": "oops"`, or an object with a non-string `accountId` / non-finite
+ * `updatedAt`) would otherwise evade the TTL prune FOREVER: `now -
+ * pin.updatedAt` is NaN and `NaN > ttlMs` is false, so the garbage entry is
+ * rewritten verbatim by every `mutatePool`. `findPinned` tolerates it (returns
+ * null), so the impact is a permanent stray row — drop it here instead; the
+ * file self-heals on the next bookkeeping write.
+ */
+function normalizeSessions(
+  rows: Record<string, SessionAssignment>,
+): Record<string, SessionAssignment> {
+  for (const key of Object.keys(rows)) {
+    const row: unknown = rows[key]
+    if (!isPlainRecord(row)) {
+      delete rows[key]
+      continue
+    }
+    const pin = row as Partial<SessionAssignment>
+    if (typeof pin.accountId !== 'string' || !Number.isFinite(pin.updatedAt)) {
+      delete rows[key]
+    }
+  }
+  return rows
 }
 
 async function readRaw(): Promise<PoolFile> {
@@ -176,7 +206,9 @@ async function readRaw(): Promise<PoolFile> {
       lastSelected: isPlainRecord(parsed.lastSelected)
         ? parsed.lastSelected
         : {},
-      sessions: isPlainRecord(parsed.sessions) ? parsed.sessions : {},
+      sessions: isPlainRecord(parsed.sessions)
+        ? normalizeSessions(parsed.sessions)
+        : {},
     }
   } catch {
     // The pool file is user-editable; tolerate hand-broken JSON as empty.

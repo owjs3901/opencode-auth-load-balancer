@@ -192,13 +192,19 @@ function deleteFromPool(id: string): void {
  * in src/pool/store.ts), so a hand-edited string `resetAt`/`cooldownUntil`
  * would otherwise survive `?? 0` into the scorer and poison its numeric
  * comparisons (`isWindowExpired`, `stateOf`'s `> now`) until the server heals
- * the file — guard with typeof, not just nullish.
+ * the file — guard with Number.isFinite, not just nullish or typeof:
+ * `JSON.parse('1e999') === Infinity` and `typeof Infinity === 'number'`, so a
+ * hand-edited `1e999` cooldownUntil would render "(cooldown)" forever and a
+ * `1e999` resetAt would render the literal "Infinityd" every poll.
  */
+function isFiniteNumber(v: unknown): v is number {
+  return Number.isFinite(v)
+}
 function toScoreWindow(w: UsageWindow | null | undefined): ScoreWindow | null {
-  return w && typeof w.utilization === 'number'
+  return w && isFiniteNumber(w.utilization)
     ? {
         utilization: w.utilization,
-        resetAt: typeof w.resetAt === 'number' ? w.resetAt : 0,
+        resetAt: isFiniteNumber(w.resetAt) ? w.resetAt : 0,
       }
     : null
 }
@@ -208,7 +214,7 @@ function toScore(a: PoolAccount): ScoreAccount {
       hourly: toScoreWindow(a.usage?.hourly),
       weekly: toScoreWindow(a.usage?.weekly),
     },
-    cooldownUntil: typeof a.cooldownUntil === 'number' ? a.cooldownUntil : 0,
+    cooldownUntil: isFiniteNumber(a.cooldownUntil) ? a.cooldownUntil : 0,
     disabledReason: a.disabledReason ?? null,
   }
 }
@@ -217,11 +223,13 @@ function pct(u: number | null | undefined): string {
   return typeof u === 'number' ? `${Math.round(u * 100)}%` : '-'
 }
 function until(resetAt: number | undefined, now: number): string {
-  // typeof guard, not just truthiness: this reads the RAW pool-file value
-  // (see the callers' "deliberately stays on the RAW resetAt" note), so a
-  // hand-edited string (`"2026-01-01"`) would make `resetAt - now` NaN and
-  // render the literal "NaNd" every poll until the server heals the file.
-  if (typeof resetAt !== 'number' || resetAt <= now) return '-'
+  // Finiteness guard, not just truthiness/typeof: this reads the RAW
+  // pool-file value (see the callers' "deliberately stays on the RAW
+  // resetAt" note), so a hand-edited string (`"2026-01-01"`) would make
+  // `resetAt - now` NaN and render the literal "NaNd" — and a `1e999`
+  // (`Infinity`, which typeof calls a number) the literal "Infinityd" —
+  // every poll until the server heals the file.
+  if (!isFiniteNumber(resetAt) || resetAt <= now) return '-'
   // Mirror the server's `relTime` (src/status.ts) semantics: floor minutes at 1
   // (a sub-30s future reset must not render "0m" — '-' is reserved for elapsed)
   // and FLOOR the day figure (36h is "1d", not "2d") so the TUI bar can never

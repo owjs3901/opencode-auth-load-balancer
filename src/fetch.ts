@@ -236,8 +236,14 @@ async function recordSuccess(
       }
       if (sessionKey) {
         pool.sessions[sessionKey] = { accountId, updatedAt: now }
-        for (const [k, value] of Object.entries(pool.sessions)) {
-          if (now - value.updatedAt > ttlMs) delete pool.sessions[k]
+        // Object.keys, not Object.entries: this TTL prune runs on EVERY
+        // successful request, and entries allocates one 2-element tuple per
+        // session on top of the outer array for data a keyed read gets free.
+        // (`pin` is always defined for a key from Object.keys; the guard just
+        // satisfies noUncheckedIndexedAccess without a `!` escape.)
+        for (const k of Object.keys(pool.sessions)) {
+          const pin = pool.sessions[k]
+          if (pin && now - pin.updatedAt > ttlMs) delete pool.sessions[k]
         }
       }
     }),
@@ -271,19 +277,19 @@ function noUsableAccountResponse(providerID: string): Response {
  * Earliest epoch-ms at which one of `accountIds` recovers from an `account`-class
  * (429/402) cooldown. Considers ONLY those ids (the accounts THIS request cooled via a
  * 429/402) — an auth cooldown or a thrown network error is NOT recoverable by waiting,
- * so those are never passed in. Returns null when none of them is still cooling (the
- * pool won't self-heal, so the caller fails fast instead of blocking).
+ * so those are never passed in. The ids come from `selectForSession` for THIS
+ * provider in the same request, so no provider filter is needed here. Returns
+ * null when none of them is still cooling (the pool won't self-heal, so the
+ * caller fails fast instead of blocking).
  */
 function soonestCooldownUntil(
   accounts: PoolAccount[],
-  providerID: string,
   now: number,
   accountIds: ReadonlySet<string>,
 ): number | null {
   if (accountIds.size === 0) return null
   let soonest = Number.POSITIVE_INFINITY
   for (const account of accounts) {
-    if (account.providerID !== providerID) continue
     if (account.disabledReason) continue
     if (!accountIds.has(account.id)) continue
     if (account.cooldownUntil <= now) continue
@@ -429,7 +435,6 @@ export function createLoadBalancedFetch(
         if (waitBudgetMs > 0) {
           const resumeAt = soonestCooldownUntil(
             pool.accounts,
-            adapter.id,
             now,
             waitableCooldownIds,
           )

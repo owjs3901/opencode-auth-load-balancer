@@ -81,9 +81,28 @@ interface PoolShape {
   sessions?: Record<string, { accountId?: string }>
 }
 
+/**
+ * Normalize parsed pool JSON defensively. `JSON.parse('null')` SUCCEEDS (so
+ * readPool's catch never fires) and a hand-edited non-array `accounts` passes
+ * straight through — either then throws inside the BottomBar/SidebarPanel
+ * memos (`p.accounts ?? []` on null / `.find` on an object), breaking BOTH
+ * slots until the file is repaired by hand. The server guards these cases in
+ * `readRaw` (src/pool/store.ts); mirror that trust boundary here.
+ */
+function toPoolShape(parsed: unknown): PoolShape {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return {}
+  }
+  const pool = parsed as PoolShape
+  if (pool.accounts !== undefined && !Array.isArray(pool.accounts)) {
+    pool.accounts = undefined
+  }
+  return pool
+}
+
 function readPool(): PoolShape {
   try {
-    return JSON.parse(readFileSync(poolFile(), 'utf8')) as PoolShape
+    return toPoolShape(JSON.parse(readFileSync(poolFile(), 'utf8')))
   } catch {
     return {}
   }
@@ -94,7 +113,9 @@ function mutatePoolFile(fn: (pool: PoolShape) => void): void {
   let tmp: string | undefined
   try {
     const path = poolFile()
-    const pool = JSON.parse(readFileSync(path, 'utf8')) as PoolShape
+    // Same guard as readPool: `fn` must never run on `null` / a non-object
+    // (JSON.parse('null') succeeds), and healing here also repairs the file.
+    const pool = toPoolShape(JSON.parse(readFileSync(path, 'utf8')))
     fn(pool)
     const payload = JSON.stringify(pool, null, 2)
     tmp = `${path}.${process.pid}.${Date.now()}.tmp`

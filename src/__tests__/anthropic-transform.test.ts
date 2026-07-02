@@ -326,13 +326,14 @@ describe('createStrippedStream', () => {
     // straight to the opencode SDK and breaks tool dispatch (the SDK can't
     // unwrap the prefix, so the call never reaches the tool). This test
     // locks the tail-buffer fix by feeding two chunks split mid-pattern.
-    // The 80-byte 'A' padding around each chunk also drives stripped >
-    // TAIL_MAX on both pulls, which exercises the mid-stream emit branch
-    // (slice + enqueue) alongside the cross-chunk tail-buffer behavior.
-    // 'A' is used (not 'x') because 'prefix' and 'suffix' each already
-    // contain an 'x' — split('x') would over-count the padding.
+    // The 300-byte 'A' padding around each chunk (> TAIL_MAX = 256) also
+    // drives stripped > TAIL_MAX on both pulls, which exercises the
+    // mid-stream emit branch (slice + enqueue) alongside the cross-chunk
+    // tail-buffer behavior. 'A' is used (not 'x') because 'prefix' and
+    // 'suffix' each already contain an 'x' — split('x') would over-count
+    // the padding.
     const enc = new TextEncoder()
-    const PAD = 'A'.repeat(80)
+    const PAD = 'A'.repeat(300)
     const upstream = new ReadableStream<Uint8Array>({
       start(c) {
         c.enqueue(enc.encode(PAD + 'prefix-noise...{"name":"mcp_'))
@@ -346,9 +347,9 @@ describe('createStrippedStream', () => {
     expect(out).toContain('"name": "bash"')
     expect(out).toContain('prefix-noise...')
     expect(out).toContain('...suffix-noise')
-    // All 160 'A' padding bytes are preserved verbatim (none of the
+    // All 600 'A' padding bytes are preserved verbatim (none of the
     // surrounding non-pattern bytes are dropped by the tail buffer).
-    expect(out.split('A').length - 1).toBe(160)
+    expect(out.split('A').length - 1).toBe(600)
   })
   test('flushes the TextDecoder at end-of-stream (final chunk ends mid-multibyte char)', async () => {
     // Pre-fix: every chunk was decoded with { stream: true } but the `done`

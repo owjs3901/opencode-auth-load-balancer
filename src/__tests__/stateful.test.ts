@@ -137,6 +137,62 @@ describe('pool store', () => {
     expect((await readPool()).accounts[0]?.usage.capturedAt).toBe(0)
   })
 
+  test('readPool heals a non-number expires to 0 (forces a repairing refresh)', async () => {
+    // A hand-edited `"expires": "never"` makes needsRefresh's
+    // `expires - skew <= now` compare NaN -> false forever: the stale access
+    // token is treated as eternally fresh and the account 401-loops. Coercing
+    // to 0 makes needsRefresh true so the first use repairs the row.
+    const edited = JSON.parse(JSON.stringify(account())) as Record<
+      string,
+      unknown
+    >
+    edited.expires = 'never'
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [edited],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const row = (await readPool()).accounts[0]
+    expect(row?.expires).toBe(0)
+    expect(row && needsRefresh(row, Date.now())).toBe(true)
+  })
+
+  test('readPool heals hand-edited primitive/array sessions and lastSelected to {}', async () => {
+    // `??` only replaces null/undefined, so a hand-edited `"sessions": "oops"`
+    // survived into the pool object — and recordSuccess's property assignment
+    // on a string primitive throws a TypeError (not a tolerated bookkeeping
+    // error), discarding an already-served response.
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [account()],
+        lastSelected: 5,
+        sessions: 'oops',
+      }),
+    )
+    const pool = await readPool()
+    expect(pool.lastSelected).toEqual({})
+    expect(pool.sessions).toEqual({})
+    // Arrays are objects too — they must also be healed, not passed through.
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [],
+        lastSelected: [],
+        sessions: [1, 2],
+      }),
+    )
+    const healed = await readPool()
+    expect(healed.lastSelected).toEqual({})
+    expect(healed.sessions).toEqual({})
+  })
+
   test('mutatePool rejects with PoolReadError on a non-ENOENT read fault instead of wiping the pool', async () => {
     // A DIRECTORY at the pool path makes readFile fail with EISDIR on every OS —
     // a stand-in for the transient EACCES/EMFILE/EBUSY/EPERM family. Pre-fix,

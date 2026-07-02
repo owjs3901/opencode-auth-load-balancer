@@ -94,9 +94,28 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
       row.usage.capturedAt = 0
     }
     if (typeof row.cooldownUntil !== 'number') row.cooldownUntil = 0
+    // A hand-edited non-number `expires` ("tomorrow") makes `needsRefresh`'s
+    // `expires - skew <= now` compare NaN → false FOREVER: the long-expired
+    // access token is treated as eternally fresh, every request 401s into an
+    // auth cooldown, and the account soft-bricks despite a valid refresh
+    // token. Coercing to 0 forces a refresh that repairs the row on first use.
+    // (JSON.parse cannot produce NaN, so the typeof check is complete.)
+    if (typeof row.expires !== 'number') row.expires = 0
     accounts.push(row)
   }
   return accounts
+}
+
+/**
+ * True for a plain JSON object (the only shape `lastSelected` / `sessions`
+ * may take). `??` in `readRaw` only replaces `null`/`undefined`, so a
+ * hand-edited primitive (`"sessions": "oops"`) or array would survive into
+ * the pool object — and `recordSuccess`'s property assignment on it throws a
+ * TypeError that is NOT a tolerated bookkeeping error, discarding an
+ * already-served response. Same trust boundary as `normalizeAccounts`.
+ */
+function isPlainRecord<T>(value: T | null | undefined): value is T {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 async function readRaw(): Promise<PoolFile> {
@@ -120,8 +139,13 @@ async function readRaw(): Promise<PoolFile> {
       // `Array.isArray` above narrows to `PoolAccount[]` (no cast needed);
       // `normalizeAccounts` is the row-level trust boundary on top of it.
       accounts: normalizeAccounts(parsed.accounts),
-      lastSelected: parsed.lastSelected ?? {},
-      sessions: parsed.sessions ?? {},
+      // `isPlainRecord` (not `??`) so hand-edited primitives/arrays are also
+      // healed; `mutatePool` writes the normalized pool back on the next
+      // bookkeeping write, same self-heal contract as `normalizeAccounts`.
+      lastSelected: isPlainRecord(parsed.lastSelected)
+        ? parsed.lastSelected
+        : {},
+      sessions: isPlainRecord(parsed.sessions) ? parsed.sessions : {},
     }
   } catch {
     // The pool file is user-editable; tolerate hand-broken JSON as empty.

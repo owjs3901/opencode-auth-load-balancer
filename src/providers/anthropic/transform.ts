@@ -313,11 +313,15 @@ export function createStrippedStream(response: Response): Response {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
 
-  // Longer than any "name":"mcp_<name>" literal opencode produces today
-  // (incl. mcp_StructuredOutput at 28 chars). The regex requires the closing
-  // `"` — so a tail of this many chars at each chunk boundary guarantees a
-  // straddled pattern lands fully buffered for the next iteration's strip.
-  const TAIL_MAX = 64
+  // The regex requires the full `"name": "mcp_<name>"` literal — including
+  // the closing `"` — in ONE strip call, so a straddled pattern re-assembles
+  // only when its partial prefix fits in the retained tail: pattern length
+  // ≤ TAIL_MAX + 1, i.e. <name> up to ~TAIL_MAX - 13 chars. MCP tool names
+  // are `<server>_<tool>` and routinely run long (59+ chars observed), which
+  // overflowed the previous 64-char tail. 256 covers any realistic name at
+  // no measurable cost: the tail is flushed at stream end, and mid-stream it
+  // only delays the final ≤ TAIL_MAX chars until the next chunk.
+  const TAIL_MAX = 256
   let tail = ''
 
   const stream = new ReadableStream({

@@ -13,9 +13,7 @@ function acc(
 ): PoolAccount {
   return testAccount({
     id,
-    providerID: 'x',
     label: id,
-    access: 't',
     usage: {
       weekly:
         weekly === null

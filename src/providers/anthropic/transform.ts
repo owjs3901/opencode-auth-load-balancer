@@ -290,10 +290,9 @@ export function rewriteRequestBody(body: string): string {
     const messages = Array.isArray(parsed.messages)
       ? (parsed.messages as { role?: string }[])
       : null
-    const billingHeader =
-      messages && messages.some((m) => m.role === 'user')
-        ? buildBillingHeaderValue(messages, CLAUDE_CODE_ENTRYPOINT)
-        : null
+    const billingHeader = messages
+      ? buildBillingHeaderValue(messages, CLAUDE_CODE_ENTRYPOINT)
+      : null
 
     const system = prependClaudeCodeIdentity(parsed.system)
     if (billingHeader) system.unshift({ type: 'text', text: billingHeader })

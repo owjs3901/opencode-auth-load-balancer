@@ -32,8 +32,6 @@ function acc(o: {
     id: o.id,
     providerID: o.providerID ?? 'anthropic',
     label: o.id,
-    access: 't',
-    expires: NOW + HOUR,
     usage: {
       hourly: o.hourly ?? null,
       weekly: o.weekly ?? null,
@@ -41,7 +39,6 @@ function acc(o: {
     },
     cooldownUntil: o.cooldownUntil ?? 0,
     disabledReason: o.disabled ?? null,
-    createdAt: NOW,
   })
 }
 

@@ -4,7 +4,6 @@ import {
   buildBillingHeaderValue,
   computeCCH,
   computeVersionSuffix,
-  extractFirstUserMessageText,
 } from '../providers/anthropic/cch'
 import { CLAUDE_CODE_IDENTITY } from '../providers/anthropic/constants'
 import {
@@ -372,23 +371,29 @@ describe('createStrippedStream', () => {
 })
 
 describe('cch billing header', () => {
-  test('extractFirstUserMessageText handles string, array, missing, and non-text content', () => {
+  test('buildBillingHeaderValue extracts string, array, and non-text content', () => {
     expect(
-      extractFirstUserMessageText([{ role: 'user', content: 'hello' }]),
-    ).toBe('hello')
+      buildBillingHeaderValue([{ role: 'user', content: 'hello' }], 'e'),
+    ).toContain(`cch=${computeCCH('hello')};`)
     expect(
-      extractFirstUserMessageText([
-        { role: 'user', content: [{ type: 'text', text: 'hi' }] },
-      ]),
-    ).toBe('hi')
+      buildBillingHeaderValue(
+        [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        'e',
+      ),
+    ).toContain(`cch=${computeCCH('hi')};`)
+    // A user message whose content yields no text still hashes as ''.
     expect(
-      extractFirstUserMessageText([{ role: 'assistant', content: 'x' }]),
-    ).toBe('')
+      buildBillingHeaderValue(
+        [{ role: 'user', content: [{ type: 'image' }] }],
+        'e',
+      ),
+    ).toContain(`cch=${computeCCH('')};`)
+  })
+  test('buildBillingHeaderValue returns null when no user message exists', () => {
     expect(
-      extractFirstUserMessageText([
-        { role: 'user', content: [{ type: 'image' }] },
-      ]),
-    ).toBe('')
+      buildBillingHeaderValue([{ role: 'assistant', content: 'x' }], 'e'),
+    ).toBeNull()
+    expect(buildBillingHeaderValue([], 'e')).toBeNull()
   })
   test('computeCCH / computeVersionSuffix produce fixed-length hex', () => {
     expect(computeCCH('hello')).toHaveLength(5)

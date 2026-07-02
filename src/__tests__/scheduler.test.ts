@@ -37,8 +37,6 @@ function account(
     id,
     providerID: opts.providerID ?? 'anthropic',
     label: id,
-    access: 'a',
-    expires: NOW + 8 * HOUR,
     usage: {
       hourly: opts.hourly ?? null,
       weekly: opts.weekly ?? null,
@@ -46,7 +44,6 @@ function account(
     },
     cooldownUntil: opts.cooldownUntil ?? 0,
     disabledReason: opts.disabled ?? null,
-    createdAt: NOW,
   })
 }
 
@@ -127,14 +124,16 @@ describe('weekly urgency = drainable / (daysToReset + cushion)^2', () => {
     expect(weeklyUrgency(exhaustedUnknown, DEFAULT_CONFIG, NOW)).toBe(0)
   })
 
-  test('an ELAPSED weekly anchor keeps the conservative full-window baseline — no probe boost', () => {
-    // A window PRESENT with `resetAt` in the PAST (stale, elapsed anchor) must
-    // take the `weekWindowMs` baseline, per weeklyUrgency's jsdoc — only the
-    // `resetAt === 0` unknown-anchor shape gets the imminent-reset probe boost.
-    // A regression widening the probe condition to `weekly ? cfg.minResetMs :
-    // cfg.weekWindowMs` (treating ANY present window as probe-imminent) would
-    // pass the unknown-anchor and missing-window tests above but misrank every
-    // account whose anchor has merely lapsed; this pins both orderings.
+  test('an ELAPSED weekly anchor rolls forward to its next occurrence — no probe boost', () => {
+    // A window PRESENT with `resetAt` in the PAST (stale, elapsed anchor) rolls
+    // forward to the anchor's next 7-day occurrence, per weeklyUrgency's jsdoc —
+    // an anchor elapsed 1h ago is ~6.96 days out, so it must NOT outrank a
+    // known 29h reset, and only the `resetAt === 0` unknown-anchor shape gets
+    // the imminent-reset probe boost. A regression widening the probe condition
+    // to `weekly ? cfg.minResetMs : …` (treating ANY present window as
+    // probe-imminent) would pass the unknown-anchor and missing-window tests
+    // above but misrank every account whose anchor has merely lapsed; this pins
+    // both orderings.
     const elapsed = account('elapsed', {
       weekly: { utilization: 0.5, resetAt: NOW - HOUR },
     })
@@ -145,6 +144,28 @@ describe('weekly urgency = drainable / (daysToReset + cushion)^2', () => {
     })
     expect(weeklyUrgency(elapsed, DEFAULT_CONFIG, NOW)).toBeLessThan(
       weeklyUrgency(unknownAnchorProbe, DEFAULT_CONFIG, NOW),
+    )
+  })
+
+  test('an anchor elapsed 6 days ago is treated as resetting in ~1 day, not a full window away', () => {
+    // Weekly anchors are FIXED and repeat every 7 days: an anchor that lapsed
+    // 6 days ago truly resets in ~1 day, so it must outrank a live window
+    // resetting in 5 days at equal stored utilization — and outrank an anchor
+    // that lapsed only 1h ago (~7 days out). Under the old flat
+    // `weekWindowMs` baseline both elapsed anchors scored identically and
+    // below the live 5-day window's neighborhood; this pins the roll-forward.
+    const elapsed6d = account('elapsed6d', {
+      weekly: { utilization: 0.5, resetAt: NOW - 6 * DAY },
+    })
+    const live5d = account('live5d', { weekly: win(0.5, 5 * DAY) })
+    const elapsed1h = account('elapsed1h', {
+      weekly: { utilization: 0.5, resetAt: NOW - HOUR },
+    })
+    expect(weeklyUrgency(elapsed6d, DEFAULT_CONFIG, NOW)).toBeGreaterThan(
+      weeklyUrgency(live5d, DEFAULT_CONFIG, NOW),
+    )
+    expect(weeklyUrgency(elapsed6d, DEFAULT_CONFIG, NOW)).toBeGreaterThan(
+      weeklyUrgency(elapsed1h, DEFAULT_CONFIG, NOW),
     )
   })
 })

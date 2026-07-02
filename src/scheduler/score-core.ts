@@ -63,6 +63,8 @@ export interface ScoreAccount {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
+/** Weekly windows repeat on FIXED per-account anchors every 7 days (see usage-merge.ts). */
+const WEEK_MS = 7 * DAY_MS
 const HOUR_MS = 60 * 60 * 1000
 /** The ~5h short rolling window (Anthropic 5h ≈ Codex primary). */
 const HOURLY_WINDOW_MS = 5 * HOUR_MS
@@ -233,7 +235,7 @@ export function isAvailable(
  * (stop favoring an account near the top of its window) and the cushion prevents a blow-up
  * at the reset instant.
  *
- * Unknown reset metadata splits in two:
+ * Imperfect reset metadata splits in three:
  *  - Window PRESENT but `resetAt === 0` (utilization known, anchor unknown — the
  *    post-quota-reset shape): weekly resets are FIXED per-account anchors, so
  *    "unknown" does NOT imply "a full window away" — it may be hours away, wasting a
@@ -242,6 +244,13 @@ export function isAvailable(
  *    headers reveal the real anchor and the score self-corrects immediately.
  *    (`drainable` still gates this: an unknown-anchor account with no headroom
  *    scores 0, so probing never routes to an exhausted account.)
+ *  - Window PRESENT with an ELAPSED anchor (`resetAt` in the past — e.g. an idle
+ *    account behind a failing usage endpoint): because the anchor is FIXED and
+ *    repeats every 7 days, the TRUE next reset is `WEEK_MS - (elapsed % WEEK_MS)`
+ *    away — roll it forward (same model as `rollWeeklyAnchorForward` in
+ *    usage-merge.ts, inlined here to keep score-core dependency-free). An anchor
+ *    that lapsed 6 days ago really resets in ~1 day and must rank accordingly,
+ *    not as "a full window away".
  *  - Window MISSING entirely (never polled — utilization unknown too): keep the
  *    conservative full-window baseline. The free usage-endpoint poll resolves this
  *    case within seconds without routing any traffic to it.
@@ -264,13 +273,16 @@ export function weeklyUrgency(
   if (drainable === 0) return 0
   const resetAt = weekly?.resetAt ?? 0
   // See the jsdoc: a PRESENT window with an unknown anchor assumes an IMMINENT
-  // reset (probe-first — one request reveals the fixed anchor); a MISSING
-  // window (or a stale, elapsed anchor) keeps the full-window baseline.
+  // reset (probe-first — one request reveals the fixed anchor); an ELAPSED
+  // anchor rolls forward to its next 7-day occurrence; only a MISSING window
+  // keeps the full-window baseline.
   const ms =
     resetAt > now
       ? resetAt - now
-      : weekly && resetAt === 0
-        ? cfg.minResetMs
+      : weekly
+        ? resetAt === 0
+          ? cfg.minResetMs
+          : WEEK_MS - ((now - resetAt) % WEEK_MS)
         : cfg.weekWindowMs
   const days = Math.max(ms, cfg.minResetMs) / DAY_MS + RESET_CUSHION_DAYS
   return drainable / (days * days)

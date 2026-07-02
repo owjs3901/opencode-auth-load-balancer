@@ -34,9 +34,6 @@ export async function refreshUsageInBackground(
   poolSnapshot?: PoolFile,
 ): Promise<void> {
   const pool = poolSnapshot ?? (await readPool())
-  const accounts = pool.accounts.filter(
-    (a) => a.providerID === adapter.id && !a.disabledReason,
-  )
   // Prune `lastPoll` entries for accounts that no longer exist in the pool —
   // TUI-sidebar deletes (`deleteFromPool` in `auth-load-balancer-tui.view.tsx`)
   // remove the row but cannot reach into this module's throttle map, and
@@ -55,26 +52,40 @@ export async function refreshUsageInBackground(
     const alive = new Set(pool.accounts.map((a) => a.id))
     for (const id of lastPoll.keys()) if (!alive.has(id)) lastPoll.delete(id)
   }
-  // Parallelize across accounts: per-account refresh locks in `refresh.ts` are
-  // keyed by (providerID, accountId), so distinct accounts never contend; and
-  // `mutatePool` already serializes via the in-process chain mutex + cross-process
-  // file lock, so concurrent calls degrade to sequential atomicity automatically.
-  // Cold-start seeding for an N-account pool drops from O(N) sequential 30 s
-  // timeouts (OAUTH_HTTP_TIMEOUT_MS + USAGE_HTTP_TIMEOUT_MS per account, summed)
-  // to a single worst-case window. The throttle write below stays BEFORE the
-  // awaits so re-entrant concurrent calls still short-circuit on `polledRecently`.
+  // Collect the stale, poll-eligible subset in ONE synchronous loop — provider
+  // filter, staleness gate, and `lastPoll` throttle fused. This runs once per
+  // request (fire-and-forget from the fetch retry loop), and in the dominant
+  // steady state — every account's weekly snapshot freshly captured from
+  // response headers — the old shape still allocated a filter array, one async
+  // closure + promise per account, and a `Promise.all` aggregate, only for
+  // every closure to bail at its staleness gate. Now nothing allocates unless
+  // an account is genuinely stale. The `lastPoll.set` stays here — before any
+  // await — so re-entrant concurrent calls still short-circuit on the throttle.
+  let stale: typeof pool.accounts | undefined
+  for (const account of pool.accounts) {
+    if (account.providerID !== adapter.id || account.disabledReason) continue
+    // Check staleness FIRST: in the steady state it is false, and the
+    // `lastPoll` Map lookup would be dead weight on the per-request hot path.
+    if (
+      account.usage.capturedAt !== 0 &&
+      now - account.usage.capturedAt <= SEED_TTL_MS
+    )
+      continue
+    if ((lastPoll.get(account.id) ?? 0) > now - SEED_TTL_MS) continue
+    lastPoll.set(account.id, now)
+    stale ??= []
+    stale.push(account)
+  }
+  if (!stale) return
+  // Parallelize across the stale subset: per-account refresh locks in
+  // `refresh.ts` are keyed by (providerID, accountId), so distinct accounts
+  // never contend; and `mutatePool` already serializes via the in-process
+  // chain mutex + cross-process file lock, so concurrent calls degrade to
+  // sequential atomicity automatically. Cold-start seeding for an N-account
+  // pool drops from O(N) sequential 30 s timeouts (OAUTH_HTTP_TIMEOUT_MS +
+  // USAGE_HTTP_TIMEOUT_MS per account, summed) to a single worst-case window.
   await Promise.all(
-    accounts.map(async (account) => {
-      const stale =
-        account.usage.capturedAt === 0 ||
-        now - account.usage.capturedAt > SEED_TTL_MS
-      // Check `stale` FIRST: in the dominant steady state (usage freshly
-      // captured from response headers) it is false, and the `lastPoll` Map
-      // lookup would be dead weight on the per-request hot path. Same
-      // short-circuit contract as the old `if (!stale || polledRecently)`.
-      if (!stale) return
-      if ((lastPoll.get(account.id) ?? 0) > now - SEED_TTL_MS) return
-      lastPoll.set(account.id, now)
+    stale.map(async (account) => {
       try {
         await ensureAccessToken(adapter, account, now)
         const snapshot = await adapter.fetchUsage(account, now)

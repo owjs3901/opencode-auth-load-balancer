@@ -7,12 +7,8 @@ interface Message {
   content?: string | Array<{ type?: string; text?: string }>
 }
 
-/** Extract text from the first user message's first text block. */
-export function extractFirstUserMessageText(messages: Message[]): string {
-  const userMsg = messages.find((message) => message.role === 'user')
-  if (!userMsg) return ''
-
-  const { content } = userMsg
+/** Extract text from a message's first text block. */
+function messageText({ content }: Message): string {
   if (typeof content === 'string') return content
 
   if (Array.isArray(content)) {
@@ -40,12 +36,20 @@ export function computeVersionSuffix(
     .slice(0, 3)
 }
 
-/** Build the complete billing header string for insertion into system[0]. */
+/**
+ * Build the complete billing header string for insertion into system[0], or
+ * null when no user-role message exists (the single `find` here is both the
+ * has-user-message gate and the text-extraction source — one prefix scan).
+ * A user message that exists but yields empty text still produces a header.
+ */
 export function buildBillingHeaderValue(
   messages: Message[],
   entrypoint: string,
-): string {
-  const text = extractFirstUserMessageText(messages)
+): string | null {
+  const userMsg = messages.find((message) => message.role === 'user')
+  if (!userMsg) return null
+
+  const text = messageText(userMsg)
   const suffix = computeVersionSuffix(text)
   const cch = computeCCH(text)
   return (

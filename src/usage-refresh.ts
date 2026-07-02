@@ -1,6 +1,7 @@
 import { findAccount, mutatePool, readPool } from './pool/store'
 import type { ProviderAdapter } from './providers/types'
 import { ensureAccessToken } from './refresh'
+import type { PoolFile } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
 
 const SEED_TTL_MS = 5 * 60 * 1000
@@ -19,12 +20,20 @@ const lastPoll = new Map<string, number>()
  * promotional weekly-quota reset) that response headers alone don't converge.
  *
  * Returns a promise (for tests / explicit awaiting); request-path callers ignore it.
+ *
+ * `poolSnapshot` lets the request hot path reuse the pool it JUST read for
+ * account selection instead of paying a second serialized file read +
+ * JSON.parse per request. The snapshot is only consulted for the staleness
+ * gates below; the actual usage write still goes through `mutatePool` (which
+ * re-reads under the lock), so a slightly stale snapshot is harmless. Callers
+ * without a pool in hand (e.g. the startup seed in index.ts) omit it.
  */
 export async function refreshUsageInBackground(
   adapter: ProviderAdapter,
   now: number,
+  poolSnapshot?: PoolFile,
 ): Promise<void> {
-  const pool = await readPool()
+  const pool = poolSnapshot ?? (await readPool())
   const accounts = pool.accounts.filter(
     (a) => a.providerID === adapter.id && !a.disabledReason,
   )

@@ -65,6 +65,10 @@ export async function addAccount(
       existing.refresh = tokens.refresh
       existing.expires = tokens.expires
       existing.disabledReason = null
+      // A re-login may decode a fresh accountId from the id_token (OpenAI);
+      // propagate it so a row bootstrapped with `accountId: null` stops
+      // falling back to the per-request JWT decode. Never clear an existing id.
+      if (tokens.accountId) existing.accountId = tokens.accountId
       return existing
     }
     const used = new Set(

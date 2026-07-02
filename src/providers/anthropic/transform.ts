@@ -281,6 +281,12 @@ export function createStrippedStream(response: Response): Response {
       for (;;) {
         const { done, value } = await reader.read()
         if (done) {
+          // Terminal flush (WHATWG streaming contract): every chunk above was
+          // decoded with { stream: true }, so bytes of a multi-byte UTF-8
+          // character straddling the FINAL chunk boundary are still buffered
+          // in the decoder. Flushing surfaces them (as U+FFFD for an
+          // incomplete sequence) instead of silently dropping them.
+          tail += decoder.decode()
           if (tail) controller.enqueue(encoder.encode(tail))
           tail = ''
           controller.close()

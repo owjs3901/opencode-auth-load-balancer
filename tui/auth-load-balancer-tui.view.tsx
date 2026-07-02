@@ -74,9 +74,12 @@ interface PoolAccount {
   cooldownUntil?: number
   disabledReason?: string | null
 }
+/** Loosely-typed view of the on-disk pool JSON (one shape for reads AND read-modify-writes). */
 interface PoolShape {
+  version?: number
   accounts?: PoolAccount[]
   lastSelected?: Record<string, string>
+  sessions?: Record<string, { accountId?: string }>
 }
 
 function readPool(): PoolShape {
@@ -87,19 +90,12 @@ function readPool(): PoolShape {
   }
 }
 
-interface PoolFileRaw {
-  version?: number
-  accounts?: PoolAccount[]
-  lastSelected?: Record<string, string>
-  sessions?: Record<string, { accountId?: string }>
-}
-
 /** Read-modify-write the pool file atomically (temp + rename — never a direct overwrite). */
-function mutatePoolFile(fn: (pool: PoolFileRaw) => void): void {
+function mutatePoolFile(fn: (pool: PoolShape) => void): void {
   let tmp: string | undefined
   try {
     const path = poolFile()
-    const pool = JSON.parse(readFileSync(path, 'utf8')) as PoolFileRaw
+    const pool = JSON.parse(readFileSync(path, 'utf8')) as PoolShape
     fn(pool)
     const payload = JSON.stringify(pool, null, 2)
     tmp = `${path}.${process.pid}.${Date.now()}.tmp`

@@ -279,6 +279,24 @@ describe('createStrippedStream', () => {
     // surrounding non-pattern bytes are dropped by the tail buffer).
     expect(out.split('A').length - 1).toBe(160)
   })
+  test('flushes the TextDecoder at end-of-stream (final chunk ends mid-multibyte char)', async () => {
+    // Pre-fix: every chunk was decoded with { stream: true } but the `done`
+    // branch closed WITHOUT the terminal decoder.decode() flush the WHATWG
+    // streaming contract requires. Bytes of a multi-byte UTF-8 character
+    // straddling the FINAL chunk boundary stayed buffered in the decoder and
+    // were silently dropped. Post-fix they surface as U+FFFD.
+    const euro = new TextEncoder().encode('€') // 3 bytes: e2 82 ac
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data:ok'))
+        c.enqueue(euro.slice(0, 2)) // incomplete sequence, then EOF
+        c.close()
+      },
+    })
+    const res = new Response(upstream, { status: 200 })
+    const out = await createStrippedStream(res).text()
+    expect(out).toBe('data:ok\uFFFD')
+  })
 })
 
 describe('cch billing header', () => {

@@ -117,7 +117,10 @@ async function applyCooldown(
   accountId: string,
   fallbackMs: number,
 ): Promise<void> {
-  const until = Date.now() + fallbackMs
+  // No response to consult (this path handles THROWN network errors), so
+  // `cooldownUntilFrom(null, …)` reduces to exactly `now + fallbackMs` —
+  // routed through the shared helper so the doc contract above stays true.
+  const until = cooldownUntilFrom(null, fallbackMs, Date.now())
   await bestEffort('cooldown', () =>
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
@@ -336,8 +339,10 @@ export function createLoadBalancedFetch(
       bodyStr !== undefined ? adapter.transformBody(bodyStr) : init?.body
     const transformedUrl = adapter.transformUrl(input)
 
-    // Cold-start / staleness seeding (throttled, fire-and-forget — no added latency).
-    void refreshUsageInBackground(adapter, Date.now()).catch(ignore)
+    // Cold-start / staleness seeding fires once per request, inside the loop —
+    // reusing the loop's own pool read instead of paying a second serialized
+    // file read + JSON.parse per request (see the flag at the readPool below).
+    let usageSeeded = false
 
     // Wall-clock budget for BLOCKING on a fully-rate-limited pool (see below). The
     // deadline is fixed at request start so the total wait can never exceed maxWaitMs
@@ -352,6 +357,15 @@ export function createLoadBalancedFetch(
     for (;;) {
       const now = Date.now()
       const pool = await readPool()
+
+      // Cold-start / staleness seeding (throttled, fire-and-forget — no added
+      // latency). Passes THIS iteration's pool snapshot so the seeding path
+      // adds no extra pool read on the request hot path; only the first round
+      // fires, so a 429-rotation retry doesn't re-trigger it.
+      if (!usageSeeded) {
+        usageSeeded = true
+        void refreshUsageInBackground(adapter, now, pool).catch(ignore)
+      }
 
       const selection = selectForSession(
         pool,
@@ -375,17 +389,22 @@ export function createLoadBalancedFetch(
         // the turn); that rejection propagates untouched, matching the abort handling in
         // the fetch catch below. When nothing recoverable is left (no waitable cooldown,
         // or it is beyond the budget) we fall through and throw the last error as before.
-        const resumeAt = soonestCooldownUntil(
-          pool.accounts,
-          adapter.id,
-          now,
-          waitableCooldownIds,
-        )
-        if (resumeAt !== null && waitBudgetMs > 0 && resumeAt <= waitDeadline) {
-          await sleepAbortable(resumeAt - now, init?.signal ?? undefined)
-          tried.clear()
-          waitableCooldownIds.clear()
-          continue
+        // The O(accounts) scan runs only when waiting is enabled at all
+        // (`maxWaitMs=0` is the explicit fail-fast opt-out) — don't compute a
+        // resume point that could never be used.
+        if (waitBudgetMs > 0) {
+          const resumeAt = soonestCooldownUntil(
+            pool.accounts,
+            adapter.id,
+            now,
+            waitableCooldownIds,
+          )
+          if (resumeAt !== null && resumeAt <= waitDeadline) {
+            await sleepAbortable(resumeAt - now, init?.signal ?? undefined)
+            tried.clear()
+            waitableCooldownIds.clear()
+            continue
+          }
         }
         break
       }

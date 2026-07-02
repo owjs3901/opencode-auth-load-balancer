@@ -682,6 +682,37 @@ describe('accounts', () => {
     expect((await readPool()).accounts).toHaveLength(2)
   })
 
+  test('addAccount dedup branch propagates a fresh accountId onto the existing row', async () => {
+    // Regression: the re-auth dedup branch updated access/refresh/expires but
+    // dropped tokens.accountId. An OpenAI re-login whose exchange decoded a
+    // fresh chatgpt_account_id from the id_token silently lost it, so a row
+    // stored with accountId: null kept falling back to the per-request JWT
+    // decode forever.
+    const first = await addAccount('openai', {
+      access: 'o1',
+      refresh: 'r-openai',
+      expires: 1,
+    })
+    expect(first.accountId).toBeNull()
+    const again = await addAccount('openai', {
+      access: 'o2',
+      refresh: 'r-openai',
+      expires: 1,
+      accountId: 'acct-fresh',
+    })
+    expect(again.id).toBe(first.id) // still the dedup path, no new row
+    expect(again.accountId).toBe('acct-fresh')
+    const stored = (await readPool()).accounts.find((a) => a.id === first.id)
+    expect(stored?.accountId).toBe('acct-fresh')
+    // A later re-login WITHOUT an id_token must not clear the stored id.
+    const third = await addAccount('openai', {
+      access: 'o3',
+      refresh: 'r-openai',
+      expires: 1,
+    })
+    expect(third.accountId).toBe('acct-fresh')
+  })
+
   test('addAccount default label avoids colliding with a surviving label after a middle-of-list delete', async () => {
     // Regression: the TUI sidebar's "Delete — remove from pool" option
     // (tui/auth-load-balancer-tui.view.tsx:115 deleteFromPool) lets the user
@@ -1017,6 +1048,41 @@ describe('usage-refresh', () => {
     await refreshUsageInBackground(adapter, t)
     await refreshUsageInBackground(adapter, t)
     // 2nd + 3rd same-`t` calls short-circuit via polledRecently — throttle intact.
+    expect(fetched).toBe(2)
+  })
+
+  test('uses a passed pool snapshot instead of re-reading the pool file', async () => {
+    // The request hot path (fetch.ts) hands over the pool it JUST read for
+    // account selection so seeding adds no second file read per request. To
+    // prove the snapshot is what's consulted: the ON-DISK pool row is FRESH
+    // (would be skipped), while the passed snapshot's copy is STALE — a
+    // re-read would skip fetchUsage, the snapshot path must poll it.
+    const now = Date.now()
+    const a = account({
+      usage: { hourly: null, weekly: null, status: null, capturedAt: now },
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    let fetched = 0
+    const adapter = fakeAdapter({
+      fetchUsage: async () => {
+        fetched += 1
+        return { hourly: null, weekly: null, status: null, capturedAt: now }
+      },
+    })
+    const snapshot = {
+      version: 1 as const,
+      accounts: [{ ...a, usage: { ...a.usage, capturedAt: 0 } }],
+      lastSelected: {},
+      sessions: {},
+    }
+    await refreshUsageInBackground(adapter, now, snapshot)
+    expect(fetched).toBe(1) // snapshot's STALE view won — no silent re-read
+    // Omitting the snapshot still reads the disk pool: by now+6min the disk
+    // row (capturedAt stamped by the write above) is past SEED_TTL_MS and the
+    // lastPoll throttle has lapsed, so the readPool path polls it again.
+    await refreshUsageInBackground(adapter, now + 6 * 60 * 1000)
     expect(fetched).toBe(2)
   })
 })

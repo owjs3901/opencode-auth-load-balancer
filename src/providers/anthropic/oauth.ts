@@ -86,7 +86,17 @@ export async function exchange(
     return null
   }
 
-  const json = (await result.json()) as TokenResponse
+  // "Returns null on failure" includes a 200 whose body is not JSON or is
+  // missing the required fields — otherwise a SyntaxError escapes into the
+  // login flow, or a missing expires_in poisons the pool with `expires: NaN`
+  // (which needsRefresh never treats as stale).
+  const json = (await result.json().catch(() => null)) as TokenResponse | null
+  if (
+    !json ||
+    typeof json.access_token !== 'string' ||
+    typeof json.expires_in !== 'number'
+  )
+    return null
   return {
     access: json.access_token,
     // RFC 6749 §5.1: server MAY omit refresh_token; at exchange time there is

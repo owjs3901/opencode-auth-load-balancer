@@ -100,7 +100,18 @@ export async function exchange(
     return null
   }
 
-  const json = (await res.json()) as TokenResponse
+  // "Returns null on failure" includes a 200 whose body is not JSON or is
+  // missing the required fields — otherwise a SyntaxError escapes into the
+  // login flow, or a missing expires_in poisons the pool with `expires: NaN`
+  // (which needsRefresh never treats as stale). Symmetric with
+  // ../anthropic/oauth.ts.
+  const json = (await res.json().catch(() => null)) as TokenResponse | null
+  if (
+    !json ||
+    typeof json.access_token !== 'string' ||
+    typeof json.expires_in !== 'number'
+  )
+    return null
   return toTokenSet(json, '')
 }
 

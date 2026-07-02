@@ -118,6 +118,22 @@ describe('anthropic oauth', () => {
     ).toBeNull()
   })
 
+  test('exchange returns null (not throw) on a malformed 200 body', async () => {
+    // A 200 whose body is not JSON must not leak a SyntaxError into the
+    // login flow — "returns null on failure" covers it.
+    respond = () => new Response('<html>not json</html>', { status: 200 })
+    expect(
+      await aExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
+    // A JSON 200 missing access_token/expires_in would otherwise produce
+    // access: undefined / expires: NaN on the pool row.
+    respond = () =>
+      new Response(JSON.stringify({ token_type: 'Bearer' }), { status: 200 })
+    expect(
+      await aExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
+  })
+
   test('refresh returns rotated tokens and throws on non-ok', async () => {
     respond = () =>
       new Response(
@@ -459,6 +475,20 @@ describe('openai oauth', () => {
   test('exchange returns null on bad input and non-ok', async () => {
     expect(await oExchange('garbage', 'v', 'cb', 'S')).toBeNull()
     respond = () => new Response('x', { status: 400 })
+    expect(
+      await oExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
+  })
+
+  test('exchange returns null (not throw) on a malformed 200 body', async () => {
+    // Symmetric with the anthropic exchange hardening: a non-JSON 200 or a
+    // JSON 200 missing access_token/expires_in yields null, never a throw.
+    respond = () => new Response('<html>not json</html>', { status: 200 })
+    expect(
+      await oExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
+    respond = () =>
+      new Response(JSON.stringify({ access_token: 'a' }), { status: 200 })
     expect(
       await oExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
     ).toBeNull()

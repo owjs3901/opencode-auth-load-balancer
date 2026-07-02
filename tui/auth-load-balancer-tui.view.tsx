@@ -62,6 +62,10 @@ function poolFile(): string {
   )
 }
 
+// Captured ONCE at module load, like `cfg` above (and the server's cachedPool
+// in src/pool/paths.ts) — the env-derived path never changes at runtime.
+const POOL_FILE = poolFile()
+
 interface UsageWindow {
   utilization?: number
   resetAt?: number
@@ -153,7 +157,7 @@ function isAbsentOrPlainRecord(value: unknown): boolean {
 
 function readPool(): PoolShape {
   try {
-    return toPoolShape(JSON.parse(readFileSync(poolFile(), 'utf8')))
+    return toPoolShape(JSON.parse(readFileSync(POOL_FILE, 'utf8')))
   } catch {
     return {}
   }
@@ -163,7 +167,7 @@ function readPool(): PoolShape {
 function mutatePoolFile(fn: (pool: PoolShape) => void): void {
   let tmp: string | undefined
   try {
-    const path = poolFile()
+    const path = POOL_FILE
     // Same guard as readPool: `fn` must never run on `null` / a non-object
     // (JSON.parse('null') succeeds), and healing here also repairs the file.
     const pool = toPoolShape(JSON.parse(readFileSync(path, 'utf8')))

@@ -13,9 +13,9 @@ export function mergeHeaders(input: FetchInput, init?: RequestInit): Headers {
   if (!initHeaders) return headers
 
   if (initHeaders instanceof Headers) {
-    initHeaders.forEach((value, key) => {
-      headers.set(key, value)
-    })
+    // Closure-free loop on the per-request hot path (see src/session.ts) —
+    // Headers is iterable per WHATWG fetch, yielding [name, value] pairs.
+    for (const [key, value] of initHeaders) headers.set(key, value)
   } else if (Array.isArray(initHeaders)) {
     // `Array.isArray` narrows to `string[][]`; under noUncheckedIndexedAccess
     // destructuring gives `string | undefined` for both positions, so a plain

@@ -447,7 +447,18 @@ describe('load-balanced fetch — edge paths', () => {
     }
   })
 
-  test('honors retry-after when cooling down a rate-limited account', async () => {
+  /**
+   * Shared skeleton for the 429 retry-after cooldown tests below: seed the
+   * two-account fixture, answer the first request with a 429 carrying the
+   * given `retry-after` header (then 200), run one load-balanced POST, assert
+   * it rotated to a 200, and return account A's resulting cooldown alongside
+   * the `now` the seed used. Each test keeps its OWN expected-window
+   * assertions (HTTP-date tests build their header string before calling;
+   * their ±2 s tolerances absorb the sub-ms `now` skew).
+   */
+  async function cooldownAfter429(
+    retryAfter: string,
+  ): Promise<{ now: number; cooldownUntil: number | undefined }> {
     const now = Date.now()
     await seedAB(now)
     let n = 0
@@ -456,7 +467,7 @@ describe('load-balanced fetch — edge paths', () => {
       if (n === 1)
         return new Response('limited', {
           status: 429,
-          headers: { 'retry-after': '30' },
+          headers: { 'retry-after': retryAfter },
         })
       return new Response('ok', { status: 200 })
     }
@@ -467,64 +478,33 @@ describe('load-balanced fetch — edge paths', () => {
     })
     expect(res.status).toBe(200)
     const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
-    expect(cooled?.cooldownUntil).toBeGreaterThan(now + 25_000)
+    return { now, cooldownUntil: cooled?.cooldownUntil }
+  }
+
+  test('honors retry-after when cooling down a rate-limited account', async () => {
+    const { now, cooldownUntil } = await cooldownAfter429('30')
+    expect(cooldownUntil).toBeGreaterThan(now + 25_000)
   })
 
   test('honors retry-after HTTP-date form (RFC 9110) when cooling down', async () => {
-    const now = Date.now()
     // 90 minutes ahead — well outside both the 5 min ACCOUNT and 2 min AUTH fallback,
     // so a pre-fix code path (which only parses delay-seconds) would land near now+5min
     // and FAIL this assertion. Only the HTTP-date branch can satisfy the ±2s window.
-    const futureMs = now + 90 * 60_000
+    const futureMs = Date.now() + 90 * 60_000
     const httpDate = new Date(futureMs).toUTCString()
-    await seedAB(now)
-    let n = 0
-    respond = () => {
-      n += 1
-      if (n === 1)
-        return new Response('limited', {
-          status: 429,
-          headers: { 'retry-after': httpDate },
-        })
-      return new Response('ok', { status: 200 })
-    }
-    const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      body: '{}',
-    })
-    expect(res.status).toBe(200)
-    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    const { cooldownUntil } = await cooldownAfter429(httpDate)
     // HTTP-date has second resolution; toUTCString truncates ms, so the cooled
     // value lands within one second below futureMs. Allow a ±2 s window.
-    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(futureMs - 2_000)
-    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(futureMs + 2_000)
+    expect(cooldownUntil).toBeGreaterThanOrEqual(futureMs - 2_000)
+    expect(cooldownUntil).toBeLessThanOrEqual(futureMs + 2_000)
   })
 
   test('falls back to default cooldown when retry-after is unparseable', async () => {
-    const now = Date.now()
-    await seedAB(now)
-    let n = 0
-    respond = () => {
-      n += 1
-      if (n === 1)
-        return new Response('limited', {
-          status: 429,
-          headers: { 'retry-after': 'garbage' },
-        })
-      return new Response('ok', { status: 200 })
-    }
-    const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      body: '{}',
-    })
-    expect(res.status).toBe(200)
-    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    const { now, cooldownUntil } = await cooldownAfter429('garbage')
     // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
     const expected = now + 5 * 60_000
-    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
-    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
   })
 
   test('falls back to default cooldown when retry-after seconds overflow numeric precision', async () => {
@@ -535,32 +515,14 @@ describe('load-balanced fetch — edge paths', () => {
     // forever (only a process restart or manual pool-file edit could recover it).
     // Post-fix the overflowing delta falls through to the ACCOUNT_COOLDOWN_MS
     // (5 min) fallback, just like the unparseable-retry-after branch above.
-    const now = Date.now()
-    await seedAB(now)
-    let n = 0
-    respond = () => {
-      n += 1
-      if (n === 1)
-        return new Response('limited', {
-          status: 429,
-          headers: { 'retry-after': '1e308' },
-        })
-      return new Response('ok', { status: 200 })
-    }
-    const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      body: '{}',
-    })
-    expect(res.status).toBe(200)
-    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    const { now, cooldownUntil } = await cooldownAfter429('1e308')
     // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
     const expected = now + 5 * 60_000
-    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
-    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
     // The locking assertion: a regression that re-introduces the overflow path
     // sets cooldownUntil to +Infinity, which fails Number.isFinite.
-    expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
+    expect(Number.isFinite(cooldownUntil ?? Infinity)).toBe(true)
   })
 
   test('falls back to default cooldown when retry-after is "0" (server says retry immediately)', async () => {
@@ -571,30 +533,12 @@ describe('load-balanced fetch — edge paths', () => {
     // gate, landing on the 5-min ACCOUNT_COOLDOWN_MS fallback. A regression that
     // flipped `httpDate > now` to `<` would silently pass the 'garbage' test
     // (NaN trips Number.isFinite first) but cool A out to the year 2000 here.
-    const now = Date.now()
-    await seedAB(now)
-    let n = 0
-    respond = () => {
-      n += 1
-      if (n === 1)
-        return new Response('limited', {
-          status: 429,
-          headers: { 'retry-after': '0' },
-        })
-      return new Response('ok', { status: 200 })
-    }
-    const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      body: '{}',
-    })
-    expect(res.status).toBe(200)
-    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    const { now, cooldownUntil } = await cooldownAfter429('0')
     // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
     const expected = now + 5 * 60_000
-    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
-    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
-    expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
+    expect(cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(Number.isFinite(cooldownUntil ?? Infinity)).toBe(true)
   })
 
   test('falls back to default cooldown when retry-after is a negative integer', async () => {
@@ -603,30 +547,12 @@ describe('load-balanced fetch — edge paths', () => {
     // epoch-ms in the past (or NaN), which fails the `httpDate > now` gate —
     // the parser falls through to ACCOUNT_COOLDOWN_MS. Same regression family as
     // the '0' case: a flipped comparison would cool A out to a past date.
-    const now = Date.now()
-    await seedAB(now)
-    let n = 0
-    respond = () => {
-      n += 1
-      if (n === 1)
-        return new Response('limited', {
-          status: 429,
-          headers: { 'retry-after': '-10' },
-        })
-      return new Response('ok', { status: 200 })
-    }
-    const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      body: '{}',
-    })
-    expect(res.status).toBe(200)
-    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    const { now, cooldownUntil } = await cooldownAfter429('-10')
     // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
     const expected = now + 5 * 60_000
-    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
-    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
-    expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
+    expect(cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(Number.isFinite(cooldownUntil ?? Infinity)).toBe(true)
   })
 
   test('honors retry-after for a large-but-valid delay-seconds (1 day)', async () => {
@@ -636,31 +562,13 @@ describe('load-balanced fetch — edge paths', () => {
     // OVERFLOW fallback; this test pins the accepted-finite-delta path itself.
     // A regression that tightened the RETRY_AFTER_MAX_MS bound (8 days) below
     // the practical quota range would silently pass '30' but break '86400'.
-    const now = Date.now()
-    await seedAB(now)
-    let n = 0
-    respond = () => {
-      n += 1
-      if (n === 1)
-        return new Response('limited', {
-          status: 429,
-          headers: { 'retry-after': '86400' },
-        })
-      return new Response('ok', { status: 200 })
-    }
-    const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      body: '{}',
-    })
-    expect(res.status).toBe(200)
-    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    const { now, cooldownUntil } = await cooldownAfter429('86400')
     // The non-overflowing finite-delta path: `until = now + 86_400 * 1000`.
     // Allow ±2 s of clock drift.
     const expected = now + 86_400 * 1000
-    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
-    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
-    expect(Number.isFinite(cooled?.cooldownUntil ?? Infinity)).toBe(true)
+    expect(cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(Number.isFinite(cooldownUntil ?? Infinity)).toBe(true)
   })
 
   test('falls back to default cooldown when retry-after seconds are finite but absurd (beyond any quota window)', async () => {
@@ -672,29 +580,11 @@ describe('load-balanced fetch — edge paths', () => {
     // Real quota Retry-After values are bounded by the weekly window (≤ 7 d);
     // anything beyond the 8-day bound must fall through to the 5-min
     // ACCOUNT_COOLDOWN_MS fallback, exactly like the '1e308' overflow case.
-    const now = Date.now()
-    await seedAB(now)
-    let n = 0
-    respond = () => {
-      n += 1
-      if (n === 1)
-        return new Response('limited', {
-          status: 429,
-          headers: { 'retry-after': '10000000000' },
-        })
-      return new Response('ok', { status: 200 })
-    }
-    const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      body: '{}',
-    })
-    expect(res.status).toBe(200)
-    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    const { now, cooldownUntil } = await cooldownAfter429('10000000000')
     // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
     const expected = now + 5 * 60_000
-    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
-    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
   })
 
   test('falls back to default cooldown when retry-after HTTP-date is decades in the future', async () => {
@@ -704,30 +594,14 @@ describe('load-balanced fetch — edge paths', () => {
     // until that date. Past the 8-day bound it must fall through to the 5-min
     // ACCOUNT_COOLDOWN_MS fallback; the sane 90-min HTTP-date test above pins
     // the still-honored side of the bound.
-    const now = Date.now()
-    const farFuture = new Date(now + 30 * 365 * 24 * 60 * 60_000).toUTCString()
-    await seedAB(now)
-    let n = 0
-    respond = () => {
-      n += 1
-      if (n === 1)
-        return new Response('limited', {
-          status: 429,
-          headers: { 'retry-after': farFuture },
-        })
-      return new Response('ok', { status: 200 })
-    }
-    const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      body: '{}',
-    })
-    expect(res.status).toBe(200)
-    const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
+    const farFuture = new Date(
+      Date.now() + 30 * 365 * 24 * 60 * 60_000,
+    ).toUTCString()
+    const { now, cooldownUntil } = await cooldownAfter429(farFuture)
     // ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000 (5 min). Allow ±2 s of clock drift.
     const expected = now + 5 * 60_000
-    expect(cooled?.cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
-    expect(cooled?.cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
+    expect(cooldownUntil).toBeGreaterThanOrEqual(expected - 2_000)
+    expect(cooldownUntil).toBeLessThanOrEqual(expected + 2_000)
   })
 
   test('on API 401 (cls=auth) cools the account for AUTH_COOLDOWN_MS and rotates to the next account', async () => {

@@ -4,12 +4,17 @@ import { fetchUsageJson } from '../usage-http'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 import { resolveAccountId } from './jwt'
 
-/** Build a window from a percent (0..100) + reset epoch seconds. */
+/**
+ * Build a window from a percent (0..100) + reset epoch seconds.
+ *
+ * `percentRaw` is `string` (NOT `string | null`): `parseUsageHeaders` short-
+ * circuits on a null percent header BEFORE calling, so a null branch here
+ * would be dead code (mirrors the Anthropic sibling's `parseHeaderWindow`).
+ */
 function windowFromPercent(
-  percentRaw: string | null,
+  percentRaw: string,
   resetSecRaw: string | null,
 ): UsageWindow | null {
-  if (percentRaw === null) return null
   const percent = Number(percentRaw)
   if (!Number.isFinite(percent)) return null
   // secondsToMs absorbs the non-finite / overflow guard (util.ts).
@@ -36,9 +41,10 @@ export function parseUsageHeaders(
   // timestamp only when a weekly window arrived — the staleness-gate contract.
   const out: Partial<UsageSnapshot> = {}
   // Short-circuit before `headers.get('...reset-at')` when the matching
-  // percent header is missing — `windowFromPercent` returns null on a null
-  // percent anyway, so the map lookup was wasted work on every response that
-  // reported only one of the two windows (mirrors the Anthropic sibling).
+  // percent header is missing — the map lookup would be wasted work on every
+  // response that reported only one of the two windows, and it keeps
+  // `windowFromPercent` free of a dead null branch (mirrors the Anthropic
+  // sibling).
   const hourly =
     p === null
       ? null

@@ -6,7 +6,6 @@ import {
   rewriteRequestBody,
   rewriteUrl,
 } from '../providers/openai/transform'
-import { generatePKCE } from '../providers/pkce'
 import type { PoolAccount } from '../types'
 import { testAccount } from './fixtures/account'
 
@@ -180,13 +179,5 @@ describe('extractAccountId', () => {
   test('returns undefined for a malformed token', () => {
     expect(extractAccountId('not-a-jwt')).toBeUndefined()
     expect(extractAccountId('h.@@@.s')).toBeUndefined()
-  })
-})
-
-describe('pkce', () => {
-  test('generates a base64url verifier + challenge', async () => {
-    const { verifier, challenge } = await generatePKCE()
-    expect(verifier).not.toMatch(/[+/=]/)
-    expect(challenge).not.toMatch(/[+/=]/)
   })
 })

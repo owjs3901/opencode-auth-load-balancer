@@ -2,7 +2,7 @@ import { join } from 'node:path'
 
 import { describe, expect, test } from 'bun:test'
 
-import { opencodeDataDir, poolFilePath, resolveDataDir } from '../pool/paths'
+import { poolFilePath, resolveDataDir } from '../pool/paths'
 import { mergeHeaders } from '../providers/headers'
 import { DEFAULT_CONFIG, loadConfig } from '../scheduler/config'
 import { deriveSessionKey, SESSION_HEADER } from '../session'
@@ -89,7 +89,6 @@ describe('resolveDataDir', () => {
     )
   })
   test('live wrappers resolve a pool file path', () => {
-    expect(typeof opencodeDataDir()).toBe('string')
     expect(poolFilePath().endsWith('auth-load-balancer.json')).toBe(true)
   })
 })

@@ -24,17 +24,6 @@ export function resolveDataDir(env: DataDirEnv, home: string): string {
   return join(home, '.local', 'share', 'opencode')
 }
 
-/** Resolve the data dir from the live process environment. */
-export function opencodeDataDir(): string {
-  return resolveDataDir(
-    {
-      override: process.env.OPENCODE_AUTH_LB_DIR,
-      xdgDataHome: process.env.XDG_DATA_HOME,
-    },
-    homedir(),
-  )
-}
-
 /**
  * One-slot memo for `poolFilePath()`, keyed by the RAW values of the two env
  * vars the path depends on. Every `readPool()` calls `poolFilePath()` once and

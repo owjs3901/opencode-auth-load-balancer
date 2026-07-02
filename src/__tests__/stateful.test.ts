@@ -20,7 +20,6 @@ import {
 } from '../pool/store'
 import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
-import type { ProviderAdapter } from '../providers/types'
 import { ensureAccessToken, needsRefresh } from '../refresh'
 import { selectAccount } from '../scheduler/select'
 import { buildStatus } from '../status'
@@ -33,6 +32,7 @@ import {
 import { refreshUsageInBackground } from '../usage-refresh'
 import { sleep } from '../util'
 import { testAccount } from './fixtures/account'
+import { fakeAdapter } from './fixtures/adapter'
 
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_LB_DIR = DIR
@@ -53,31 +53,36 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
   })
 }
 
-function fakeAdapter(over: Partial<ProviderAdapter> = {}): ProviderAdapter {
-  return {
-    id: 'anthropic',
-    authorize: async () => ({
+describe('fakeAdapter fixture', () => {
+  test('defaults are inert no-ops — the shared-stub contract the refresh-family tests and the two-process worker rely on', async () => {
+    const a = fakeAdapter()
+    expect(a.id).toBe('anthropic')
+    expect(await a.authorize()).toEqual({
       url: '',
       verifier: '',
       state: '',
       redirectUri: '',
-    }),
-    exchange: async () => null,
-    refresh: async () => ({
-      access: 'new',
-      refresh: 'newref',
-      expires: Date.now() + 3_600_000,
-    }),
-    applyAuth: () => undefined,
-    transformUrl: (i) => i,
-    transformBody: (b) => b,
-    transformResponse: (r) => r,
-    parseUsageHeaders: () => null,
-    fetchUsage: async () => null,
-    classifyError: () => 'ok',
-    ...over,
-  }
-}
+    })
+    expect(await a.exchange('code', 'v', 'r', 's')).toBeNull()
+    const tokens = await a.refresh('ref')
+    expect(tokens).toMatchObject({ access: 'new', refresh: 'newref' })
+    expect(tokens.expires).toBeGreaterThan(Date.now())
+    // applyAuth must not touch headers: stub-driven tests would otherwise
+    // leak auth state between accounts.
+    const headers = new Headers()
+    expect(a.applyAuth(headers, account())).toBeUndefined()
+    expect([...headers.keys()]).toHaveLength(0)
+    expect(a.transformUrl('https://x/y')).toBe('https://x/y')
+    expect(a.transformBody('{}')).toBe('{}')
+    const res = new Response('ok')
+    expect(a.transformResponse(res)).toBe(res)
+    expect(a.parseUsageHeaders(headers)).toBeNull()
+    expect(await a.fetchUsage(account(), Date.now())).toBeNull()
+    // classifyError must default to 'ok' so stub-driven fetch tests never
+    // accidentally cool an account down.
+    expect(a.classifyError(500)).toBe('ok')
+  })
+})
 
 describe('pool store', () => {
   test('readPool returns empty on a corrupt/unknown-version file', async () => {

@@ -10,20 +10,17 @@ import { readPoolAccount } from '../../pool/store'
 import type { ProviderAdapter } from '../../providers/types'
 import { ensureAccessToken } from '../../refresh'
 import type { TokenSet } from '../../types'
+import { fakeAdapter } from './adapter'
 
 const tokenUrl = process.env.RACE_TOKEN_URL
 const accountId = process.env.RACE_ACCOUNT_ID
 
+/**
+ * The one behavior this worker needs on top of the shared no-op stub: a
+ * `refresh` that hits the parent test's single-use token server.
+ */
 function makeAdapter(url: string): ProviderAdapter {
-  return {
-    id: 'anthropic',
-    authorize: async () => ({
-      url: '',
-      verifier: '',
-      state: '',
-      redirectUri: '',
-    }),
-    exchange: async () => null,
+  return fakeAdapter({
     refresh: async (refreshToken: string): Promise<TokenSet> => {
       const res = await fetch(url, {
         method: 'POST',
@@ -45,14 +42,7 @@ function makeAdapter(url: string): ProviderAdapter {
         expires: Date.now() + json.expires_in * 1000,
       }
     },
-    applyAuth: () => undefined,
-    transformUrl: (i) => i,
-    transformBody: (b) => b,
-    transformResponse: (r) => r,
-    parseUsageHeaders: () => null,
-    fetchUsage: async () => null,
-    classifyError: () => 'ok',
-  }
+  })
 }
 
 async function main(): Promise<void> {

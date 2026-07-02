@@ -83,16 +83,29 @@ export const SCORE_DEFAULTS: ScoreConfig = {
   weeklyDrainTarget: 0.98,
 }
 
+/**
+ * Parse one numeric env override: missing/empty → default, non-finite → default.
+ * The SINGLE parsing contract for every numeric `OPENCODE_AUTH_LB_*` knob — shared
+ * by `loadScoreConfig` below and the server-only `loadConfig` in
+ * `src/scheduler/config.ts`, so the two loaders can never silently diverge.
+ */
+export function readEnvNumber(
+  env: Record<string, string | undefined>,
+  key: string,
+  dflt: number,
+): number {
+  const raw = env[key]
+  if (raw === undefined || raw === '') return dflt
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : dflt
+}
+
 /** Read scoring overrides from env (OPENCODE_AUTH_LB_*), falling back to SCORE_DEFAULTS. */
 export function loadScoreConfig(
   env: Record<string, string | undefined> = process.env,
 ): ScoreConfig {
-  const num = (key: string, dflt: number): number => {
-    const raw = env[key]
-    if (raw === undefined || raw === '') return dflt
-    const n = Number(raw)
-    return Number.isFinite(n) ? n : dflt
-  }
+  const num = (key: string, dflt: number): number =>
+    readEnvNumber(env, key, dflt)
   return {
     hourlyInfluence: num(
       'OPENCODE_AUTH_LB_HOURLY_INFLUENCE',

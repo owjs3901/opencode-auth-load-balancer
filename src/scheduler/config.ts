@@ -1,4 +1,9 @@
-import { loadScoreConfig, SCORE_DEFAULTS, type ScoreConfig } from './score-core'
+import {
+  loadScoreConfig,
+  readEnvNumber,
+  SCORE_DEFAULTS,
+  type ScoreConfig,
+} from './score-core'
 
 /**
  * Tunable parameters for the account scheduler. All overridable via env vars. Extends
@@ -56,12 +61,10 @@ export const DEFAULT_CONFIG: SchedulerConfig = {
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SchedulerConfig {
-  const num = (key: string, dflt: number): number => {
-    const raw = env[key]
-    if (raw === undefined || raw === '') return dflt
-    const n = Number(raw)
-    return Number.isFinite(n) ? n : dflt
-  }
+  // Shared with `loadScoreConfig` (score-core) so every numeric knob parses
+  // identically across the scoring and server-only config surfaces.
+  const num = (key: string, dflt: number): number =>
+    readEnvNumber(env, key, dflt)
   const bool = (key: string, dflt: boolean): boolean => {
     const raw = env[key]?.trim().toLowerCase()
     if (raw === undefined || raw === '') return dflt

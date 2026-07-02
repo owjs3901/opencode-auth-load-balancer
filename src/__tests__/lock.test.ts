@@ -139,6 +139,35 @@ describe('file lock', () => {
     ).rejects.toBeInstanceOf(LockTimeoutError)
   })
 
+  test('stale-reclaim branch respects the acquisition deadline (no unbounded spin past timeoutMs)', async () => {
+    // Regression lock for src/pool/lock.ts acquireLock. Pre-fix the stale
+    // branch ended in an unconditional `continue` that skipped BOTH the
+    // deadline check and the jittered sleep — so when the reclaim `rm`
+    // persistently failed (its error is swallowed by `.catch(ignore)`, e.g.
+    // Windows EACCES/EBUSY from an AV tool holding the stale dir), the loop
+    // hot-spun forever and LockTimeoutError was never thrown. Post-fix the
+    // branch re-checks the deadline after the `rm`. With an already-expired
+    // deadline (timeoutMs: 0) and a stale lock present, pre-fix code
+    // acquired the lock on the next spin; post-fix it throws.
+    const dir = lockPath('stale-deadline')
+    await mkdir(dir, { recursive: true })
+    const meta = join(dir, 'owner.json')
+    await writeFile(
+      meta,
+      JSON.stringify({ ownerId: 'ghost', pid: 1, host: 'x', acquiredAt: 0 }),
+    )
+    const old = new Date(Date.now() - 10_000)
+    await utimes(meta, old, old)
+    await expect(
+      acquireLock(dir, {
+        staleMs: 1_000,
+        timeoutMs: 0, // deadline already passed when the stale branch runs
+        retryMs: 10,
+        heartbeatMs: 5_000,
+      }),
+    ).rejects.toBeInstanceOf(LockTimeoutError)
+  })
+
   test('release does NOT rm the lockDir when the owner meta is missing (race vs a concurrent reclaim mid-tryClaim)', async () => {
     // Regression lock for src/pool/lock.ts makeHandle.release. Pre-fix the
     // guard `if (current && current.meta.ownerId !== ownerId) return` treated

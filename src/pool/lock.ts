@@ -176,6 +176,14 @@ export async function acquireLock(
     if (current !== null && Date.now() - current.mtimeMs > opts.staleMs) {
       // Holder crashed without releasing: reclaim and retry immediately.
       await rm(lockDir, { recursive: true, force: true }).catch(ignore)
+      // Respect the acquisition deadline even on this fast path. The `rm` above
+      // swallows failures, so if the reclaim persistently fails (Windows
+      // EACCES/EBUSY from an AV/backup tool holding the stale dir), an
+      // unconditional `continue` would skip BOTH the deadline check and the
+      // jittered sleep below — degenerating into an unbounded, sleep-free hot
+      // spin that never throws the LockTimeoutError its callers (`bestEffort`)
+      // are designed to absorb. A successful reclaim still retries immediately.
+      if (Date.now() >= deadline) throw new LockTimeoutError(lockDir)
       continue
     }
     if (Date.now() >= deadline) throw new LockTimeoutError(lockDir)

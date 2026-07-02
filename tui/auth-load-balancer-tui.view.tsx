@@ -162,11 +162,15 @@ function pct(u: number | null | undefined): string {
 }
 function until(resetAt: number | undefined, now: number): string {
   if (!resetAt || resetAt <= now) return '-'
-  const mins = Math.round((resetAt - now) / 60_000)
+  // Mirror the server's `relTime` (src/status.ts) semantics: floor minutes at 1
+  // (a sub-30s future reset must not render "0m" — '-' is reserved for elapsed)
+  // and FLOOR the day figure (36h is "1d", not "2d") so the TUI bar can never
+  // disagree with the CLI/tool dashboard about the same account's countdown.
+  const mins = Math.max(1, Math.round((resetAt - now) / 60_000))
   if (mins < 60) return `${mins}m`
   const hrs = Math.floor(mins / 60)
   if (hrs < 24) return `${hrs}h`
-  return `${Math.round(hrs / 24)}d`
+  return `${Math.floor(hrs / 24)}d`
 }
 /** A window's utilization for the bar: "-" when absent, "0%" once it has reset (stale value dropped). */
 function winPct(w: UsageWindow | null | undefined, now: number): string {

@@ -1,11 +1,11 @@
 import type { TokenSet } from '../../types'
 import { ignore } from '../../util'
 import {
-  type BaseTokenResponse,
   generateState,
   parseCallbackInput,
   readRefreshResponse,
   readTokenResponse,
+  toTokenSet,
 } from '../oauth-callback'
 import { generatePKCE } from '../pkce'
 import type { AuthorizeRequest } from '../types'
@@ -17,24 +17,6 @@ import {
   OAUTH_SCOPES,
   TOKEN_URL,
 } from './constants'
-
-/**
- * Map a token-endpoint response body to a TokenSet (mirror of toTokenSet() in
- * ../openai/oauth.ts). RFC 6749 §5.1: the server MAY omit refresh_token; fall
- * back to `previousRefresh` then — `''` at exchange time (no previous token; a
- * missing field still fails the next refresh loudly, but never writes
- * `undefined` onto the pool account), the current token at refresh time.
- */
-function toTokenSet(
-  json: BaseTokenResponse,
-  previousRefresh: string,
-): TokenSet {
-  return {
-    access: json.access_token,
-    refresh: json.refresh_token || previousRefresh,
-    expires: Date.now() + json.expires_in * 1000,
-  }
-}
 
 /**
  * POST a JSON body to TOKEN_URL with the shared Claude OAuth shell.

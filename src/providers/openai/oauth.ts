@@ -6,6 +6,7 @@ import {
   parseCallbackInput,
   readRefreshResponse,
   readTokenResponse,
+  toTokenSet as baseTokenSet,
 } from '../oauth-callback'
 import { generatePKCE } from '../pkce'
 import type { AuthorizeRequest } from '../types'
@@ -24,15 +25,10 @@ interface TokenResponse extends BaseTokenResponse {
   id_token?: string
 }
 
+/** Shared response→TokenSet mapping (../oauth-callback) plus the Codex accountId. */
 function toTokenSet(json: TokenResponse, previousRefresh: string): TokenSet {
   const accountId = json.id_token ? extractAccountId(json.id_token) : undefined
-  return {
-    access: json.access_token,
-    // The server may omit a rotated refresh token; keep the previous one then.
-    refresh: json.refresh_token || previousRefresh,
-    expires: Date.now() + json.expires_in * 1000,
-    accountId,
-  }
+  return { ...baseTokenSet(json, previousRefresh), accountId }
 }
 
 /**

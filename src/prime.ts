@@ -23,20 +23,26 @@ import { selectAccount } from './scheduler/select'
  * plugin input and its `undefined` return poisons the hook list.
  *
  * Fast path (same pattern as `bootstrapFromOpencodeAuth`): both provider plugins
- * run this at every opencode startup, so for a single-provider user the OTHER
- * provider's call would otherwise take the in-process mutex + cross-process file
- * lock and atomically rewrite the pool file byte-identically — `selectAccount`
- * over zero accounts changes nothing. A cheap serialized read skips that. No
- * TOCTOU concern: the fast path only skips a write that would change nothing,
- * and an account added concurrently is primed by its own login/startup flow.
+ * run this at every opencode startup, so without it every start would take the
+ * in-process mutex + cross-process file lock and atomically rewrite the pool
+ * file byte-identically — `selectAccount` over zero accounts changes nothing,
+ * and in the steady state (every restart after the first request)
+ * `lastSelected` already points at the top-ranked account. One cheap serialized
+ * read skips all of those no-op writes. No TOCTOU concern: the fast path only
+ * skips a write that would change nothing, an account added concurrently is
+ * primed by its own login/startup flow, and `lastSelected` is informational
+ * anyway (see above).
  */
 export async function primeInUse(
   providerID: string,
   now: number,
 ): Promise<void> {
-  if (!(await readPool()).accounts.some((a) => a.providerID === providerID))
-    return
+  const snapshot = await readPool()
+  if (!snapshot.accounts.some((a) => a.providerID === providerID)) return
   const cfg = loadConfig()
+  const preview = selectAccount(snapshot.accounts, providerID, now, cfg)
+  if (!preview || snapshot.lastSelected[providerID] === preview.account.id)
+    return
   await mutatePool((pool) => {
     const selection = selectAccount(pool.accounts, providerID, now, cfg)
     if (selection) pool.lastSelected[providerID] = selection.account.id

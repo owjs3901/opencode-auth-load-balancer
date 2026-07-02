@@ -528,7 +528,10 @@ export function createLoadBalancedFetch(
           lastError = new Error(
             `${adapter.id} account "${account.label}" returned ${res.status}`,
           )
-          log(`!! ${account.label} ${res.status} (${cls}) -> rotating`)
+          // Same call-site DEBUG gate as the success path above (line ~494):
+          // don't build the template literal during a rate-limit storm.
+          // prettier-ignore
+          if (DEBUG) log(`!! ${account.label} ${res.status} (${cls}) -> rotating`)
           continue
         }
 
@@ -564,9 +567,8 @@ export function createLoadBalancedFetch(
         if (aborted) throw error
         if (!account.disabledReason)
           await applyCooldown(account.id, AUTH_COOLDOWN_MS)
-        log(
-          `!! ${account.label} threw: ${error instanceof Error ? error.message : String(error)}`,
-        )
+        // prettier-ignore
+        if (DEBUG) log(`!! ${account.label} threw: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
     }

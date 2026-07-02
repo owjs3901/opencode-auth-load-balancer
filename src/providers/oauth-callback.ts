@@ -7,14 +7,37 @@
  * future tweak (new callback format, whitespace normalization) had to be made
  * in two places to stay consistent. `readTokenResponse` unifies the same way:
  * the token-endpoint 200-body validation was copy-pasted four times (exchange
- * + refresh, per provider).
+ * + refresh, per provider). `toTokenSet` single-sources the response→TokenSet
+ * mapping contract the same way — it too was maintained as two mirrored
+ * private copies.
  */
+
+import type { TokenSet } from '../types'
 
 /** The fields every provider's token-endpoint response must carry. */
 export interface BaseTokenResponse {
   access_token: string
   refresh_token?: string
   expires_in: number
+}
+
+/**
+ * Map a token-endpoint response body to a TokenSet. RFC 6749 §5.1: the server
+ * MAY omit refresh_token; fall back to `previousRefresh` then — `''` at
+ * exchange time (no previous token; a missing field still fails the next
+ * refresh loudly, but never writes `undefined` onto the pool account), the
+ * current token at refresh time. Providers with extra fields (e.g. OpenAI's
+ * `accountId`) spread this result and add them.
+ */
+export function toTokenSet(
+  json: BaseTokenResponse,
+  previousRefresh: string,
+): TokenSet {
+  return {
+    access: json.access_token,
+    refresh: json.refresh_token || previousRefresh,
+    expires: Date.now() + json.expires_in * 1000,
+  }
 }
 
 /**

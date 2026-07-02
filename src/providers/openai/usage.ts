@@ -130,7 +130,6 @@ export async function fetchUsage(
   return {
     hourly: endpointWindow(json.rate_limit.primary_window),
     weekly: endpointWindow(json.rate_limit.secondary_window),
-    status: null,
     capturedAt: now,
   }
 }

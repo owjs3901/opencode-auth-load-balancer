@@ -25,7 +25,6 @@ function acc(
         hourly === null
           ? null
           : { utilization: hourly, resetAt: hourlyResetAt },
-      status: null,
       capturedAt: 0,
     },
   })

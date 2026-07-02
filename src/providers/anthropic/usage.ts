@@ -1,19 +1,7 @@
-import type {
-  PoolAccount,
-  UsageSnapshot,
-  UsageStatus,
-  UsageWindow,
-} from '../../types'
+import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
 import { clamp01, secondsToMs } from '../../util'
 import { fetchUsageJson } from '../usage-http'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
-
-function mapStatus(raw: string | null): UsageStatus | null {
-  if (!raw) return null
-  if (raw === 'rejected') return 'rejected'
-  if (raw === 'allowed') return 'allowed'
-  return 'warning' // allowed_warning and any other non-rejected variant
-}
 
 /**
  * Build a single UsageWindow from the raw utilization + reset header strings.
@@ -50,8 +38,7 @@ export function parseUsageHeaders(
 ): Partial<UsageSnapshot> | null {
   const h5 = headers.get('anthropic-ratelimit-unified-5h-utilization')
   const h7 = headers.get('anthropic-ratelimit-unified-7d-utilization')
-  const status = headers.get('anthropic-ratelimit-unified-status')
-  if (h5 === null && h7 === null && status === null) return null
+  if (h5 === null && h7 === null) return null
 
   // Deliberately NO `capturedAt` here: `applyUsagePartial` (fetch.ts) stamps
   // its own timestamp, and ONLY when a weekly window arrived — the staleness
@@ -80,8 +67,6 @@ export function parseUsageHeaders(
         )
   if (hourly) out.hourly = hourly
   if (weekly) out.weekly = weekly
-  const mapped = mapStatus(status)
-  if (mapped) out.status = mapped
   return out
 }
 
@@ -203,7 +188,6 @@ export async function fetchUsage(
   return {
     hourly: endpointWindow(json.five_hour),
     weekly: endpointWindow(json.seven_day),
-    status: null,
     capturedAt: now,
   }
 }

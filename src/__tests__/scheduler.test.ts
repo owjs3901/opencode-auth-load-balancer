@@ -42,7 +42,6 @@ function account(
     usage: {
       hourly: opts.hourly ?? null,
       weekly: opts.weekly ?? null,
-      status: null,
       capturedAt: NOW,
     },
     cooldownUntil: opts.cooldownUntil ?? 0,

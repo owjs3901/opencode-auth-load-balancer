@@ -186,34 +186,28 @@ describe('anthropic oauth', () => {
 })
 
 describe('anthropic usage', () => {
-  test('parseUsageHeaders maps windows + status variants', () => {
+  test('parseUsageHeaders maps windows', () => {
     const h = new Headers({
       'anthropic-ratelimit-unified-5h-utilization': '0.10',
       'anthropic-ratelimit-unified-5h-reset': SEC(3600),
       'anthropic-ratelimit-unified-7d-utilization': '0.50',
       'anthropic-ratelimit-unified-7d-reset': SEC(86400),
-      'anthropic-ratelimit-unified-status': 'allowed_warning',
     })
     const u = aParse(h)
     expect(u?.hourly?.utilization).toBeCloseTo(0.1, 5)
     expect(u?.weekly?.utilization).toBeCloseTo(0.5, 5)
-    expect(u?.status).toBe('warning')
-    expect(
-      aParse(new Headers({ 'anthropic-ratelimit-unified-status': 'allowed' }))
-        ?.status,
-    ).toBe('allowed')
-    expect(
-      aParse(new Headers({ 'anthropic-ratelimit-unified-status': 'rejected' }))
-        ?.status,
-    ).toBe('rejected')
   })
 
   test('parseUsageHeaders: null when absent, ignores NaN, zero reset when missing', () => {
     expect(aParse(new Headers())).toBeNull()
+    // The status header is no longer read (the snapshot's status field was
+    // write-only dead plumbing): a status-only response yields no partial.
+    expect(
+      aParse(new Headers({ 'anthropic-ratelimit-unified-status': 'allowed' })),
+    ).toBeNull()
     const bad = aParse(
       new Headers({
         'anthropic-ratelimit-unified-5h-utilization': 'abc',
-        'anthropic-ratelimit-unified-status': 'allowed',
       }),
     )
     expect(bad?.hourly).toBeUndefined()

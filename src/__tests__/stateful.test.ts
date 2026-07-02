@@ -47,7 +47,7 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
     label: `acc-${seq}`,
     refresh: 'ref',
     expires: Date.now() + 60 * 60 * 1000,
-    usage: { hourly: null, weekly: null, status: null, capturedAt: Date.now() },
+    usage: { hourly: null, weekly: null, capturedAt: Date.now() },
     createdAt: Date.now(),
     ...over,
   })
@@ -938,7 +938,6 @@ describe('usage-refresh', () => {
     const snapshot: UsageSnapshot = {
       hourly: { utilization: 0.1, resetAt: 0 },
       weekly: { utilization: 0.4, resetAt: 0 },
-      status: null,
       capturedAt: Date.now(),
     }
     let fetched = 0
@@ -960,7 +959,6 @@ describe('usage-refresh', () => {
       usage: {
         hourly: null,
         weekly: null,
-        status: null,
         capturedAt: Date.now(),
       },
     })
@@ -990,7 +988,7 @@ describe('usage-refresh', () => {
     // branch — "do not overwrite stored usage when fetchUsage returns null
     // for a STALE account" — is otherwise unbound. A regression that
     // simplified `if (snapshot) { ...stored.usage = snapshot... }` to
-    // `stored.usage = snapshot` would silently zero hourly/weekly/status on
+    // `stored.usage = snapshot` would silently zero hourly/weekly on
     // every transient null (Codex endpoint missing rate_limit, Anthropic
     // endpoint JSON parse failure, network blip → fetchUsage returns null),
     // demoting the account in weeklyUrgency until the next real response
@@ -998,7 +996,6 @@ describe('usage-refresh', () => {
     const stored: UsageSnapshot = {
       hourly: { utilization: 0.42, resetAt: Date.now() + 2 * 60 * 60 * 1000 },
       weekly: { utilization: 0.71, resetAt: Date.now() + 30 * 60 * 60 * 1000 },
-      status: 'warning',
       capturedAt: 0, // STALE -> NOT skipped by the fresh gate
     }
     const a = account({ usage: stored })
@@ -1020,7 +1017,6 @@ describe('usage-refresh', () => {
     const reread = findAccount(await readPool(), a.id)
     expect(reread?.usage.hourly?.utilization).toBeCloseTo(0.42, 5)
     expect(reread?.usage.weekly?.utilization).toBeCloseTo(0.71, 5)
-    expect(reread?.usage.status).toBe('warning')
     expect(reread?.usage.capturedAt).toBe(0)
   })
 
@@ -1036,7 +1032,6 @@ describe('usage-refresh', () => {
       usage: {
         hourly: null,
         weekly: { utilization: 1, resetAt: pastAnchor },
-        status: null,
         capturedAt: 0, // stale -> polled
       },
     })
@@ -1047,7 +1042,6 @@ describe('usage-refresh', () => {
       fetchUsage: async () => ({
         hourly: { utilization: 0, resetAt: 0 },
         weekly: { utilization: 0, resetAt: 0 },
-        status: null,
         capturedAt: now,
       }),
     })
@@ -1113,7 +1107,6 @@ describe('usage-refresh', () => {
         return {
           hourly: null,
           weekly: null,
-          status: null,
           capturedAt: Date.now(),
         }
       },
@@ -1136,7 +1129,7 @@ describe('usage-refresh', () => {
     // re-read would skip fetchUsage, the snapshot path must poll it.
     const now = Date.now()
     const a = account({
-      usage: { hourly: null, weekly: null, status: null, capturedAt: now },
+      usage: { hourly: null, weekly: null, capturedAt: now },
     })
     await mutatePool((pool) => {
       pool.accounts.push({ ...a })
@@ -1145,7 +1138,7 @@ describe('usage-refresh', () => {
     const adapter = fakeAdapter({
       fetchUsage: async () => {
         fetched += 1
-        return { hourly: null, weekly: null, status: null, capturedAt: now }
+        return { hourly: null, weekly: null, capturedAt: now }
       },
     })
     const snapshot = {

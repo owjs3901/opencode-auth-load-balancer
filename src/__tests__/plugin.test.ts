@@ -116,7 +116,6 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
     usage: {
       hourly: null,
       weekly: { utilization: 0.1, resetAt: Date.now() + 30 * 60 * 60 * 1000 },
-      status: null,
       capturedAt: Date.now(),
     },
     createdAt: Date.now(),
@@ -140,7 +139,6 @@ async function seedAB(now: number): Promise<void> {
         usage: {
           hourly: null,
           weekly: { utilization: 0.5, resetAt: now + 30 * 60 * 60 * 1000 },
-          status: null,
           capturedAt: now,
         },
       }),
@@ -842,7 +840,6 @@ describe('load-balanced fetch — edge paths', () => {
               utilization: 0.5,
               resetAt: now + 5 * 24 * 60 * 60 * 1000,
             },
-            status: null,
             capturedAt: now,
           },
         }),
@@ -993,7 +990,6 @@ describe('load-balanced fetch — edge paths', () => {
               utilization: 0.1,
               resetAt: now + 30 * 60 * 60 * 1000,
             },
-            status: null,
             capturedAt: now,
           },
         }),
@@ -1236,7 +1232,6 @@ describe('toast on switch + status tool', () => {
               utilization: 0.05,
               resetAt: Date.now() + 2 * 24 * 60 * 60 * 1000,
             },
-            status: null,
             capturedAt: Date.now(),
           },
         }),
@@ -1248,7 +1243,6 @@ describe('toast on switch + status tool', () => {
               utilization: 0.6,
               resetAt: Date.now() + 10 * 60 * 60 * 1000,
             },
-            status: null,
             capturedAt: Date.now(),
           },
         }),
@@ -1299,7 +1293,6 @@ describe('out-of-band weekly reset (e.g. a promotional server-side quota reset)'
           usage: {
             hourly: null,
             weekly: { utilization: 0.9, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
             capturedAt: seedAt,
           },
         }),
@@ -1331,7 +1324,6 @@ describe('out-of-band weekly reset (e.g. a promotional server-side quota reset)'
     const after = (await readPool()).accounts.find((x) => x.id === 'reset-hdr')
     // Present fields merged...
     expect(after?.usage.hourly?.utilization).toBeCloseTo(0.2, 5)
-    expect(after?.usage.status).toBe('allowed')
     // ...but weekly is untouched AND the snapshot is NOT stamped fresh (the
     // pre-fix unconditional `capturedAt = now` here suppressed the usage-endpoint
     // re-poll forever, pinning the pre-reset 90% on the active account).
@@ -1377,7 +1369,6 @@ describe('out-of-band weekly reset (e.g. a promotional server-side quota reset)'
           usage: {
             hourly: null,
             weekly: { utilization: 0.9, resetAt: anchor },
-            status: null,
             capturedAt: now,
           },
         }),
@@ -1416,7 +1407,6 @@ describe('out-of-band weekly reset (e.g. a promotional server-side quota reset)'
           usage: {
             hourly: null,
             weekly: { utilization: 0.9, resetAt: now + 30 * 60 * 60 * 1000 },
-            status: null,
             capturedAt: 0, // stale -> the status tool's refresh must poll it
           },
         }),

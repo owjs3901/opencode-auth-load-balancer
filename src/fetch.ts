@@ -65,7 +65,7 @@ export async function bestEffort(
  * window. `capturedAt` is the gate `refreshUsageInBackground` uses to decide
  * whether the authoritative usage endpoint must be re-polled, and weekly is the
  * PRIMARY scheduling signal that poll exists to backfill. Stamping it on a
- * weekly-less partial (e.g. a response carrying only 5h/status headers — seen
+ * weekly-less partial (e.g. a response carrying only 5h headers — seen
  * after Anthropic's out-of-band "special" weekly resets, when a fresh empty
  * weekly window has nothing to report) marked the snapshot "fresh" without
  * refreshing the weekly field, so the endpoint was never consulted and a stale
@@ -77,7 +77,6 @@ function applyUsagePartial(
   now: number,
 ): void {
   if (partial.hourly !== undefined) account.usage.hourly = partial.hourly
-  if (partial.status !== undefined) account.usage.status = partial.status
   if (partial.weekly !== undefined) {
     // Weekly resets are FIXED per-account anchors: when the incoming window
     // carries no reset time (post-reset headers/endpoint), keep the previously

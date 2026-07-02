@@ -292,6 +292,11 @@ export function scoreAccount(
   now: number,
 ): number {
   const urgency = weeklyUrgency(account, cfg, now)
+  // With zero weekly urgency the score is 0 no matter the 5h pressure:
+  // `hourlyInfluence` is finite (readEnvNumber rejects non-finite) and
+  // `pressure` is a product of clamp01 values, so the multiplier is always
+  // finite and `0 * finite === 0` — skip the whole hourly chain (exact identity).
+  if (urgency === 0) return 0
   // Hoist `account.usage.hourly` to a local — same rationale as `weekly`
   // in `weeklyUrgency` above (per-candidate, per-request hot path).
   const hourly = account.usage.hourly

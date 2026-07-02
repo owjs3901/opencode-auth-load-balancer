@@ -37,7 +37,6 @@ function acc(o: {
     usage: {
       hourly: o.hourly ?? null,
       weekly: o.weekly ?? null,
-      status: null,
       capturedAt: NOW,
     },
     cooldownUntil: o.cooldownUntil ?? 0,

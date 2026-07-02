@@ -121,11 +121,24 @@ function prefixToolNames(parsed: Record<string, unknown>): string {
  */
 const MCP_TOOL_NAME_RE = /"name"\s*:\s*"mcp_([^"]+)"/g
 
-/** Strip the tool prefix from tool names in streaming response text. */
-export function stripToolPrefix(text: string): string {
+/**
+ * Strip the tool prefix from tool names in streaming response text.
+ *
+ * `alreadyScanned` marks a leading region of `text` that a PREVIOUS call
+ * already processed (createStrippedStream re-scans its retained tail together
+ * with each new chunk). A match ending inside that region can only be one
+ * RE-INTRODUCED by a prior replacement — a tool whose real name starts with
+ * `mcp_` (e.g. `mcp_Auth_lb_status` → stripped once to `"name": "mcp_..."`) —
+ * so it must be kept, not stripped a second time. A genuine pattern straddling
+ * the boundary ends AFTER `alreadyScanned` and is still replaced.
+ */
+export function stripToolPrefix(text: string, alreadyScanned = 0): string {
   return text.replace(
     MCP_TOOL_NAME_RE,
-    (_m, name: string) => `"name": "${unprefixName(name)}"`,
+    (match, name: string, offset: number) =>
+      offset + match.length <= alreadyScanned
+        ? match
+        : `"name": "${unprefixName(name)}"`,
   )
 }
 
@@ -367,8 +380,13 @@ export function createStrippedStream(response: Response): Response {
           controller.close()
           return
         }
+        // `tail` was already stripped on the previous pass — tell
+        // stripToolPrefix so a restored `"name": "mcp_*"` sitting in it is
+        // not corrupted by a second strip (see the function's doc comment).
+        const scanned = tail.length
         const stripped = stripToolPrefix(
           tail + decoder.decode(value, { stream: true }),
+          scanned,
         )
         if (stripped.length > TAIL_MAX) {
           const emit = stripped.slice(0, stripped.length - TAIL_MAX)

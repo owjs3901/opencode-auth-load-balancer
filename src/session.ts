@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 
+import { joinBlockTexts } from './util'
+
 /**
  * Header carrying opencode's session id. Injected by the plugin's `chat.headers`
  * hook (which has the real sessionID) and read back here in the load-balanced
@@ -7,32 +9,17 @@ import { createHash } from 'node:crypto'
  */
 export const SESSION_HEADER = 'x-allb-session'
 
-function textOf(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  let out = ''
-  for (const b of content) {
-    if (
-      b &&
-      typeof b === 'object' &&
-      typeof (b as { text?: unknown }).text === 'string'
-    )
-      out += (b as { text: string }).text
-  }
-  return out
-}
-
 /**
  * Find the first user message's text in a messages/input list. Lifted to module
  * scope (like `parseHeaderWindow` / `windowFromPercent`) so we don't reallocate a
  * closure per call. Captures NOTHING from its caller — only its `list` argument
- * and the module-level `textOf`.
+ * and the shared `joinBlockTexts`.
  */
 function firstUserFromList(list: unknown): string | null {
   if (!Array.isArray(list)) return null
   const messages = list as { role?: string; content?: unknown }[]
   const user = messages.find((m) => m && m.role === 'user')
-  return user ? textOf(user.content) : null
+  return user ? joinBlockTexts(user.content, '') : null
 }
 
 /** Extract the first user message text from an Anthropic or OpenAI-Responses body. */

@@ -109,13 +109,17 @@ function toPoolShape(parsed: unknown): PoolShape {
   // per-character garbage every poll, and `mutatePoolFile` writes the corrupt
   // shape back. Reject to `undefined` so the `?? {}` fallbacks apply and the
   // next TUI write heals the file.
-  if (!isPlainRecordValue(pool.lastSelected)) pool.lastSelected = undefined
-  if (!isPlainRecordValue(pool.sessions)) pool.sessions = undefined
+  if (!isAbsentOrPlainRecord(pool.lastSelected)) pool.lastSelected = undefined
+  if (!isAbsentOrPlainRecord(pool.sessions)) pool.sessions = undefined
   return pool
 }
 
-/** True for a plain JSON object — mirrors `isPlainObject` (src/util.ts), used by src/pool/store.ts. */
-function isPlainRecordValue(value: unknown): boolean {
+/**
+ * True when the value is absent (`undefined`) or a plain JSON object. NOT the
+ * same as `isPlainObject` (src/util.ts) — that returns false for `undefined`;
+ * here absent fields are fine because the `?? {}` fallbacks downstream heal them.
+ */
+function isAbsentOrPlainRecord(value: unknown): boolean {
   return (
     value === undefined ||
     (typeof value === 'object' && value !== null && !Array.isArray(value))

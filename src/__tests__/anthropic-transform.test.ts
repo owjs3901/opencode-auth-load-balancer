@@ -437,6 +437,29 @@ describe('createStrippedStream', () => {
     // surrounding non-pattern bytes are dropped by the tail buffer).
     expect(out.split('A').length - 1).toBe(600)
   })
+  test('does not double-strip a tool originally named mcp_* held in the tail', async () => {
+    // Pre-fix: the pull loop kept the last TAIL_MAX chars of ALREADY-STRIPPED
+    // text as `tail` and re-ran stripToolPrefix over `tail + nextChunk`. A
+    // tool whose REAL name starts with `mcp_` (the common opencode MCP shape,
+    // e.g. `mcp_Auth_lb_status`) is request-prefixed to `mcp_Mcp_foo`; the
+    // first strip correctly restores `"name": "mcp_foo"`, but that restored
+    // literal sitting in the retained tail matched MCP_TOOL_NAME_RE AGAIN on
+    // the next chunk's pass and was corrupted to `"name": "foo"`. The
+    // `alreadyScanned` offset guard keeps re-introduced matches intact while
+    // still replacing genuine straddled patterns (previous test).
+    const enc = new TextEncoder()
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode('{"name":"mcp_Mcp_foo"}'))
+        c.enqueue(enc.encode(' trailing'))
+        c.close()
+      },
+    })
+    const res = new Response(upstream, { status: 200 })
+    const out = await createStrippedStream(res).text()
+    expect(out).toContain('"name": "mcp_foo"')
+    expect(out).not.toContain('"name": "foo"')
+  })
   test('flushes the TextDecoder at end-of-stream (final chunk ends mid-multibyte char)', async () => {
     // Pre-fix: every chunk was decoded with { stream: true } but the `done`
     // branch closed WITHOUT the terminal decoder.decode() flush the WHATWG

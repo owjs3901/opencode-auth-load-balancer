@@ -1,4 +1,5 @@
 import type { PoolAccount } from '../../types'
+import { joinBlockTexts } from '../../util'
 import { type FetchInput, urlFromInput } from '../types'
 import {
   CODEX_RESPONSES_URL,
@@ -42,22 +43,6 @@ export function rewriteUrl(input: FetchInput): FetchInput {
     : CODEX_RESPONSES_URL
 }
 
-function extractText(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  let out = ''
-  for (const block of content) {
-    const t =
-      block &&
-      typeof block === 'object' &&
-      typeof (block as { text?: unknown }).text === 'string'
-        ? (block as { text: string }).text
-        : ''
-    if (t) out = out ? out + '\n' + t : t
-  }
-  return out
-}
-
 interface InputItem {
   type?: string
   role?: string
@@ -84,7 +69,7 @@ function applyInstructions(obj: Record<string, unknown>): void {
     for (const raw of input) {
       if (raw && raw.type === 'message' && raw.role === 'system') {
         if (remaining === null) remaining = input.slice(0, i)
-        const text = extractText(raw.content)
+        const text = joinBlockTexts(raw.content, '\n')
         if (text) systemTexts.push(text)
       } else if (remaining !== null) {
         remaining.push(raw)

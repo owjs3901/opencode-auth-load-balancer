@@ -64,6 +64,32 @@ export function isPlainObject(
 }
 
 /**
+ * Collect the `text` of every content block into one string. A message's
+ * `content` arrives as either a plain string (passed through) or an array of
+ * blocks (anything else → ''); each block contributes its `text` when it is a
+ * string, and non-empty texts are joined with `separator`. Shared by the
+ * session-key hasher (`session.ts`, `''` join) and the Codex instructions
+ * lifter (`providers/openai/transform.ts`, `'\n'` join) — previously two
+ * copy-pasted 15-line walkers. NOTE: `providers/anthropic/cch.ts`'s
+ * `messageText` is deliberately different (FIRST text block only) — not this.
+ */
+export function joinBlockTexts(content: unknown, separator: string): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  let out = ''
+  for (const block of content) {
+    const t =
+      block &&
+      typeof block === 'object' &&
+      typeof (block as { text?: unknown }).text === 'string'
+        ? (block as { text: string }).text
+        : ''
+    if (t) out = out ? out + separator + t : t
+  }
+  return out
+}
+
+/**
  * Convert epoch-seconds → epoch-ms while rejecting non-finite/zero/negative inputs
  * AND the `Number.MAX_VALUE`-overflow case: `1e308` is finite but `1e308 * 1000`
  * collapses to +Infinity, which would silently commit Infinity to

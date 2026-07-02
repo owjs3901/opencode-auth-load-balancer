@@ -80,7 +80,6 @@ describe('buildStatus', () => {
       'a3',
     ])
     expect(anthropic.accounts.map((a) => a.rank)).toEqual([1, 2, 3, 4, 5])
-    expect(anthropic.currentAccountId).toBe('a1')
     expect(anthropic.accounts.find((a) => a.id === 'a1')?.current).toBe(true)
     expect(anthropic.accounts.find((a) => a.id === 'a3')?.available).toBe(false)
   })

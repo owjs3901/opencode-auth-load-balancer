@@ -46,7 +46,6 @@ interface AccountStatus {
 
 interface ProviderStatus {
   providerID: string
-  currentAccountId: string | null
   accounts: AccountStatus[]
 }
 
@@ -136,7 +135,7 @@ export function buildStatus(
     const accounts = ranked.map(({ a, available }, i) =>
       toStatus(a, now, a.id === currentAccountId, available, i + 1),
     )
-    return { providerID, currentAccountId, accounts }
+    return { providerID, accounts }
   })
 }
 

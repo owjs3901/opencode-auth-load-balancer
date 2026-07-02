@@ -88,7 +88,7 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
  * (`clamp01`/`?? 0` absorb these), so this is purely a display/type boundary.
  */
 function normalizeWindow(w: unknown): UsageWindow | null {
-  if (w == null || typeof w !== 'object') return null
+  if (!isPlainObject(w)) return null
   const win = w as Partial<UsageWindow>
   if (!Number.isFinite(win.utilization)) return null
   if (!Number.isFinite(win.resetAt)) win.resetAt = 0
@@ -111,11 +111,11 @@ function normalizeWindow(w: unknown): UsageWindow | null {
 function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
   const accounts: PoolAccount[] = []
   for (const row of rows) {
-    // `typeof [] === 'object'`, so arrays need an explicit reject: a healed
-    // array row NEVER self-heals (JSON.stringify of an array with grafted
-    // named properties serializes back to `[]`), becoming a permanent phantom
+    // Arrays must be rejected alongside null/primitive rows: a healed array
+    // row NEVER self-heals (JSON.stringify of an array with grafted named
+    // properties serializes back to `[]`), becoming a permanent phantom
     // account under an `undefined` provider in every dashboard.
-    if (row == null || typeof row !== 'object' || Array.isArray(row)) continue
+    if (!isPlainObject(row)) continue
     // Identity fields are irreparable: an id/providerID cannot be guessed
     // (`makeAccount` always writes both), and a surviving id-less row is
     // still SELECTABLE — fetch then pins `sessions[key].accountId =
@@ -131,11 +131,7 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     // `"usage": []` works in memory, but JSON.stringify serializes the array
     // back to `[]` — every usage record silently fails to persist, so the
     // row re-polls the usage endpoint forever and never self-heals.
-    if (
-      row.usage == null ||
-      typeof row.usage !== 'object' ||
-      Array.isArray(row.usage)
-    ) {
+    if (!isPlainObject(row.usage)) {
       row.usage = emptyUsage()
     } else {
       if (!Number.isFinite(row.usage.capturedAt)) row.usage.capturedAt = 0

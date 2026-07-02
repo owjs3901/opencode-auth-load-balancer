@@ -39,14 +39,15 @@ export async function refreshUsageInBackground(
   // remove the row but cannot reach into this module's throttle map, and
   // `addAccount` coins a fresh `randomUUID` per add, so a deleted account's id
   // would otherwise linger in `lastPoll` forever (a bounded but real leak —
-  // never iterated for prune, never collected). Use `pool.accounts` (NOT the
-  // `accounts` filter above) for the alive set so a *disabled* row keeps its
-  // throttle slot — re-enabling it shouldn't immediately re-poll the usage
-  // endpoint and risk its own rate limit. The `> pool.accounts.length` gate
-  // keeps the steady-state hot path (no deletions) free; comparing against the
-  // per-provider `accounts.length` would have misfired on every call in a
-  // mixed pool (lastPoll spans BOTH providers but the filter narrows to one),
-  // running the idempotent prune loop pointlessly. The prune itself is
+  // never iterated for prune, never collected). Use `pool.accounts` (the FULL
+  // account list — NOT the per-provider stale subset the loop below collects)
+  // for the alive set so a *disabled* row keeps its throttle slot —
+  // re-enabling it shouldn't immediately re-poll the usage endpoint and risk
+  // its own rate limit. The `> pool.accounts.length` gate keeps the
+  // steady-state hot path (no deletions) free; comparing against a
+  // per-provider count would have misfired on every call in a mixed pool
+  // (lastPoll spans BOTH providers but such a count narrows to one), running
+  // the idempotent prune loop pointlessly. The prune itself is
   // O(lastPoll.size), bounded by the historical account count.
   if (lastPoll.size > pool.accounts.length) {
     const alive = new Set(pool.accounts.map((a) => a.id))

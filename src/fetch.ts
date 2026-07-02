@@ -406,10 +406,9 @@ export function createLoadBalancedFetch(
 
     // Wall-clock budget for BLOCKING on a fully-rate-limited pool (see below). The
     // deadline is fixed at request start so the total wait can never exceed maxWaitMs
-    // no matter how many rotate/wait rounds run.
-    const requestStart = Date.now()
-    const waitBudgetMs = Math.max(0, cfg.maxWaitMs)
-    const waitDeadline = requestStart + waitBudgetMs
+    // no matter how many rotate/wait rounds run. (maxWaitMs <= 0 = fail-fast
+    // opt-out; the gate below never enters, so the deadline goes unread.)
+    const waitDeadline = Date.now() + cfg.maxWaitMs
 
     // Rounds, not a fixed attempt cap: `tried` bounds each round (once every account is
     // tried, selectForSession returns null and the round ends), and `waitDeadline`
@@ -452,7 +451,7 @@ export function createLoadBalancedFetch(
         // The O(accounts) scan runs only when waiting is enabled at all
         // (`maxWaitMs=0` is the explicit fail-fast opt-out) — don't compute a
         // resume point that could never be used.
-        if (waitBudgetMs > 0) {
+        if (cfg.maxWaitMs > 0) {
           const resumeAt = soonestCooldownUntil(
             pool.accounts,
             now,

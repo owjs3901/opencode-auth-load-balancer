@@ -97,7 +97,23 @@ function toPoolShape(parsed: unknown): PoolShape {
   if (pool.accounts !== undefined && !Array.isArray(pool.accounts)) {
     pool.accounts = undefined
   }
+  // `lastSelected` / `sessions` must be plain records (the server heals these
+  // via `isPlainRecord`). A hand-edited primitive (`"lastSelected": "oops"`)
+  // or array otherwise survives: `Object.entries` on a string iterates
+  // per-character garbage every poll, and `mutatePoolFile` writes the corrupt
+  // shape back. Reject to `undefined` so the `?? {}` fallbacks apply and the
+  // next TUI write heals the file.
+  if (!isPlainRecordValue(pool.lastSelected)) pool.lastSelected = undefined
+  if (!isPlainRecordValue(pool.sessions)) pool.sessions = undefined
   return pool
+}
+
+/** True for a plain JSON object — mirrors `isPlainRecord` in src/pool/store.ts. */
+function isPlainRecordValue(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (typeof value === 'object' && value !== null && !Array.isArray(value))
+  )
 }
 
 function readPool(): PoolShape {

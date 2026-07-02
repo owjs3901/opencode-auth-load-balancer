@@ -22,7 +22,7 @@ import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import { ensureAccessToken, needsRefresh } from '../refresh'
 import { selectAccount } from '../scheduler/select'
-import { buildStatus } from '../status'
+import { buildStatus, renderStatus } from '../status'
 import {
   emptyUsage,
   type PoolAccount,
@@ -104,6 +104,10 @@ describe('pool store', () => {
     const edited = JSON.parse(JSON.stringify(source)) as Record<string, unknown>
     delete edited.usage
     delete edited.cooldownUntil
+    // `label` is dereferenced unconditionally by renderStatus
+    // (`a.label.length` / `a.label.padEnd`), so a deleted label crashed the
+    // status tool and CLI. It must heal to '' (renders blank, never throws).
+    delete edited.label
     await writeFile(
       POOL,
       JSON.stringify({
@@ -117,10 +121,13 @@ describe('pool store', () => {
     expect(pool.accounts).toHaveLength(1)
     expect(pool.accounts[0]?.usage).toEqual(emptyUsage())
     expect(pool.accounts[0]?.cooldownUntil).toBe(0)
+    expect(pool.accounts[0]?.label).toBe('')
     // The healed row is usable by the scheduler and renders in the dashboard.
     const picked = selectAccount(pool.accounts, 'anthropic', Date.now())
     expect(picked?.account.id).toBe(source.id)
-    expect(buildStatus(pool, Date.now())[0]?.accounts).toHaveLength(1)
+    const status = buildStatus(pool, Date.now())
+    expect(status[0]?.accounts).toHaveLength(1)
+    expect(() => renderStatus(status)).not.toThrow()
   })
 
   test('readPool heals a non-number usage.capturedAt to 0 (keeps seeding eligible)', async () => {

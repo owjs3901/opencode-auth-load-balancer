@@ -6,8 +6,9 @@ export type FetchInput = string | URL | Request
  * Error classification drives rotation:
  *   "account" — this account is rate-limited/over quota (429/402). Cool it down, try next.
  *   "auth"    — this account's credential is bad (401/403). Cool it down, try next.
- *   "service" — provider-side/transient (5xx) or a genuine bad request. Return as-is.
- *   "ok"      — success, return the response.
+ *   "service" — provider-side/transient (5xx). Return as-is.
+ *   "ok"      — success or any other status (including 4xx client errors like
+ *               400/404): return the response as-is.
  */
 export type ErrorClass = 'account' | 'auth' | 'service' | 'ok'
 

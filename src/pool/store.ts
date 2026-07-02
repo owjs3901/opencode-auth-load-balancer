@@ -101,6 +101,12 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     // token. Coercing to 0 forces a refresh that repairs the row on first use.
     // (JSON.parse cannot produce NaN, so the typeof check is complete.)
     if (typeof row.expires !== 'number') row.expires = 0
+    // The dashboard dereferences `label` unconditionally (`renderStatus`
+    // computes `a.label.length` / `a.label.padEnd(...)`), so a hand-edited row
+    // whose `label` was deleted (or set to a number) crashes the status tool
+    // and CLI until the user repairs the file. An empty label renders blank
+    // but never throws; the next bookkeeping write heals the file.
+    if (typeof row.label !== 'string') row.label = ''
     accounts.push(row)
   }
   return accounts

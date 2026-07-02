@@ -356,10 +356,16 @@ export function createLoadBalancedFetch(
     // (`cheapSwitchMaxBytes <= 0` — an explicit opt-out, NO LONGER the default):
     // a `<= 0` gate makes every moment "cheap", so `selectForSession` never reads
     // `requestBytes`, and a full UTF-8 walk of a 100+ KB body would be pure waste.
-    // With the gate ON by default (64 KiB) the walk runs per request — a native,
+    // Likewise when there is NO session key: the byte gate only exists for
+    // pinned-session switch decisions (`isCheapMoment` inside `selectForSession`'s
+    // non-forced branch), which are reachable only with a session key — with
+    // `sessionKey === null` selection goes straight to `selectAccount` and
+    // `requestBytes` is provably never read, so skipping the walk is an exact
+    // identity (the parameter already defaults to 0).
+    // With the gate ON and a session pinned the walk runs per request — a native,
     // allocation-free length the gate genuinely needs to size the request.
     const requestBytes =
-      cfg.cheapSwitchMaxBytes > 0 && bodyStr
+      cfg.cheapSwitchMaxBytes > 0 && sessionKey !== null && bodyStr
         ? Buffer.byteLength(bodyStr, 'utf8')
         : 0
 

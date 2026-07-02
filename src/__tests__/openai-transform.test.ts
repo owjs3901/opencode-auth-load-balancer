@@ -42,6 +42,26 @@ describe('applyAuth', () => {
     })
     expect(h.get('chatgpt-account-id')).toBe('acc_jwt')
   })
+  test('treats an empty-string stored accountId as absent and falls back to the JWT decode', () => {
+    // An `accountId: ''` row is reachable (extractAccountId accepts any string
+    // claim; the store keeps `''`). Pre-fix, resolveAccountId's `!= null` gate
+    // returned `''`, which BOTH skipped the header (truthiness gate in
+    // applyAuth) AND blocked the JWT-decode fallback — no self-heal path.
+    const h = new Headers()
+    applyAuth(h, {
+      ...acct(''),
+      access: jwt({ chatgpt_account_id: 'acc_x' }),
+    })
+    expect(h.get('chatgpt-account-id')).toBe('acc_x')
+  })
+  test('a real stored accountId still short-circuits without decoding the JWT', () => {
+    const h = new Headers()
+    applyAuth(h, {
+      ...acct('acc_stored'),
+      access: jwt({ chatgpt_account_id: 'acc_from_jwt' }),
+    })
+    expect(h.get('chatgpt-account-id')).toBe('acc_stored')
+  })
   test('memoizes the JWT accountId decode across attempts with the same access token', () => {
     // Repeat call with the same access token exercises the one-slot memo hit
     // path in resolveAccountId (same pattern as the mergeBetaHeaders memo);

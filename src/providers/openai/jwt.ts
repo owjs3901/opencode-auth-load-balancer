@@ -59,7 +59,11 @@ let cachedDecode: { access: string; id: string | undefined } | null = null
 
 /** Stored ChatGPT account id, or one decoded from the access-token JWT. */
 export function resolveAccountId(account: PoolAccount): string | undefined {
-  if (account.accountId != null) return account.accountId
+  // Truthiness (not `!= null`): an empty-string accountId can reach the pool
+  // (extractAccountId accepts any string claim and the store keeps `''`), and
+  // every consumer treats `''` as "no id" — so let it fall through to the JWT
+  // decode below and self-heal exactly like a `null` row.
+  if (account.accountId) return account.accountId
   if (cachedDecode?.access === account.access) return cachedDecode.id
   const id = extractAccountId(account.access)
   cachedDecode = { access: account.access, id }

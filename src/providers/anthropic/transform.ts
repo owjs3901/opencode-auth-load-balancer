@@ -409,9 +409,17 @@ export function createStrippedStream(response: Response): Response {
     },
   })
 
+  // Stripping `mcp_` prefixes SHORTENS the body relative to upstream, so an
+  // upstream `content-length` (absent for SSE, but present on non-streamed
+  // JSON responses) would overstate the transformed body — a strict consumer
+  // honoring it could over-read/truncate. The mismatch is produced BY this
+  // transform, so drop the header here. Fetch response headers are immutable;
+  // a copy is required to delete anyway.
+  const headers = new Headers(response.headers)
+  headers.delete('content-length')
   return new Response(stream, {
     status: response.status,
     statusText: response.statusText,
-    headers: response.headers,
+    headers,
   })
 }

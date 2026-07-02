@@ -1131,6 +1131,43 @@ describe('accounts', () => {
     expect(third.accountId).toBe('acct-fresh')
   })
 
+  test('addAccount de-dupes a re-login by provider accountId when the refresh token has rotated', async () => {
+    // Regression: dedup was keyed ONLY on a matching refresh token, but both
+    // providers rotate refresh tokens on every refresh (single-use). A
+    // re-login of an account that had been in use for a while therefore
+    // carried a DIFFERENT refresh token, the match missed, and the SAME
+    // underlying OpenAI account occupied two pool rows — the scheduler
+    // double-counted one server-side quota and split session pins across
+    // "two" accounts that 429 together. OpenAI's exchange decodes a stable
+    // `accountId` from the id_token; use it as a second dedup key.
+    const first = await addAccount('openai', {
+      access: 'o1',
+      refresh: 'r-old',
+      expires: 1,
+      accountId: 'acct-1',
+    })
+    const again = await addAccount('openai', {
+      access: 'o2',
+      refresh: 'r-new', // rotated since the first login
+      expires: 2,
+      accountId: 'acct-1',
+    })
+    expect(again.id).toBe(first.id) // same row, no duplicate
+    expect((await readPool()).accounts).toHaveLength(1)
+    const stored = (await readPool()).accounts.find((a) => a.id === first.id)
+    expect(stored?.refresh).toBe('r-new') // newer refresh token persisted
+    expect(stored?.access).toBe('o2')
+    // A DIFFERENT accountId must NOT match — it is a different account.
+    const other = await addAccount('openai', {
+      access: 'o3',
+      refresh: 'r-other',
+      expires: 1,
+      accountId: 'acct-2',
+    })
+    expect(other.id).not.toBe(first.id)
+    expect((await readPool()).accounts).toHaveLength(2)
+  })
+
   test('addAccount default label avoids colliding with a surviving label after a middle-of-list delete', async () => {
     // Regression: the TUI sidebar's "Delete — remove from pool" option
     // (deleteFromPool in tui/auth-load-balancer-tui.view.tsx) lets the user

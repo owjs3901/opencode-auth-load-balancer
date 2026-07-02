@@ -108,8 +108,19 @@ function toPoolShape(parsed: unknown): PoolShape {
   // `accounts: [null, …]` (or a primitive element) otherwise throws inside
   // the BottomBar/SidebarPanel memos (`x.id` on null) every poll until the
   // file is repaired by hand — the server only heals it on its next write.
+  // Non-string `id`/`label` rows are dropped too (store.ts treats a
+  // non-string id as irreparable): they flow into code typed as `string`,
+  // so the sidebar renders the literal `undefined` and the click menu passes
+  // `undefined` ids into renameInPool/deleteFromPool (silent no-ops). The
+  // inline arrow (not a type-guard predicate) keeps the `PoolAccount[]`
+  // element type — see the isPlainRecordValue note.
   pool.accounts = Array.isArray(pool.accounts)
-    ? pool.accounts.filter(isPlainRecordValue)
+    ? pool.accounts.filter(
+        (row) =>
+          isPlainRecordValue(row) &&
+          typeof row.id === 'string' &&
+          typeof row.label === 'string',
+      )
     : undefined
   // `lastSelected` / `sessions` must be plain records (the server heals these
   // via `isPlainObject`). A hand-edited primitive (`"lastSelected": "oops"`)

@@ -379,6 +379,24 @@ describe('createStrippedStream', () => {
     const res = new Response(null, { status: 204 })
     expect(createStrippedStream(res)).toBe(res)
   })
+  test('drops the stale content-length header while keeping other headers', async () => {
+    // Stripping mcp_ prefixes SHORTENS the body, so an upstream
+    // content-length (present on non-streamed JSON responses) overstates the
+    // transformed body — a strict consumer honoring it could over-read or
+    // truncate. The wrapper must drop it and keep everything else.
+    const body = '{"name":"mcp_Read"}'
+    const res = new Response(body, {
+      status: 200,
+      headers: {
+        'content-length': String(body.length),
+        'x-request-id': 'req-1',
+      },
+    })
+    const out = createStrippedStream(res)
+    expect(out.headers.get('content-length')).toBeNull()
+    expect(out.headers.get('x-request-id')).toBe('req-1')
+    expect(await out.text()).toContain('"name": "read"')
+  })
   test('forwards downstream cancel to the upstream reader', async () => {
     // Pre-fix: `new ReadableStream({ pull })` has no `cancel`, so cancelling
     // the wrapped stream leaves the underlying reader's lock held — the fetch

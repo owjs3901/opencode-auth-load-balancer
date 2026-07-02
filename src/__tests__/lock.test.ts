@@ -56,6 +56,19 @@ describe('file lock', () => {
     expect(await dirExists(dir)).toBe(false)
   })
 
+  test('acquires a lock whose parent directory does not exist yet (self-heal)', async () => {
+    // The parent-dir mkdir moved off the steady-state path (it was an
+    // unconditional prologue syscall on every acquisition): tryClaim's
+    // non-recursive mkdir fails ENOENT on a missing parent, then acquireLock
+    // creates the parent once and retries immediately. This locks in that a
+    // fresh data dir still self-heals rather than spinning to timeout.
+    const dir = join(ROOT, 'no-parent-yet', 'nested', 'pool.lock')
+    const handle = await acquireLock(dir, FAST)
+    expect(await dirExists(dir)).toBe(true)
+    await handle.release()
+    expect(await dirExists(dir)).toBe(false)
+  })
+
   test('a held lock blocks a second acquirer until it times out (heartbeat keeps it fresh)', async () => {
     const dir = lockPath('contended')
     const held = await acquireLock(dir, {

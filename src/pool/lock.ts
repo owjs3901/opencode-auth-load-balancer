@@ -196,7 +196,6 @@ export async function acquireLock(
   lockDir: string,
   opts: LockOptions,
 ): Promise<LockHandle> {
-  await mkdir(dirname(lockDir), { recursive: true }).catch(ignore)
   const meta: LockMeta = {
     ownerId: randomUUID(),
     pid: process.pid,
@@ -204,6 +203,16 @@ export async function acquireLock(
     acquiredAt: Date.now(),
   }
   const deadline = Date.now() + opts.timeoutMs
+  // Parent-dir self-heal is paid ONLY after a failed claim, at most once per
+  // acquisition. `acquireLock` sits under every `mutatePool` (usage records,
+  // cooldowns, session pins, refresh commits) plus every per-account refresh
+  // lock, and in the steady state the parent (the pool data dir) always
+  // exists and the first `tryClaim` succeeds — an unconditional prologue
+  // mkdir was a pure wasted fs syscall on the hottest lock path. When the
+  // parent IS missing, `tryClaim`'s non-recursive mkdir fails ENOENT, the
+  // branch below creates the parent, and the immediate retry claims — the
+  // "can't spin forever on a missing parent" guarantee is preserved.
+  let parentEnsured = false
   for (;;) {
     if (await tryClaim(lockDir, meta)) {
       return makeHandle(
@@ -211,6 +220,11 @@ export async function acquireLock(
         meta.ownerId,
         startHeartbeat(lockDir, meta, opts.heartbeatMs),
       )
+    }
+    if (!parentEnsured) {
+      parentEnsured = true
+      await mkdir(dirname(lockDir), { recursive: true }).catch(ignore)
+      continue
     }
     const mtime = await lockMtime(lockDir)
     if (mtime !== null && Date.now() - mtime > opts.staleMs) {

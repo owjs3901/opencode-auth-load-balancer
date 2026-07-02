@@ -34,8 +34,9 @@ function makeAccount(
 }
 
 /**
- * Append a freshly-authorized account to the pool, deduped by refresh token.
- * Re-authorizing the same account refreshes its tokens instead of duplicating it.
+ * Append a freshly-authorized account to the pool, deduped by refresh token
+ * or provider account id. Re-authorizing the same account refreshes its
+ * tokens instead of duplicating it.
  */
 export async function addAccount(
   providerID: string,
@@ -55,13 +56,24 @@ export async function addAccount(
     // logins where the server skipped issuing a refresh_token) silently
     // overwrites the first pool row, and the user loses one of the two
     // accounts they thought they just registered.
-    const existing = tokens.refresh
-      ? pool.accounts.find(
-          (a) => a.providerID === providerID && a.refresh === tokens.refresh,
-        )
-      : undefined
+    // Second key: the provider's stable account id (OpenAI decodes the
+    // ChatGPT account id from the id_token at exchange time). Refresh tokens
+    // are single-use and ROTATE on every refresh, so a re-login of an account
+    // that has been in use carries a DIFFERENT refresh token and the
+    // refresh-key match misses — pre-fix that appended a duplicate row whose
+    // one server-side quota the scheduler then double-counted. The
+    // `tokens.accountId &&` guard keeps null/undefined ids from ever matching
+    // (Anthropic rows always store `accountId: null`).
+    const existing = pool.accounts.find(
+      (a) =>
+        a.providerID === providerID &&
+        ((tokens.refresh && a.refresh === tokens.refresh) ||
+          (tokens.accountId && a.accountId === tokens.accountId)),
+    )
     if (existing) {
-      // No refresh write: it is the match key above, so it is already equal.
+      // Persist the newer refresh token when matched via accountId (a no-op
+      // when matched by refresh — they are already equal); never clear it.
+      if (tokens.refresh) existing.refresh = tokens.refresh
       existing.access = tokens.access
       existing.expires = tokens.expires
       existing.disabledReason = null

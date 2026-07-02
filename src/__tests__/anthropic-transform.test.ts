@@ -187,6 +187,43 @@ describe('rewriteRequestBody', () => {
     expect(out.tools[0].name).toBe('mcp_Bash')
   })
 
+  test('null elements in messages/tools do not disable the transform', () => {
+    // Same swallowed-TypeError failure class as the null content block, one
+    // level up: a null MESSAGES element threw at `message.role` in
+    // buildBillingHeaderValue (before any guard) and at `msg.content` in
+    // prefixToolNames; a null TOOLS element threw at `tool.name`. Each throw
+    // was swallowed by rewriteRequestBody's catch, returning the body
+    // UNTRANSFORMED (no identity, no billing header, no prefixing → 400).
+    const out = JSON.parse(
+      rewriteRequestBody(
+        JSON.stringify({
+          tools: [null, { name: 'bash' }],
+          messages: [null, { role: 'user', content: 'hi' }],
+        }),
+      ),
+    )
+    expect(out.system[0].text).toContain('x-anthropic-billing-header')
+    expect(out.system[1].text).toBe(CLAUDE_CODE_IDENTITY)
+    expect(out.tools[1].name).toBe('mcp_Bash')
+  })
+
+  test('a non-string text in the first user text block builds the header from empty text', () => {
+    // `block.text || ''` passed a truthy non-string (`text: 5`) through to
+    // `createHash().update(5)`, which threw inside computeCCH — swallowed,
+    // transform disabled. It must be treated as empty text instead.
+    const out = JSON.parse(
+      rewriteRequestBody(
+        JSON.stringify({
+          tools: [{ name: 'bash' }],
+          messages: [{ role: 'user', content: [{ type: 'text', text: 5 }] }],
+        }),
+      ),
+    )
+    expect(out.system[0].text).toContain('x-anthropic-billing-header')
+    expect(out.system[1].text).toBe(CLAUDE_CODE_IDENTITY)
+    expect(out.tools[0].name).toBe('mcp_Bash')
+  })
+
   test('handles null system and no user message (no billing header)', () => {
     const out = JSON.parse(
       rewriteRequestBody(

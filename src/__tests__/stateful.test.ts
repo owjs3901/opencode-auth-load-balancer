@@ -96,10 +96,14 @@ describe('pool store', () => {
   })
 
   test('readPool drops malformed hand-edited rows and heals a row missing usage/cooldownUntil', async () => {
-    // A hand-edited pool file: a null element, a bare string, and an account
-    // row whose `usage` and `cooldownUntil` were deleted. Pre-fix, the null
-    // row (and the missing `usage`) threw a TypeError inside selectForSession
-    // and buildStatus on EVERY request until the user repaired the file.
+    // A hand-edited pool file: a null element, a bare string, an array row,
+    // and an account row whose `usage` and `cooldownUntil` were deleted.
+    // Pre-fix, the null row (and the missing `usage`) threw a TypeError inside
+    // selectForSession and buildStatus on EVERY request until the user
+    // repaired the file. The array row (`typeof [] === 'object'`) evaded the
+    // drop and became a PERMANENT phantom account: JSON.stringify of an array
+    // with grafted named properties serializes back to `[]`, so every rewrite
+    // preserved it and buildStatus rendered an `undefined` provider section.
     const source = account()
     const edited = JSON.parse(JSON.stringify(source)) as Record<string, unknown>
     delete edited.usage
@@ -112,7 +116,7 @@ describe('pool store', () => {
       POOL,
       JSON.stringify({
         version: 1,
-        accounts: [null, 'junk', edited],
+        accounts: [null, 'junk', [], edited],
         lastSelected: {},
         sessions: {},
       }),
@@ -126,6 +130,9 @@ describe('pool store', () => {
     const picked = selectAccount(pool.accounts, 'anthropic', Date.now())
     expect(picked?.account.id).toBe(source.id)
     const status = buildStatus(pool, Date.now())
+    // Exactly one provider section — the dropped array row must NOT surface
+    // as a phantom `undefined` provider group.
+    expect(status).toHaveLength(1)
     expect(status[0]?.accounts).toHaveLength(1)
     expect(() => renderStatus(status)).not.toThrow()
   })

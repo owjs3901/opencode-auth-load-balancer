@@ -17,9 +17,11 @@ export function mergeHeaders(input: FetchInput, init?: RequestInit): Headers {
       headers.set(key, value)
     })
   } else if (Array.isArray(initHeaders)) {
-    for (const entry of initHeaders) {
-      const [key, value] = entry as [string, unknown]
-      if (value !== undefined) headers.set(key, String(value))
+    // `Array.isArray` narrows to `string[][]`; under noUncheckedIndexedAccess
+    // destructuring gives `string | undefined` for both positions, so a plain
+    // undefined guard types cleanly — no cast, no String() re-coercion.
+    for (const [key, value] of initHeaders) {
+      if (key !== undefined && value !== undefined) headers.set(key, value)
     }
   } else {
     for (const [key, value] of Object.entries(initHeaders)) {

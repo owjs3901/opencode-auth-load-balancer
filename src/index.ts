@@ -8,7 +8,7 @@ import {
 } from './accounts'
 import { createLoadBalancedFetch } from './fetch'
 import { notifyOnSwitch, type ToastClient } from './notify'
-import { mutatePool } from './pool/store'
+import { mutatePool, readPool } from './pool/store'
 import { primeInUse } from './prime'
 import { anthropicAdapter } from './providers/anthropic/adapter'
 import { openaiAdapter } from './providers/openai/adapter'
@@ -167,9 +167,15 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
         // throttle keeps repeat calls cheap, and failures fall back to the
         // last-known snapshot (never fail the dashboard).
         const now = Date.now()
+        // ONE serialized pool read shared by both refresh calls: without the
+        // snapshot each call performs its own readPool() just for the
+        // staleness gates (the actual usage write still goes through
+        // mutatePool, which re-reads under the lock). The final readStatus
+        // below re-reads regardless, so freshly polled numbers still render.
+        const pool = await readPool()
         await Promise.all(
           [anthropicAdapter, openaiAdapter].map((adapter) =>
-            refreshUsageInBackground(adapter, now).catch(ignore),
+            refreshUsageInBackground(adapter, now, pool).catch(ignore),
           ),
         )
         // ONE clock for ranking (readStatus → available/rank/displayUtil) AND

@@ -80,21 +80,26 @@ function prefixToolNames(parsed: Record<string, unknown>): string {
   // actually needs a renamed copy (element REPLACEMENT in the content array,
   // never mutation of the block object itself — mutating `block.name` would
   // rename the upstream assistant turn's recorded tool name).
+  // Element types include `null`: the arrays come from an untrusted
+  // JSON.parse'd body, and a null element would otherwise throw at `tool.name`
+  // / `msg.content` — swallowed by rewriteRequestBody's catch, silently
+  // disabling the WHOLE transform (same failure class as the null content
+  // block guarded in cch.ts's messageText).
   if (Array.isArray(parsed.tools)) {
-    for (const tool of parsed.tools as {
+    for (const tool of parsed.tools as ({
       name?: string
       [k: string]: unknown
-    }[]) {
-      if (tool.name) tool.name = prefixName(tool.name)
+    } | null)[]) {
+      if (tool?.name) tool.name = prefixName(tool.name)
     }
   }
 
   if (Array.isArray(parsed.messages)) {
-    for (const msg of parsed.messages as {
+    for (const msg of parsed.messages as ({
       content?: Array<{ type: string; name?: string; [k: string]: unknown }>
       [k: string]: unknown
-    }[]) {
-      if (Array.isArray(msg.content)) {
+    } | null)[]) {
+      if (msg && Array.isArray(msg.content)) {
         const content = msg.content
         for (let i = 0; i < content.length; i++) {
           const block = content[i]

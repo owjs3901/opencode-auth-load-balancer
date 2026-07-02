@@ -102,7 +102,7 @@ function toPoolShape(parsed: unknown): PoolShape {
     // the BottomBar/SidebarPanel memos (`x.id` on null) every poll until the
     // file is repaired by hand — the server only heals it on its next write.
     pool.accounts = pool.accounts.filter(
-      (r) => r !== null && typeof r === 'object',
+      (r) => r !== null && typeof r === 'object' && !Array.isArray(r),
     )
   }
   // `lastSelected` / `sessions` must be plain records (the server heals these

@@ -111,7 +111,11 @@ function normalizeWindow(w: unknown): UsageWindow | null {
 function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
   const accounts: PoolAccount[] = []
   for (const row of rows) {
-    if (row == null || typeof row !== 'object') continue
+    // `typeof [] === 'object'`, so arrays need an explicit reject: a healed
+    // array row NEVER self-heals (JSON.stringify of an array with grafted
+    // named properties serializes back to `[]`), becoming a permanent phantom
+    // account under an `undefined` provider in every dashboard.
+    if (row == null || typeof row !== 'object' || Array.isArray(row)) continue
     if (row.usage == null || typeof row.usage !== 'object') {
       row.usage = emptyUsage()
     } else {

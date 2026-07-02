@@ -23,7 +23,12 @@ function messageText({ content }: Message): string {
     // billing header, no tool prefixing → opaque upstream 400). Matches the
     // `block?.type` guard in transform.ts's prefixToolNames.
     for (const block of content) {
-      if (block?.type === 'text') return block.text || ''
+      // `typeof … === 'string'` (not `|| ''`): a truthy non-string `text`
+      // (e.g. `{type:'text', text: 5}`) would flow into
+      // `createHash().update(5)` and throw inside computeCCH — the same
+      // swallowed-TypeError transform-disable failure as a null block.
+      if (block?.type === 'text')
+        return typeof block.text === 'string' ? block.text : ''
     }
   }
 
@@ -66,12 +71,16 @@ let cachedHeader: { text: string; entrypoint: string; value: string } | null =
  * Closure-free loop (not Array.find) — runs once per Anthropic request.
  */
 export function buildBillingHeaderValue(
-  messages: Message[],
+  // Elements may be null/undefined: the array comes straight from an untrusted
+  // JSON.parse'd body, and a null element would otherwise throw at
+  // `message.role` BEFORE any guard — swallowed by rewriteRequestBody's catch,
+  // silently disabling the whole Claude-Code transform (opaque upstream 400).
+  messages: (Message | null | undefined)[],
   entrypoint: string,
 ): string | null {
   let userMsg: Message | undefined
   for (const message of messages) {
-    if (message.role === 'user') {
+    if (message?.role === 'user') {
       userMsg = message
       break
     }

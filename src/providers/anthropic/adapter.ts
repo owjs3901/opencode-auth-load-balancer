@@ -62,12 +62,7 @@ export const anthropicAdapter: ProviderAdapter = {
     return createStrippedStream(response)
   },
 
-  parseUsageHeaders(
-    headers: Headers,
-    _now: number,
-  ): Partial<UsageSnapshot> | null {
-    return parseUsageHeaders(headers)
-  },
+  parseUsageHeaders,
 
   fetchUsage(account: PoolAccount, now: number): Promise<UsageSnapshot | null> {
     return fetchUsage(account, now)

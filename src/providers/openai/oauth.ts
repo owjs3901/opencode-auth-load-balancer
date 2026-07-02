@@ -4,6 +4,7 @@ import {
   type BaseTokenResponse,
   generateState,
   parseCallbackInput,
+  readRefreshResponse,
   readTokenResponse,
 } from '../oauth-callback'
 import { generatePKCE } from '../pkce'
@@ -118,22 +119,8 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
     client_id: CLIENT_ID,
   })
 
-  const res = await postToken(body)
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`Token refresh failed: ${res.status} — ${text}`)
-  }
-
-  // A malformed 200 body must never reach commitRefresh, or the account gets
-  // `expires: NaN` (which needsRefresh never treats as stale) and soft-bricks
-  // into a perpetual auth-cooldown loop that survives restarts. The
-  // status-prefixed message keeps isInvalidGrant() false (200 ≠ 400/401), so
-  // the failure stays transient — the account is NOT disabled. Symmetric with
-  // ../anthropic/oauth.ts.
-  const json = await readTokenResponse<TokenResponse>(res)
-  if (!json)
-    throw new Error(
-      `Token refresh failed: ${res.status} — malformed token response body`,
-    )
+  // readRefreshResponse throws the status-prefixed error contract on a non-OK
+  // status or a malformed 200 body (see its doc comment in ../oauth-callback).
+  const json = await readRefreshResponse<TokenResponse>(await postToken(body))
   return toTokenSet(json, refreshToken)
 }

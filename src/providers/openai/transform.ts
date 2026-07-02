@@ -1,5 +1,5 @@
 import type { PoolAccount } from '../../types'
-import type { FetchInput } from '../types'
+import { type FetchInput, urlFromInput } from '../types'
 import {
   CODEX_RESPONSES_URL,
   OPENAI_BETA,
@@ -28,14 +28,7 @@ export function applyAuth(headers: Headers, account: PoolAccount): void {
 
 /** Rewrite Responses-API requests to the Codex backend; leave others untouched. */
 export function rewriteUrl(input: FetchInput): FetchInput {
-  let url: URL | null = null
-  try {
-    if (typeof input === 'string' || input instanceof URL)
-      url = new URL(input.toString())
-    else if (input instanceof Request) url = new URL(input.url)
-  } catch {
-    return input
-  }
+  const url = urlFromInput(input)
   if (!url) return input
   if (!url.pathname.includes('/responses')) return input
 

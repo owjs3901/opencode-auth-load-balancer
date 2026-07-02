@@ -160,7 +160,7 @@ async function recordRotation(
   fallbackMs: number,
   now: number,
 ): Promise<void> {
-  const partial = adapter.parseUsageHeaders(res.headers, now)
+  const partial = adapter.parseUsageHeaders(res.headers)
   const until = cooldownUntilFrom(res, fallbackMs, now)
   await bestEffort('rotation', () =>
     mutatePool((pool) => {
@@ -478,7 +478,7 @@ export function createLoadBalancedFetch(
         // snapshot read at loop start. The same partial is handed to
         // `recordSuccess` so the stored-row merge is unchanged.
         const successNow = Date.now()
-        const partial = adapter.parseUsageHeaders(res.headers, successNow)
+        const partial = adapter.parseUsageHeaders(res.headers)
         if (partial) applyUsagePartial(account, partial, successNow)
         hooks.onUse?.(adapter.id, account)
         await recordSuccess(

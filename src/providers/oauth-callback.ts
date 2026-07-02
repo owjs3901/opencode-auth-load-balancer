@@ -38,6 +38,29 @@ export async function readTokenResponse<
   return json
 }
 
+/**
+ * Validate a refresh-endpoint response, throwing the status-prefixed error
+ * `isInvalidGrant()` (src/refresh.ts) parses — that message format is a
+ * contract, single-sourced here so it can never be half-updated. A malformed
+ * 200 body must never reach commitRefresh, or the account gets `expires: NaN`
+ * (which needsRefresh never treats as stale) and soft-bricks into a perpetual
+ * auth-cooldown loop that survives restarts; the 200-status prefix keeps
+ * isInvalidGrant() false (200 ≠ 400/401), so the failure stays transient —
+ * the account is NOT disabled.
+ */
+export async function readRefreshResponse<
+  T extends BaseTokenResponse = BaseTokenResponse,
+>(res: Response): Promise<T> {
+  if (!res.ok)
+    throw new Error(`Token refresh failed: ${res.status} — ${await res.text()}`)
+  const json = await readTokenResponse<T>(res)
+  if (!json)
+    throw new Error(
+      `Token refresh failed: ${res.status} — malformed token response body`,
+    )
+  return json
+}
+
 /** Generate an opaque OAuth `state` parameter (32-char hex, no hyphens). */
 export function generateState(): string {
   return crypto.randomUUID().replace(/-/g, '')

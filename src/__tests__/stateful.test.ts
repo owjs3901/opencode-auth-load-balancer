@@ -1130,7 +1130,7 @@ describe('adapter delegation', () => {
     expect(
       anthropicAdapter.transformResponse(new Response('{"name":"mcp_Bash"}')),
     ).toBeInstanceOf(Response)
-    expect(anthropicAdapter.parseUsageHeaders(new Headers(), 0)).toBeNull()
+    expect(anthropicAdapter.parseUsageHeaders(new Headers())).toBeNull()
     expect(anthropicAdapter.classifyError(429)).toBe('account')
     expect(anthropicAdapter.classifyError(402)).toBe('account')
     expect(anthropicAdapter.classifyError(401)).toBe('auth')
@@ -1158,7 +1158,7 @@ describe('adapter delegation', () => {
     expect(openaiAdapter.transformResponse(new Response('x'))).toBeInstanceOf(
       Response,
     )
-    expect(openaiAdapter.parseUsageHeaders(new Headers(), 0)).toBeNull()
+    expect(openaiAdapter.parseUsageHeaders(new Headers())).toBeNull()
     expect(openaiAdapter.classifyError(429)).toBe('account')
     expect(openaiAdapter.classifyError(401)).toBe('auth')
     expect(openaiAdapter.classifyError(500)).toBe('service')

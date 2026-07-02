@@ -24,6 +24,23 @@ export function classifyHttpStatus(status: number): ErrorClass {
   return 'ok'
 }
 
+/**
+ * Parse a fetch input into a URL, or null when it is not a valid absolute URL.
+ * Shared by both providers' `rewriteUrl` so the `FetchInput → URL` prologue
+ * (string/URL vs Request handling, malformed-input bail) can never drift
+ * between Claude and Codex — same rationale as `classifyHttpStatus` above.
+ */
+export function urlFromInput(input: FetchInput): URL | null {
+  try {
+    if (typeof input === 'string' || input instanceof URL)
+      return new URL(input.toString())
+    if (input instanceof Request) return new URL(input.url)
+  } catch {
+    /* malformed input → null */
+  }
+  return null
+}
+
 export interface AuthorizeRequest {
   url: string
   verifier: string
@@ -65,11 +82,12 @@ export interface ProviderAdapter {
   transformResponse(response: Response): Response
 
   // --- usage ---------------------------------------------------------------
-  /** Parse usage from a normal inference response's headers (free, passive). */
-  parseUsageHeaders(
-    headers: Headers,
-    now: number,
-  ): Partial<UsageSnapshot> | null
+  /**
+   * Parse usage from a normal inference response's headers (free, passive).
+   * Deliberately takes NO timestamp: the capture time is stamped downstream by
+   * `applyUsagePartial` (see the doc comments in each provider's usage.ts).
+   */
+  parseUsageHeaders(headers: Headers): Partial<UsageSnapshot> | null
   /** Poll a dedicated usage endpoint for authoritative quota, if one exists. */
   fetchUsage(account: PoolAccount, now: number): Promise<UsageSnapshot | null>
 

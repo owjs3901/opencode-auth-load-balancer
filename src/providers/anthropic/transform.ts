@@ -1,5 +1,5 @@
 import { ignore } from '../../util'
-import type { FetchInput } from '../types'
+import { type FetchInput, urlFromInput } from '../types'
 import { buildBillingHeaderValue } from './cch'
 import {
   CLAUDE_CODE_ENTRYPOINT,
@@ -140,16 +140,7 @@ function resolveBaseUrl(): URL | null {
 
 /** Add ?beta=true for /v1/messages, and honor ANTHROPIC_BASE_URL overrides. */
 export function rewriteUrl(input: FetchInput): FetchInput {
-  let requestUrl: URL | null = null
-  try {
-    if (typeof input === 'string' || input instanceof URL) {
-      requestUrl = new URL(input.toString())
-    } else if (input instanceof Request) {
-      requestUrl = new URL(input.url)
-    }
-  } catch {
-    requestUrl = null
-  }
+  const requestUrl = urlFromInput(input)
   if (!requestUrl) return input
 
   const originalHref = requestUrl.href

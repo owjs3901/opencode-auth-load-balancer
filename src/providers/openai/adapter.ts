@@ -58,12 +58,7 @@ export const openaiAdapter: ProviderAdapter = {
     return response
   },
 
-  parseUsageHeaders(
-    headers: Headers,
-    _now: number,
-  ): Partial<UsageSnapshot> | null {
-    return parseUsageHeaders(headers)
-  },
+  parseUsageHeaders,
 
   fetchUsage(account: PoolAccount, now: number): Promise<UsageSnapshot | null> {
     return fetchUsage(account, now)

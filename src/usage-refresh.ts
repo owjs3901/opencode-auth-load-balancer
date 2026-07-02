@@ -1,7 +1,7 @@
 import { findAccount, mutatePool, readPool } from './pool/store'
 import type { ProviderAdapter } from './providers/types'
 import { ensureAccessToken } from './refresh'
-import type { PoolFile } from './types'
+import type { PoolAccount, PoolFile } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
 
 const SEED_TTL_MS = 5 * 60 * 1000
@@ -61,7 +61,7 @@ export async function refreshUsageInBackground(
   // every closure to bail at its staleness gate. Now nothing allocates unless
   // an account is genuinely stale. The `lastPoll.set` stays here — before any
   // await — so re-entrant concurrent calls still short-circuit on the throttle.
-  let stale: typeof pool.accounts | undefined
+  let stale: PoolAccount[] | undefined
   for (const account of pool.accounts) {
     if (account.providerID !== adapter.id || account.disabledReason) continue
     // Check staleness FIRST: in the steady state it is false, and the

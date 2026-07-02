@@ -291,24 +291,27 @@ function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
 
   if (!Array.isArray(system)) return [identityBlock]
 
-  const sanitized: SystemBlock[] = system
-    .map((item: unknown): SystemBlock => {
-      if (typeof item === 'string')
-        return { type: 'text', text: sanitizeSystemText(item) }
-      if (
-        isPlainObject(item) &&
-        item.type === 'text' &&
-        typeof item.text === 'string'
-      ) {
-        return { ...item, type: 'text', text: sanitizeSystemText(item.text) }
-      }
-      return { type: 'text', text: String(item) }
-    })
-    // Drop blocks whose text sanitized away entirely — the Anthropic API
-    // rejects zero-length text blocks (min length 1), and they carry nothing.
-    // Filter BEFORE the identity dedup so a leading empty block can't mask an
-    // identity block that follows it.
-    .filter((block) => block.text !== '')
+  // Single pass instead of `.map().filter()` — this runs per Anthropic request
+  // whose `system` is an array of blocks (opencode's normal shape), and the
+  // chain allocated an intermediate array + two closures each time. Blocks
+  // whose text sanitized away entirely are dropped — the Anthropic API rejects
+  // zero-length text blocks (min length 1), and they carry nothing. The drop
+  // happens BEFORE the identity dedup below so a leading empty block can't
+  // mask an identity block that follows it.
+  const sanitized: SystemBlock[] = []
+  for (const item of system as unknown[]) {
+    let block: SystemBlock
+    if (typeof item === 'string')
+      block = { type: 'text', text: sanitizeSystemText(item) }
+    else if (
+      isPlainObject(item) &&
+      item.type === 'text' &&
+      typeof item.text === 'string'
+    )
+      block = { ...item, type: 'text', text: sanitizeSystemText(item.text) }
+    else block = { type: 'text', text: String(item) }
+    if (block.text !== '') sanitized.push(block)
+  }
 
   if (sanitized.length === 0) return [identityBlock]
   if (sanitized[0]?.text === CLAUDE_CODE_IDENTITY) return sanitized

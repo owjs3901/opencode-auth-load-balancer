@@ -93,6 +93,26 @@ async function readMeta(
   }
 }
 
+/**
+ * Read ONLY the owner id from the lock's meta file. The release path just
+ * compares ownership, so it skips the `stat` that `readMeta` pays for the
+ * acquire path's staleness gate — `release()` runs once per `mutatePool`
+ * (usage records, session pins, cooldowns, refresh commits), making that a
+ * wasted fs syscall per pool mutation. Returns null when the file is missing,
+ * unreadable, or corrupt — exactly the states where release must leave the
+ * dir intact.
+ */
+async function readOwnerId(lockDir: string): Promise<string | null> {
+  try {
+    const meta = JSON.parse(
+      await readFile(metaFile(lockDir), 'utf8'),
+    ) as Partial<LockMeta> | null
+    return typeof meta?.ownerId === 'string' ? meta.ownerId : null
+  } catch {
+    return null
+  }
+}
+
 /** Atomically claim the lock dir, writing owner metadata. Returns false if held. */
 async function tryClaim(lockDir: string, meta: LockMeta): Promise<boolean> {
   try {
@@ -148,17 +168,17 @@ function makeHandle(
       if (released) return
       released = true
       stopHeartbeat()
-      const current = await readMeta(lockDir)
+      const currentOwner = await readOwnerId(lockDir)
       // Only rm when we can POSITIVELY confirm we are still the owner. When
       // ownership cannot be confirmed — because another process now owns the
-      // lock, `readMeta` returned null (meta missing / unreadable, the exact
-      // state during a concurrent reclaim's `rm + mkdir` → `writeFile(meta)`
-      // window in tryClaim), or the meta body is corrupt (`meta: null`) —
+      // lock, or `readOwnerId` returned null (meta missing / unreadable, the
+      // exact state during a concurrent reclaim's `rm + mkdir` →
+      // `writeFile(meta)` window in tryClaim, or a corrupt meta body) —
       // leave the dir intact. Wiping a freshly-mkdir'd lockDir there would
       // make the new owner's pending writeFile throw ENOENT and bubble up
       // uncaught, breaking the cross-process critical section. The next
       // acquirer's stale check reclaims a stranded dir naturally.
-      if (!current?.meta || current.meta.ownerId !== ownerId) return
+      if (currentOwner !== ownerId) return
       await rm(lockDir, { recursive: true, force: true }).catch(ignore)
     },
   }

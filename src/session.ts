@@ -18,8 +18,12 @@ export const SESSION_HEADER = 'x-allb-session'
 function firstUserFromList(list: unknown): string | null {
   if (!Array.isArray(list)) return null
   const messages = list as { role?: string; content?: unknown }[]
-  const user = messages.find((m) => m && m.role === 'user')
-  return user ? joinBlockTexts(user.content, '') : null
+  // Closure-free first-match loop (not `.find`) — same convention as the
+  // walkers in cch.ts / select.ts; runs per request on the body-hash fallback.
+  for (const m of messages) {
+    if (m && m.role === 'user') return joinBlockTexts(m.content, '')
+  }
+  return null
 }
 
 /** Extract the first user message text from an Anthropic or OpenAI-Responses body. */

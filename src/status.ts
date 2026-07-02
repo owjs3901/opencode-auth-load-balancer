@@ -194,11 +194,17 @@ export function renderStatus(
     lines.push(
       `${providerName(p.providerID)} — in use: ${current ? current.label : '(none yet)'}`,
     )
-    lines.push('  #  account            weekly   5h   resets   state')
+    // Labels are user-editable (rename tool/TUI or the pool file directly), so
+    // pad the label column to the provider's longest label. `max(16, …)` keeps
+    // the classic layout — and the rendered bytes — unchanged for short labels.
+    const width = p.accounts.reduce((w, a) => Math.max(w, a.label.length), 16)
+    lines.push(
+      `  #  ${'account'.padEnd(width + 3)}weekly   5h   resets   state`,
+    )
     for (const a of p.accounts) {
       const mark = a.current ? '▶' : ' '
       lines.push(
-        `  ${String(a.rank).padEnd(2)} ${mark} ${a.label.padEnd(16)} ${pct(a.weeklyUtil).padStart(5)} ${pct(a.hourlyUtil).padStart(5)} ${relTime(a.weeklyResetAt, now).padStart(7)}  ${stateOf(a, now)}`,
+        `  ${String(a.rank).padEnd(2)} ${mark} ${a.label.padEnd(width)} ${pct(a.weeklyUtil).padStart(5)} ${pct(a.hourlyUtil).padStart(5)} ${relTime(a.weeklyResetAt, now).padStart(7)}  ${stateOf(a, now)}`,
       )
     }
     lines.push('')

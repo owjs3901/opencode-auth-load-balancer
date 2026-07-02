@@ -123,6 +123,30 @@ describe('file lock', () => {
     expect(await dirExists(dir)).toBe(false)
   })
 
+  test('reclaims a stale lock whose owner.json is corrupt (holder crashed mid-write)', async () => {
+    // Pre-fix, readMeta returned null for a file that EXISTS but holds invalid
+    // JSON, so the stale gate (which needs non-null) never fired: every
+    // acquirer declined to reclaim and spun to LockTimeoutError forever —
+    // manual cleanup was the only way out. Post-fix a readable-but-corrupt
+    // meta reports its mtime, so a stale mtime reclaims it. A LIVE holder is
+    // still safe: its heartbeat keeps rewriting the file, so the mtime never
+    // goes stale.
+    const dir = lockPath('corrupt-owner')
+    await mkdir(dir, { recursive: true })
+    const meta = join(dir, 'owner.json')
+    await writeFile(meta, 'not json {{')
+    const old = new Date(Date.now() - 10_000)
+    await utimes(meta, old, old)
+    const handle = await acquireLock(dir, {
+      staleMs: 1_000,
+      timeoutMs: 2_000,
+      retryMs: 10,
+      heartbeatMs: 5_000,
+    })
+    await handle.release()
+    expect(await dirExists(dir)).toBe(false)
+  })
+
   test('times out against a lock dir with no owner metadata', async () => {
     const dir = lockPath('no-owner')
     await mkdir(dir, { recursive: true }) // dir exists, but owner.json never written

@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-import type { PoolAccount, PoolFile } from '../types'
+import { emptyUsage, type PoolAccount, type PoolFile } from '../types'
 import { ignore, sleep } from '../util'
 import { type LockOptions, withLock as withFileLock } from './lock'
 import { poolFilePath } from './paths'
@@ -71,6 +71,34 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
   return run
 }
 
+/**
+ * Row-level trust boundary for the user-editable pool file. `Array.isArray`
+ * alone trusts each row wholesale, but the README invites hand-editing — and a
+ * `null` element or a row missing `usage` throws a TypeError inside
+ * `selectForSession`, which runs OUTSIDE the try in `createLoadBalancedFetch`,
+ * failing EVERY request (and `buildStatus`, so the dashboard too) until the
+ * user repairs the file by hand. Drop non-object rows and default the fields
+ * the scheduler dereferences unconditionally: `usage` (→ `emptyUsage()`),
+ * `usage.capturedAt` (non-number → `NaN` comparisons that suppress usage
+ * seeding forever), and `cooldownUntil` (non-number → `Math.max(undefined, …)`
+ * persists `NaN` → JSON `null`). `mutatePool` writes the normalized pool back,
+ * so the file self-heals on the next bookkeeping write.
+ */
+function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
+  const accounts: PoolAccount[] = []
+  for (const row of rows) {
+    if (row == null || typeof row !== 'object') continue
+    if (row.usage == null || typeof row.usage !== 'object') {
+      row.usage = emptyUsage()
+    } else if (typeof row.usage.capturedAt !== 'number') {
+      row.usage.capturedAt = 0
+    }
+    if (typeof row.cooldownUntil !== 'number') row.cooldownUntil = 0
+    accounts.push(row)
+  }
+  return accounts
+}
+
 async function readRaw(): Promise<PoolFile> {
   let text: string
   try {
@@ -89,9 +117,9 @@ async function readRaw(): Promise<PoolFile> {
     }
     return {
       version: 1,
-      // `Array.isArray` above is the runtime trust boundary; the narrowed
-      // `parsed.accounts` is already `PoolAccount[]`, so no extra cast is needed.
-      accounts: parsed.accounts,
+      // `Array.isArray` above narrows to `PoolAccount[]` (no cast needed);
+      // `normalizeAccounts` is the row-level trust boundary on top of it.
+      accounts: normalizeAccounts(parsed.accounts),
       lastSelected: parsed.lastSelected ?? {},
       sessions: parsed.sessions ?? {},
     }

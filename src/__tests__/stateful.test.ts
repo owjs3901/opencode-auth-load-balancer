@@ -22,6 +22,8 @@ import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import type { ProviderAdapter } from '../providers/types'
 import { ensureAccessToken, needsRefresh } from '../refresh'
+import { selectAccount } from '../scheduler/select'
+import { buildStatus } from '../status'
 import {
   emptyUsage,
   type PoolAccount,
@@ -86,6 +88,53 @@ describe('pool store', () => {
   test('readPool tolerates hand-broken (non-JSON) file contents as an empty pool', async () => {
     await writeFile(POOL, 'not json {{')
     expect((await readPool()).accounts).toHaveLength(0)
+  })
+
+  test('readPool drops malformed hand-edited rows and heals a row missing usage/cooldownUntil', async () => {
+    // A hand-edited pool file: a null element, a bare string, and an account
+    // row whose `usage` and `cooldownUntil` were deleted. Pre-fix, the null
+    // row (and the missing `usage`) threw a TypeError inside selectForSession
+    // and buildStatus on EVERY request until the user repaired the file.
+    const source = account()
+    const edited = JSON.parse(JSON.stringify(source)) as Record<string, unknown>
+    delete edited.usage
+    delete edited.cooldownUntil
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [null, 'junk', edited],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const pool = await readPool()
+    expect(pool.accounts).toHaveLength(1)
+    expect(pool.accounts[0]?.usage).toEqual(emptyUsage())
+    expect(pool.accounts[0]?.cooldownUntil).toBe(0)
+    // The healed row is usable by the scheduler and renders in the dashboard.
+    const picked = selectAccount(pool.accounts, 'anthropic', Date.now())
+    expect(picked?.account.id).toBe(source.id)
+    expect(buildStatus(pool, Date.now())[0]?.accounts).toHaveLength(1)
+  })
+
+  test('readPool heals a non-number usage.capturedAt to 0 (keeps seeding eligible)', async () => {
+    // `now - capturedAt` with a non-number capturedAt is NaN, and `NaN > ttl`
+    // is false — the account would look permanently fresh and never be seeded.
+    const edited = JSON.parse(JSON.stringify(account())) as {
+      usage: Record<string, unknown>
+    }
+    edited.usage.capturedAt = 'yesterday'
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [edited],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    expect((await readPool()).accounts[0]?.usage.capturedAt).toBe(0)
   })
 
   test('mutatePool rejects with PoolReadError on a non-ENOENT read fault instead of wiping the pool', async () => {

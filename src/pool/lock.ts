@@ -69,11 +69,24 @@ function metaFile(lockDir: string): string {
 
 async function readMeta(
   lockDir: string,
-): Promise<{ meta: LockMeta; mtimeMs: number } | null> {
+): Promise<{ meta: LockMeta | null; mtimeMs: number } | null> {
   try {
     const path = metaFile(lockDir)
     const [text, info] = await Promise.all([readFile(path, 'utf8'), stat(path)])
-    return { meta: JSON.parse(text) as LockMeta, mtimeMs: info.mtimeMs }
+    let meta: LockMeta | null
+    try {
+      meta = JSON.parse(text) as LockMeta
+    } catch {
+      // READ fine but not valid JSON: the holder crashed mid-`writeFile` or the
+      // disk corrupted the file. Unlike the missing-file case below this state
+      // never heals on its own, so report the mtime with `meta: null` — the
+      // stale gate in acquireLock can then reclaim it once the mtime goes stale
+      // (a LIVE holder's heartbeat keeps rewriting the file, so a live lock is
+      // never stolen), instead of every acquirer spinning to LockTimeoutError
+      // forever.
+      meta = null
+    }
+    return { meta, mtimeMs: info.mtimeMs }
   } catch {
     // Missing or mid-write: caller treats this as "freshly held, not stale".
     return null
@@ -137,15 +150,15 @@ function makeHandle(
       stopHeartbeat()
       const current = await readMeta(lockDir)
       // Only rm when we can POSITIVELY confirm we are still the owner. When
-      // ownership cannot be confirmed — either because another process now
-      // owns the lock, OR because `readMeta` returned null (meta missing /
-      // unreadable, the exact state during a concurrent reclaim's
-      // `rm + mkdir` → `writeFile(meta)` window in tryClaim) — leave the dir
-      // intact. Wiping a freshly-mkdir'd lockDir there would make the new
-      // owner's pending writeFile throw ENOENT and bubble up uncaught,
-      // breaking the cross-process critical section. The next acquirer's
-      // stale check reclaims a stranded dir naturally.
-      if (!current || current.meta.ownerId !== ownerId) return
+      // ownership cannot be confirmed — because another process now owns the
+      // lock, `readMeta` returned null (meta missing / unreadable, the exact
+      // state during a concurrent reclaim's `rm + mkdir` → `writeFile(meta)`
+      // window in tryClaim), or the meta body is corrupt (`meta: null`) —
+      // leave the dir intact. Wiping a freshly-mkdir'd lockDir there would
+      // make the new owner's pending writeFile throw ENOENT and bubble up
+      // uncaught, breaking the cross-process critical section. The next
+      // acquirer's stale check reclaims a stranded dir naturally.
+      if (!current?.meta || current.meta.ownerId !== ownerId) return
       await rm(lockDir, { recursive: true, force: true }).catch(ignore)
     },
   }

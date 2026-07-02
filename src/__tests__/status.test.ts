@@ -169,6 +169,32 @@ describe('renderStatus', () => {
     expect(out).not.toContain('cooldown 0m')
   })
 
+  test('widens the label column for labels longer than 16 chars, keeping rows aligned', () => {
+    // Labels are user-editable; pre-fix a >16-char label overflowed
+    // `padEnd(16)` and sheared that row's weekly/5h/resets/state columns out
+    // of alignment with the header and its sibling rows.
+    const long = 'claude-personal-workspace' // 25 chars
+    const p = pool(
+      [
+        acc({ id: 'short', weekly: win(0.2, 30 * HOUR) }),
+        { ...acc({ id: 'long', weekly: win(0.6, 3 * HOUR) }), label: long },
+      ],
+      { anthropic: 'short' },
+    )
+    const lines = renderStatus(buildStatus(p, NOW), NOW).split('\n')
+    const header = lines[1]!
+    const rows = lines.slice(2)
+    expect(rows).toHaveLength(2)
+    // Every row's 5-char weekly field starts exactly under the header's
+    // "weekly" — including the row whose label is longer than the old fixed
+    // 16-char column.
+    const weeklyStart = header.indexOf('weekly')
+    expect(weeklyStart).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(row.slice(weeklyStart, weeklyStart + 5)).toMatch(/^\s*\d+%$/)
+    }
+  })
+
   test('reports when no accounts are registered', () => {
     expect(renderStatus([], NOW)).toContain('no accounts registered')
   })

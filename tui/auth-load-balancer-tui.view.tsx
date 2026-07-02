@@ -208,7 +208,13 @@ function BottomBar(props: { api: TuiPluginApi }) {
     const accounts = p.accounts ?? []
     const now = Date.now()
     const out: Chip[] = []
-    for (const [providerID, id] of Object.entries(p.lastSelected ?? {})) {
+    // `lastSelected` key order is whichever provider served first; sort by
+    // provider id (byte-deterministic `< / >`, no locale) so the bar lists
+    // providers in the same order as the sidebar, CLI, and status tool.
+    const selected = Object.entries(p.lastSelected ?? {}).sort(([x], [y]) =>
+      x < y ? -1 : x > y ? 1 : 0,
+    )
+    for (const [providerID, id] of selected) {
       const a = accounts.find((x) => x.id === id)
       if (!a) continue
       out.push({

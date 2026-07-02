@@ -79,7 +79,7 @@ const RESET_CUSHION_DAYS = 0.25
 export const SCORE_DEFAULTS: ScoreConfig = {
   hourlyInfluence: 0.5,
   minResetMs: 5 * 60 * 1000, // 5 minutes
-  weekWindowMs: 7 * 24 * 60 * 60 * 1000, // 7 days
+  weekWindowMs: WEEK_MS, // 7 days
   exhaustedAt: 0.999,
   migrateAt: 0.95,
   weeklyDrainTarget: 0.98,

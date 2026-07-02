@@ -1049,6 +1049,27 @@ describe('accounts', () => {
     expect((await readPool()).accounts).toHaveLength(1)
   })
 
+  test('concurrent bootstraps add exactly one account (inner under-lock guard)', async () => {
+    // Both calls pass the readPool fast path (pool still empty), so both reach
+    // mutatePool; the in-process chain serializes them and the SECOND mutate
+    // must hit the inner guard instead of double-adding.
+    await Promise.all([
+      bootstrapFromOpencodeAuth('anthropic', async () => ({
+        type: 'oauth',
+        access: 'c1',
+        refresh: 'cr1',
+        expires: 1,
+      })),
+      bootstrapFromOpencodeAuth('anthropic', async () => ({
+        type: 'oauth',
+        access: 'c2',
+        refresh: 'cr2',
+        expires: 1,
+      })),
+    ])
+    expect((await readPool()).accounts).toHaveLength(1)
+  })
+
   test('bootstrap skips non-oauth auth and swallows a throwing getAuth', async () => {
     await bootstrapFromOpencodeAuth('anthropic', async () => ({ type: 'api' }))
     expect((await readPool()).accounts).toHaveLength(0)

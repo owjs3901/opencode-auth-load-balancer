@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-import { mutatePool } from './pool/store'
+import { mutatePool, readPool } from './pool/store'
 import { emptyUsage, type PoolAccount, type TokenSet } from './types'
 
 /** The credential getter opencode passes to an auth loader. */
@@ -103,6 +103,12 @@ export async function bootstrapFromOpencodeAuth(
   const auth = await getAuth().catch(() => null)
   if (!auth || auth.type !== 'oauth' || !auth.access || !auth.refresh) return
   const { access, refresh, expires } = auth
+  // Fast path: in the steady state (every startup after the first) the provider
+  // already has an account, so skip the full lock + atomic rewrite mutatePool
+  // pays even for a no-op. The inner guard below is RETAINED — it runs under
+  // the lock and is what prevents two concurrent bootstraps from double-adding.
+  if ((await readPool()).accounts.some((a) => a.providerID === providerID))
+    return
   await mutatePool((pool) => {
     if (pool.accounts.some((a) => a.providerID === providerID)) return
     pool.accounts.push(

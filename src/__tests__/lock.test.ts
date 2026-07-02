@@ -149,7 +149,11 @@ describe('file lock', () => {
 
   test('times out against a lock dir with no owner metadata', async () => {
     const dir = lockPath('no-owner')
-    await mkdir(dir, { recursive: true }) // dir exists, but owner.json never written
+    // dir exists, but owner.json never written — a FRESH dir mtime is not
+    // stale, so readMeta's dir-mtime fallback must NOT let this be reclaimed
+    // (it is the exact disk state of a live tryClaim between mkdir and
+    // writeFile(meta)).
+    await mkdir(dir, { recursive: true })
     await expect(
       acquireLock(dir, {
         staleMs: 10_000,
@@ -158,6 +162,29 @@ describe('file lock', () => {
         heartbeatMs: 5_000,
       }),
     ).rejects.toBeInstanceOf(LockTimeoutError)
+  })
+
+  test('reclaims a STALE lock dir whose owner.json is missing (holder hard-crashed between mkdir and meta write)', async () => {
+    // A kill -9 / power loss between tryClaim's mkdir and its writeFile(meta)
+    // leaves a dir with NO owner.json — tryClaim's in-process cleanup only
+    // covers thrown errors, not a dead process. Pre-fix readMeta returned
+    // null for that state, so the stale gate never fired: every acquirer spun
+    // to LockTimeoutError forever and every mutatePool was silently skipped
+    // by bestEffort until manual cleanup. Post-fix readMeta falls back to the
+    // DIR mtime, giving a meta-less dir the same "reclaimable once stale"
+    // contract as the corrupt-owner.json case above.
+    const dir = lockPath('missing-owner-stale')
+    await mkdir(dir, { recursive: true })
+    const old = new Date(Date.now() - 10_000)
+    await utimes(dir, old, old)
+    const handle = await acquireLock(dir, {
+      staleMs: 1_000,
+      timeoutMs: 2_000,
+      retryMs: 10,
+      heartbeatMs: 5_000,
+    })
+    await handle.release()
+    expect(await dirExists(dir)).toBe(false)
   })
 
   test('stale-reclaim branch respects the acquisition deadline (no unbounded spin past timeoutMs)', async () => {

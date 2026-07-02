@@ -82,6 +82,18 @@ interface PoolShape {
 }
 
 /**
+ * True for a plain JSON object (non-null `object`, not an array). Local copy
+ * of `isPlainObject` (src/util.ts) by design — the TUI runtime cannot import
+ * `src/` — under the name that file's NOTE cross-references. No `value is
+ * Record<…>` narrowing: the `.filter(isPlainRecordValue)` site below must
+ * keep its `PoolAccount[]` element type, which a type-guard predicate to a
+ * different type would widen away.
+ */
+function isPlainRecordValue(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
  * Normalize parsed pool JSON defensively. `JSON.parse('null')` SUCCEEDS (so
  * readPool's catch never fires) and a hand-edited non-array `accounts` passes
  * straight through — either then throws inside the BottomBar/SidebarPanel
@@ -90,18 +102,14 @@ interface PoolShape {
  * `readRaw` (src/pool/store.ts); mirror that trust boundary here.
  */
 function toPoolShape(parsed: unknown): PoolShape {
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return {}
-  }
+  if (!isPlainRecordValue(parsed)) return {}
   const pool = parsed as PoolShape
   // Row-level mirror of the server's `normalizeAccounts` drop: a hand-edited
   // `accounts: [null, …]` (or a primitive element) otherwise throws inside
   // the BottomBar/SidebarPanel memos (`x.id` on null) every poll until the
   // file is repaired by hand — the server only heals it on its next write.
   pool.accounts = Array.isArray(pool.accounts)
-    ? pool.accounts.filter(
-        (r) => r !== null && typeof r === 'object' && !Array.isArray(r),
-      )
+    ? pool.accounts.filter(isPlainRecordValue)
     : undefined
   // `lastSelected` / `sessions` must be plain records (the server heals these
   // via `isPlainObject`). A hand-edited primitive (`"lastSelected": "oops"`)
@@ -120,10 +128,7 @@ function toPoolShape(parsed: unknown): PoolShape {
  * here absent fields are fine because the `?? {}` fallbacks downstream heal them.
  */
 function isAbsentOrPlainRecord(value: unknown): boolean {
-  return (
-    value === undefined ||
-    (typeof value === 'object' && value !== null && !Array.isArray(value))
-  )
+  return value === undefined || isPlainRecordValue(value)
 }
 
 function readPool(): PoolShape {

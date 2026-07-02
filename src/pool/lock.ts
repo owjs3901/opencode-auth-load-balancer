@@ -88,8 +88,25 @@ async function readMeta(
     }
     return { meta, mtimeMs: info.mtimeMs }
   } catch {
-    // Missing or mid-write: caller treats this as "freshly held, not stale".
-    return null
+    // `owner.json` unreadable (missing entirely). Fall back to the DIR's
+    // mtime: a holder that hard-crashed between tryClaim's mkdir and its
+    // writeFile(meta) — kill -9, power loss, OOM; tryClaim's in-process
+    // cleanup only covers THROWN errors — leaves a meta-less dir that would
+    // otherwise never satisfy the stale gate, so every acquirer spins to
+    // LockTimeoutError forever (every `mutatePool` degrades to a 30 s timeout
+    // silently absorbed by `bestEffort`, until manual cleanup). Reporting the
+    // dir mtime gives that state the same "reclaimable once stale" contract
+    // as the corrupt-JSON case above. A LIVE holder is never stolen through
+    // this path: creating/deleting `owner.json` updates the dir mtime, the
+    // heartbeat re-CREATES a missing meta within heartbeatMs (« staleMs), and
+    // "dir mtime = mkdir time gone stale" is only reachable when the hold
+    // outlives staleMs — which no caller's hold does (pool lock: ms-scale
+    // hold vs 30 s stale; refresh lock: ≤ ~60 s hold vs 120 s stale). When
+    // the DIR is gone too (lock released between the caller's failed tryClaim
+    // and this read), report null — "not held".
+    const dirStat = await stat(lockDir).catch(ignore)
+    if (!dirStat) return null
+    return { meta: null, mtimeMs: dirStat.mtimeMs }
   }
 }
 
@@ -122,12 +139,13 @@ async function tryClaim(lockDir: string, meta: LockMeta): Promise<boolean> {
   }
   // If meta write fails after mkdir succeeded (disk full, EACCES, EROFS, or a
   // Windows AV/backup tool holding the dir handle), the propagating error would
-  // otherwise leave a dir-with-no-owner-meta behind. With no meta file every
-  // future acquirer reads null from readMeta(), declines to reclaim (the stale
-  // gate in acquireLock requires non-null meta), and spins until timeoutMs hits
-  // — bricking the pool/refresh paths until manual cleanup. Cleaning up
-  // symmetrically with writeJsonAtomic's tmp-file unlink keeps the failure
-  // path reclaimable.
+  // otherwise leave a dir-with-no-owner-meta behind. readMeta's dir-mtime
+  // fallback does reclaim such a dir eventually, but only once it goes STALE —
+  // every acquirer in between still spins to LockTimeoutError, degrading the
+  // pool/refresh paths for up to staleMs. Cleaning up symmetrically with
+  // writeJsonAtomic's tmp-file unlink keeps this in-process failure path
+  // immediately reclaimable; the fallback remains for hard crashes this
+  // try/catch cannot survive.
   try {
     await writeFile(metaFile(lockDir), JSON.stringify(meta), { mode: 0o600 })
   } catch (error) {

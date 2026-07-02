@@ -1,4 +1,4 @@
-import { ignore } from '../../util'
+import { ignore, isPlainObject } from '../../util'
 import { type FetchInput, urlFromInput } from '../types'
 import { buildBillingHeaderValue } from './cch'
 import {
@@ -236,10 +236,6 @@ interface SystemBlock {
   [k: string]: unknown
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value != null && typeof value === 'object' && !Array.isArray(value)
-}
-
 function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
   const identityBlock: SystemBlock = {
     type: 'text',
@@ -257,7 +253,7 @@ function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
     return [identityBlock, { type: 'text', text: sanitized }]
   }
 
-  if (isRecord(system)) {
+  if (isPlainObject(system)) {
     const type = typeof system.type === 'string' ? system.type : 'text'
     const text = typeof system.text === 'string' ? system.text : ''
     const block: SystemBlock = {
@@ -282,7 +278,7 @@ function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
       if (typeof item === 'string')
         return { type: 'text', text: sanitizeSystemText(item) }
       if (
-        isRecord(item) &&
+        isPlainObject(item) &&
         item.type === 'text' &&
         typeof item.text === 'string'
       ) {

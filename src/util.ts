@@ -49,6 +49,21 @@ export function clamp01(n: number): number {
 }
 
 /**
+ * True for a plain JSON object (non-null `object`, not an array). Shared
+ * trust-boundary predicate for the two consumers that accept arbitrary JSON
+ * shapes: the user-editable pool file's `lastSelected` / `sessions`
+ * containers and session rows (`pool/store.ts`), and the incoming `system`
+ * prompt blocks in the Anthropic request transform
+ * (`providers/anthropic/transform.ts`). NOTE: the TUI view ships its OWN
+ * `isPlainRecordValue` copy by design — the TUI runtime cannot import `src/`.
+ */
+export function isPlainObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
  * Convert epoch-seconds → epoch-ms while rejecting non-finite/zero/negative inputs
  * AND the `Number.MAX_VALUE`-overflow case: `1e308` is finite but `1e308 * 1000`
  * collapses to +Infinity, which would silently commit Infinity to

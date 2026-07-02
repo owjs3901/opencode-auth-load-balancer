@@ -8,7 +8,7 @@ import {
   type SessionAssignment,
   type UsageWindow,
 } from '../types'
-import { ignore, sleep } from '../util'
+import { ignore, isPlainObject, sleep } from '../util'
 import { type LockOptions, withLock as withFileLock } from './lock'
 import { poolFilePath } from './paths'
 
@@ -141,20 +141,8 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
 }
 
 /**
- * True for a plain JSON object (the only shape `lastSelected` / `sessions`
- * may take). `??` in `readRaw` only replaces `null`/`undefined`, so a
- * hand-edited primitive (`"sessions": "oops"`) or array would survive into
- * the pool object — and `recordSuccess`'s property assignment on it throws a
- * TypeError that is NOT a tolerated bookkeeping error, discarding an
- * already-served response. Same trust boundary as `normalizeAccounts`.
- */
-function isPlainRecord<T>(value: T | null | undefined): value is T {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/**
  * Row-level trust boundary for `sessions` (mirrors `normalizeAccounts`' drop
- * semantics). `isPlainRecord` validates only the CONTAINER; a hand-edited row
+ * semantics). `isPlainObject` validates only the CONTAINER; a hand-edited row
  * (`"k": "oops"`, or an object with a non-string `accountId` / non-finite
  * `updatedAt`) would otherwise evade the TTL prune FOREVER: `now -
  * pin.updatedAt` is NaN and `NaN > ttlMs` is false, so the garbage entry is
@@ -167,7 +155,7 @@ function normalizeSessions(
 ): Record<string, SessionAssignment> {
   for (const key of Object.keys(rows)) {
     const row: unknown = rows[key]
-    if (!isPlainRecord(row)) {
+    if (!isPlainObject(row)) {
       delete rows[key]
       continue
     }
@@ -200,13 +188,17 @@ async function readRaw(): Promise<PoolFile> {
       // `Array.isArray` above narrows to `PoolAccount[]` (no cast needed);
       // `normalizeAccounts` is the row-level trust boundary on top of it.
       accounts: normalizeAccounts(parsed.accounts),
-      // `isPlainRecord` (not `??`) so hand-edited primitives/arrays are also
-      // healed; `mutatePool` writes the normalized pool back on the next
-      // bookkeeping write, same self-heal contract as `normalizeAccounts`.
-      lastSelected: isPlainRecord(parsed.lastSelected)
+      // `isPlainObject` (not `??`) so hand-edited primitives/arrays are also
+      // healed — `??` only replaces `null`/`undefined`, and a surviving
+      // primitive (`"sessions": "oops"`) makes `recordSuccess`'s property
+      // assignment throw a TypeError that is NOT a tolerated bookkeeping
+      // error, discarding an already-served response. `mutatePool` writes the
+      // normalized pool back on the next bookkeeping write, same self-heal
+      // contract as `normalizeAccounts`.
+      lastSelected: isPlainObject(parsed.lastSelected)
         ? parsed.lastSelected
         : {},
-      sessions: isPlainRecord(parsed.sessions)
+      sessions: isPlainObject(parsed.sessions)
         ? normalizeSessions(parsed.sessions)
         : {},
     }

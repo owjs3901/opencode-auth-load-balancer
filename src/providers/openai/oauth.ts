@@ -1,11 +1,10 @@
 import type { TokenSet } from '../../types'
-import { ignore } from '../../util'
 import {
   type BaseTokenResponse,
   generateState,
   parseCallbackInput,
+  readExchangeResponse,
   readRefreshResponse,
-  readTokenResponse,
   toTokenSet as baseTokenSet,
 } from '../oauth-callback'
 import { generatePKCE } from '../pkce'
@@ -93,16 +92,10 @@ export async function exchange(
     code_verifier: verifier,
   })
 
-  const res = await postToken(body)
-  if (!res.ok) {
-    await res.body?.cancel().catch(ignore)
-    return null
-  }
-
-  // "Returns null on failure" includes a 200 whose body is not JSON or is
-  // missing the required fields — see readTokenResponse. Symmetric with
-  // ../anthropic/oauth.ts.
-  const json = await readTokenResponse<TokenResponse>(res)
+  // "Returns null on failure" includes a non-ok status and a 200 whose body
+  // is not JSON or is missing the required fields — see readExchangeResponse.
+  // Symmetric with ../anthropic/oauth.ts.
+  const json = await readExchangeResponse<TokenResponse>(await postToken(body))
   if (!json) return null
   return toTokenSet(json, '')
 }

@@ -33,6 +33,7 @@ import { refreshUsageInBackground } from '../usage-refresh'
 import { sleep } from '../util'
 import { testAccount } from './fixtures/account'
 import { fakeAdapter } from './fixtures/adapter'
+import { responderFetch } from './fixtures/fetch-mock'
 
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_LB_DIR = DIR
@@ -1676,8 +1677,8 @@ describe('adapter delegation', () => {
 
   test('adapter exchange/refresh/fetchUsage delegate to the network layer', async () => {
     const realFetch = globalThis.fetch
-    globalThis.fetch = (() =>
-      Promise.resolve(
+    globalThis.fetch = responderFetch(
+      () => () =>
         new Response(
           JSON.stringify({
             access_token: 'a',
@@ -1686,7 +1687,7 @@ describe('adapter delegation', () => {
           }),
           { status: 200 },
         ),
-      )) as unknown as typeof fetch
+    )
     try {
       expect(
         await anthropicAdapter.exchange(

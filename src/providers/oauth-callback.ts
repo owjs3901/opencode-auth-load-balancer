@@ -13,6 +13,7 @@
  */
 
 import type { TokenSet } from '../types'
+import { ignore } from '../util'
 
 /** The fields every provider's token-endpoint response must carry. */
 export interface BaseTokenResponse {
@@ -75,6 +76,24 @@ export async function readTokenResponse<
   )
     return null
   return json
+}
+
+/**
+ * Validate an exchange-endpoint response with the shared exchange failure
+ * contract: null on a non-ok status (with the body stream — and its HTTP
+ * connection — released), null on a malformed 200 body (see
+ * readTokenResponse). Refresh-side sibling of `readRefreshResponse`; both
+ * providers' `exchange` delegate here so a future tweak (logging, a new
+ * failure shape) can never be made in only one copy.
+ */
+export async function readExchangeResponse<
+  T extends BaseTokenResponse = BaseTokenResponse,
+>(res: Response): Promise<T | null> {
+  if (!res.ok) {
+    await res.body?.cancel().catch(ignore)
+    return null
+  }
+  return readTokenResponse<T>(res)
 }
 
 /**

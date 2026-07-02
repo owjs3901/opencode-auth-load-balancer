@@ -761,6 +761,100 @@ describe('load-balanced fetch — edge paths', () => {
     expect(pool.sessions['anthropic:s:svc']?.accountId).toBe('A')
   })
 
+  test('success bookkeeping survives the served account being deleted mid-request', async () => {
+    // recordSuccess (fetch.ts) documents precise semantics for the race where
+    // the served account is deleted (e.g. via the TUI's deleteFromPool) between
+    // the upstream response and the bookkeeping write: skip usage AND
+    // `lastSelected`, but STILL write the session pin (the pin never consulted
+    // the account list). The line-coverage gate is satisfied by the truthy
+    // `if (account)` arm, so this FALSE arm — the documented contract — was
+    // bound by no test: a regression that moved the pin write inside the
+    // `if (account)` block (dropping pins on deletion) would pass the suite.
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+    })
+    respond = async () => {
+      // Delete A while its request is in flight, BEFORE the 200 lands.
+      await mutatePool((pool) => {
+        pool.accounts = pool.accounts.filter((a) => a.id !== 'A')
+      })
+      return new Response('ok', {
+        status: 200,
+        headers: { 'anthropic-ratelimit-unified-5h-utilization': '0.5' },
+      })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+      headers: { [SESSION_HEADER]: 'del' },
+    })
+    // The already-served response is returned untouched — no throw.
+    expect(res.status).toBe(200)
+    const pool = await readPool()
+    // No resurrection: the deleted account is NOT re-added by the usage write.
+    expect(pool.accounts.find((a) => a.id === 'A')).toBeUndefined()
+    // `lastSelected` is skipped alongside usage (the old recordUsage guard).
+    expect(pool.lastSelected.anthropic).toBeUndefined()
+    // The session pin IS still written (it never consulted the account list).
+    expect(pool.sessions['anthropic:s:del']?.accountId).toBe('A')
+  })
+
+  test('429 rotation survives the rejected account being deleted mid-request', async () => {
+    // recordRotation's mirror guard (`if (!account) return`): the usage +
+    // cooldown write for a deleted account must silently no-op. A regression
+    // that dropped the guard (a TypeError on `account.cooldownUntil`) or
+    // replaced it with a throw would be swallowed by the retry loop's outer
+    // catch as if the ACCOUNT had failed — surfacing the wrong error to the
+    // caller (part 2 below) instead of the provider-status contract.
+    const now = Date.now()
+    await seedAB(now)
+    let n = 0
+    respond = async () => {
+      n += 1
+      if (n === 1) {
+        // Delete A while its request is in flight, BEFORE the 429 lands.
+        await mutatePool((pool) => {
+          pool.accounts = pool.accounts.filter((a) => a.id !== 'A')
+        })
+        return new Response('limited', { status: 429 })
+      }
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    // Rotation still reached B and served the request — no escaped throw.
+    expect(res.status).toBe(200)
+    expect(n).toBe(2)
+    const pool = await readPool()
+    // No resurrection: the cooldown/usage write did not re-add A.
+    expect(pool.accounts.find((a) => a.id === 'A')).toBeUndefined()
+    expect(pool.lastSelected.anthropic).toBe('B')
+
+    // Part 2 — BINDS the guard: B (now the only account) is deleted mid-flight
+    // and every response is 429, so the request exhausts the pool and throws
+    // `lastError`. With the guard intact that is the status-contract error
+    // ("… returned 429"); with the guard dropped/throwing, the bookkeeping
+    // TypeError/throw would be caught as `lastError` instead and surface here.
+    respond = async () => {
+      await mutatePool((pool) => {
+        pool.accounts = pool.accounts.filter((a) => a.id !== 'B')
+      })
+      return new Response('limited', { status: 429 })
+    }
+    await expect(
+      lb('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: '{}',
+      }),
+    ).rejects.toThrow('returned 429')
+    // No resurrection on this arm either.
+    expect((await readPool()).accounts).toHaveLength(0)
+  })
+
   test('cheapSwitchMaxBytes gate counts UTF-8 bytes (not UTF-16 code units) for non-ASCII bodies', async () => {
     // Regression lock: before the fix, the cost gate used `bodyStr.length` (UTF-16
     // code units), so a 10-character Korean body (which is 30 UTF-8 bytes on the

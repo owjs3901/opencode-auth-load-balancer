@@ -1,10 +1,9 @@
 import type { TokenSet } from '../../types'
-import { ignore } from '../../util'
 import {
   generateState,
   parseCallbackInput,
+  readExchangeResponse,
   readRefreshResponse,
-  readTokenResponse,
   toTokenSet,
 } from '../oauth-callback'
 import { generatePKCE } from '../pkce'
@@ -79,14 +78,9 @@ export async function exchange(
     code_verifier: verifier,
   })
 
-  if (!result.ok) {
-    await result.body?.cancel().catch(ignore)
-    return null
-  }
-
-  // "Returns null on failure" includes a 200 whose body is not JSON or is
-  // missing the required fields — see readTokenResponse.
-  const json = await readTokenResponse(result)
+  // "Returns null on failure" includes a non-ok status and a 200 whose body
+  // is not JSON or is missing the required fields — see readExchangeResponse.
+  const json = await readExchangeResponse(result)
   if (!json) return null
   return toTokenSet(json, '')
 }

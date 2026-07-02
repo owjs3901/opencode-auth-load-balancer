@@ -15,6 +15,7 @@ import { openaiAdapter } from '../providers/openai/adapter'
 import { SESSION_HEADER } from '../session'
 import type { PoolAccount } from '../types'
 import { testAccount } from './fixtures/account'
+import { responderFetch } from './fixtures/fetch-mock'
 
 const HOUR = 60 * 60 * 1000
 
@@ -56,24 +57,22 @@ interface Call {
   body: string | null
 }
 
+// The input→url extraction lives in the shared responderFetch fixture; this
+// wrapper only adds the per-test call recording on top of it.
 function mockFetch(handler: (url: string) => Response): Call[] {
   const calls: Call[] = []
-  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
-    const url =
-      typeof input === 'string'
-        ? input
-        : ((input as { url?: string }).url ?? String(input))
+  globalThis.fetch = responderFetch(() => (url, init) => {
     const headers =
       init?.headers instanceof Headers
         ? init.headers
-        : new Headers(init?.headers as HeadersInit)
+        : new Headers(init?.headers)
     calls.push({
       url,
       headers,
       body: typeof init?.body === 'string' ? init.body : null,
     })
     return handler(url)
-  }) as typeof fetch
+  })
   return calls
 }
 

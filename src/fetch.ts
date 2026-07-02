@@ -32,8 +32,9 @@ function log(message: string): void {
 /**
  * Run a post-response bookkeeping write that must NEVER fail the request it follows.
  * Usage/cooldown/session writes are best-effort: if the cross-process pool lock times
- * out or an atomic write fails, skip silently (the next request self-corrects) rather
- * than discarding an already-served response. Non-infrastructure errors still propagate.
+ * out, the pool file cannot be read, or an atomic write fails, skip silently (the next
+ * request self-corrects) rather than discarding an already-served response.
+ * Non-infrastructure errors still propagate.
  */
 export async function bestEffort(
   what: string,
@@ -170,8 +171,8 @@ async function applyCooldown(
  * This halves post-response lock cycles during a rate-limit storm (the most
  * lock-contended moment). `cooldownUntilFrom` is read with the SAME `now` used
  * for the usage stamp so the write is internally consistent. `bestEffort` still
- * swallows `LockTimeoutError` / `PoolWriteError` so a bookkeeping failure never
- * fails an already-served response.
+ * swallows `LockTimeoutError` / `PoolReadError` / `PoolWriteError` so a
+ * bookkeeping failure never fails an already-served response.
  */
 async function recordRotation(
   adapter: ProviderAdapter,
@@ -207,8 +208,9 @@ async function recordRotation(
  *    which never consulted the account list).
  *  - `sessionKey === null` -> skip the session pin entirely (matches
  *    `assignSession`'s `if (!sessionKey) return` short-circuit).
- *  - `bestEffort` still swallows `LockTimeoutError` / `PoolWriteError` so a
- *    bookkeeping failure never fails an already-served response.
+ *  - `bestEffort` still swallows `LockTimeoutError` / `PoolReadError` /
+ *    `PoolWriteError` so a bookkeeping failure never fails an already-served
+ *    response.
  *
  * The failure paths differ: the thrown-error path uses the standalone
  * `applyCooldown` (no response headers to record), while the 429/auth rotation

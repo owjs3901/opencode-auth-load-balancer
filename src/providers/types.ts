@@ -32,13 +32,11 @@ export function classifyHttpStatus(status: number): ErrorClass {
  */
 export function urlFromInput(input: FetchInput): URL | null {
   try {
-    if (typeof input === 'string' || input instanceof URL)
-      return new URL(input.toString())
-    if (input instanceof Request) return new URL(input.url)
+    return new URL(input instanceof Request ? input.url : input)
   } catch {
     /* malformed input → null */
+    return null
   }
-  return null
 }
 
 export interface AuthorizeRequest {

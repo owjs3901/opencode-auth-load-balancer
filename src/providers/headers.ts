@@ -6,13 +6,8 @@ import type { FetchInput } from './types'
  * handing the Headers to an adapter's applyAuth.
  */
 export function mergeHeaders(input: FetchInput, init?: RequestInit): Headers {
-  const headers = new Headers()
-
-  if (input instanceof Request) {
-    input.headers.forEach((value, key) => {
-      headers.set(key, value)
-    })
-  }
+  const headers =
+    input instanceof Request ? new Headers(input.headers) : new Headers()
 
   const initHeaders = init?.headers
   if (!initHeaders) return headers

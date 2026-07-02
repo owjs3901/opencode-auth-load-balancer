@@ -370,6 +370,45 @@ describe('load-balanced fetch — edge paths', () => {
     }
   })
 
+  test('a Request-carried abort signal interrupts the cooldown wait (no init)', async () => {
+    // `typeof fetch` allows `fetch(request)` with the abort signal riding on the
+    // Request object itself instead of init. Pre-fix the cooldown wait read only
+    // `init?.signal`, so a cancelled turn stayed BLOCKED in sleepAbortable for up
+    // to maxWaitMs (default 305 s) — exactly the hang the abortable wait exists
+    // to prevent. Every other abort test passes the signal via init; this one
+    // pins the Request-borne path.
+    process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '5000'
+    try {
+      await mutatePool((pool) => {
+        pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      })
+      const ac = new AbortController()
+      let n = 0
+      respond = () => {
+        n += 1
+        return new Response('limited', {
+          status: 429,
+          headers: { 'retry-after': '2' },
+        })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const start = Date.now()
+      const p = lb(
+        new Request('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          body: '{}',
+          signal: ac.signal,
+        }),
+      )
+      setTimeout(() => ac.abort(), 30) // abort while the ~2 s wait is in progress
+      await expect(p).rejects.toBeDefined()
+      expect(Date.now() - start).toBeLessThan(1000) // woke on abort, not after 2 s
+      expect(n).toBe(1) // 429 once; the wait was interrupted, no retry
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
+    }
+  })
+
   test('an auth (401) cooldown is NOT waited out — the request fails fast', async () => {
     // Guard: only account-class (429/402) cooldowns are waitable. A 401 needs a
     // re-login, not time, so despite a generous budget the request must fail fast.

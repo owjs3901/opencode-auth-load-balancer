@@ -329,6 +329,16 @@ export function createLoadBalancedFetch(
     // and `headers.delete(SESSION_HEADER)` ran defensively on every attempt
     // even though the value to strip is deterministic from input/init.
     const baseHeaders = mergeHeaders(input, init)
+    // The client's abort signal may ride on `init` OR on a `Request` passed as
+    // `input` (`fetch(new Request(url, { signal }))` is part of the `typeof
+    // fetch` contract, and Request-carried *headers* are already honored via
+    // mergeHeaders above). Resolve it ONCE here so both consumers — the
+    // fully-rate-limited cooldown wait (`sleepAbortable`) and the abort
+    // fast-path classification in the catch below — see the same signal;
+    // reading only `init?.signal` would leave a Request-borne abort blocked
+    // in the wait for up to maxWaitMs.
+    const signal =
+      init?.signal ?? (input instanceof Request ? input.signal : undefined)
     // Namespace the session-affinity key by providerID so a single opencode
     // session that alternates between providers (e.g. Claude on one turn, Codex
     // on the next) keeps a SEPARATE pin per provider. Without the namespace
@@ -454,10 +464,7 @@ export function createLoadBalancedFetch(
             // whole round of attempts), so sleeping `resumeAt - now` would
             // overshoot the cooldown by that elapsed I/O time. Negative
             // durations clamp to an immediate wake inside sleepAbortable.
-            await sleepAbortable(
-              resumeAt - Date.now(),
-              init?.signal ?? undefined,
-            )
+            await sleepAbortable(resumeAt - Date.now(), signal)
             tried.clear()
             waitableCooldownIds.clear()
             continue
@@ -552,7 +559,7 @@ export function createLoadBalancedFetch(
         // already-abandoned request. When several requests are in flight at shutdown this
         // otherwise cools EVERY account at once. Propagate the abort untouched instead.
         const aborted =
-          init?.signal?.aborted === true ||
+          signal?.aborted === true ||
           (error instanceof Error && error.name === 'AbortError')
         if (aborted) throw error
         if (!account.disabledReason)

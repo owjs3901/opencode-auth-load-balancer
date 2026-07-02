@@ -903,6 +903,46 @@ describe('refresh', () => {
     expect(a.refresh).toBe('r1')
   })
 
+  test('post-lock freshness re-check uses a fresh clock — a token expiring during the lock wait is refreshed, not adopted', async () => {
+    // runRefresh re-checks freshness after winning the cross-process refresh
+    // lock, which can block up to REFRESH_LOCK.timeoutMs (60 s) behind another
+    // process's refresh. Pre-fix the re-check reused the CALLER's loop-start
+    // `now`, so a token whose remaining life was eaten during the wait was
+    // adopted as "fresh", shipped an expired Bearer, and 401-cooled a healthy
+    // account. Simulated deterministically (no time mocking) with a 10 s-stale
+    // caller `now` and an on-disk token already inside the 5-min refresh skew
+    // at the REAL clock: the adapter's refresh MUST run.
+    const onDisk = account({
+      id: 'stale-clock',
+      access: 'marginal',
+      refresh: 'r-marginal',
+      expires: Date.now() + 5 * 60 * 1000 - 1_000, // inside REFRESH_SKEW_MS at the real clock
+      tokenGen: 0,
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...onDisk })
+    })
+    // Local copy with no access token so the ENTRY gate (needsRefresh with the
+    // stale `now`) passes regardless of clocks — isolating the post-lock check.
+    const local = { ...onDisk, access: '' }
+    let called = 0
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        called += 1
+        return {
+          access: 'fresh',
+          refresh: 'r-fresh',
+          expires: Date.now() + 3_600_000,
+        }
+      },
+    })
+    expect(await ensureAccessToken(adapter, local, Date.now() - 10_000)).toBe(
+      'fresh',
+    )
+    expect(called).toBe(1) // pre-fix: 0 — the marginal on-disk token was adopted
+    expect(findAccount(await readPool(), 'stale-clock')?.access).toBe('fresh')
+  })
+
   test('a refresh superseded mid-flight adopts the winner instead of clobbering it', async () => {
     // Given: while OUR refresh is in flight, a concurrent process rotates + persists
     // a newer token (bumping tokenGen). Our commit must NOT overwrite the winner.

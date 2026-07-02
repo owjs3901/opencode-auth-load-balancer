@@ -149,7 +149,14 @@ async function runRefresh(
     async () => {
       const latest = (await readPoolAccount(account.id)) ?? account
       // Won the wait but another process already rotated: adopt, don't re-spend.
-      if (!needsRefresh(latest, now)) return tokensOf(latest)
+      // Fresh Date.now(), NOT only the caller's loop-start `now`: acquiring the
+      // lock may block up to REFRESH_LOCK.timeoutMs (60 s) behind another
+      // process's refresh, and a token whose remaining life was eaten by that
+      // wait must NOT be adopted as fresh (it would ship an expired Bearer and
+      // 401-cool a healthy account). Math.max keeps the STRICTER of the two
+      // clocks so a deliberately future `now` still forces a refresh.
+      if (!needsRefresh(latest, Math.max(now, Date.now())))
+        return tokensOf(latest)
       const attempt: RefreshAttempt = {
         refresh: latest.refresh,
         gen: genOf(latest),

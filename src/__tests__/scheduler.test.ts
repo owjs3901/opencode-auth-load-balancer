@@ -128,6 +128,27 @@ describe('weekly urgency = drainable / (daysToReset + cushion)^2', () => {
     })
     expect(weeklyUrgency(exhaustedUnknown, DEFAULT_CONFIG, NOW)).toBe(0)
   })
+
+  test('an ELAPSED weekly anchor keeps the conservative full-window baseline — no probe boost', () => {
+    // A window PRESENT with `resetAt` in the PAST (stale, elapsed anchor) must
+    // take the `weekWindowMs` baseline, per weeklyUrgency's jsdoc — only the
+    // `resetAt === 0` unknown-anchor shape gets the imminent-reset probe boost.
+    // A regression widening the probe condition to `weekly ? cfg.minResetMs :
+    // cfg.weekWindowMs` (treating ANY present window as probe-imminent) would
+    // pass the unknown-anchor and missing-window tests above but misrank every
+    // account whose anchor has merely lapsed; this pins both orderings.
+    const elapsed = account('elapsed', {
+      weekly: { utilization: 0.5, resetAt: NOW - HOUR },
+    })
+    const soon = account('soon', { weekly: win(0.03, 29 * HOUR) })
+    expect(pick([elapsed, soon])).toBe('soon')
+    const unknownAnchorProbe = account('probe', {
+      weekly: { utilization: 0, resetAt: 0 },
+    })
+    expect(weeklyUrgency(elapsed, DEFAULT_CONFIG, NOW)).toBeLessThan(
+      weeklyUrgency(unknownAnchorProbe, DEFAULT_CONFIG, NOW),
+    )
+  })
 })
 
 describe('point 1: use the sooner-resetting account first', () => {

@@ -193,16 +193,19 @@ async function recordRotation(
  * The failure path keeps using the standalone `recordUsage` + `applyCooldown`
  * pair (recordUsage now lives inside the rotation branch so we don't pay it on
  * a request that succeeds first try).
+ *
+ * `partial` arrives PRE-PARSED from the success branch (which also applies it
+ * to its local account object before `hooks.onUse`, so the switch toast shows
+ * the response's fresh usage) — the headers are still parsed exactly once.
  */
 async function recordSuccess(
   adapter: ProviderAdapter,
   accountId: string,
-  res: Response,
+  partial: Partial<UsageSnapshot> | null,
   sessionKey: string | null,
   now: number,
   ttlMs: number,
 ): Promise<void> {
-  const partial = adapter.parseUsageHeaders(res.headers, now)
   await bestEffort('record-success', () =>
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
@@ -468,13 +471,22 @@ export function createLoadBalancedFetch(
           continue
         }
 
+        // Parse the response's usage headers ONCE, here, and apply them to the
+        // LOCAL account object before `onUse` fires: the switch toast (which by
+        // definition fires on the first request to an account in a while) then
+        // shows the response's fresh percentages instead of the pre-request
+        // snapshot read at loop start. The same partial is handed to
+        // `recordSuccess` so the stored-row merge is unchanged.
+        const successNow = Date.now()
+        const partial = adapter.parseUsageHeaders(res.headers, successNow)
+        if (partial) applyUsagePartial(account, partial, successNow)
         hooks.onUse?.(adapter.id, account)
         await recordSuccess(
           adapter,
           account.id,
-          res,
+          partial,
           sessionKey,
-          Date.now(),
+          successNow,
           cfg.sessionTtlMs,
         )
         return adapter.transformResponse(res)

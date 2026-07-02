@@ -463,7 +463,8 @@ describe('refresh', () => {
     // concurrent caller's account, not just the one that started the
     // refresh"). That test pins the TRUE arm of
     // `if (isInvalidGrant(error))` in BOTH the creator's catch
-    // (refresh.ts:218) AND the reuser's catch (refresh.ts:186); this
+    // (refresh.ts ensureAccessToken) AND the reuser's catch
+    // (refresh.ts reuseRefresh); this
     // pins the FALSE arm on BOTH — when the in-flight refresh rejects
     // with a non-invalid_grant error (refresh lock timeout, AbortError
     // from OAUTH_HTTP_TIMEOUT_MS, transient 5xx, DNS blip), NEITHER
@@ -506,8 +507,8 @@ describe('refresh', () => {
     expect(results[0]?.status).toBe('rejected')
     expect(results[1]?.status).toBe('rejected')
     // KEY ASSERTIONS — these break if `if (isInvalidGrant(error))` is
-    // flipped in EITHER the creator's catch (refresh.ts:218) or the
-    // reuser's catch (refresh.ts:186).
+    // flipped in EITHER the creator's catch (refresh.ts
+    // ensureAccessToken) or the reuser's catch (refresh.ts reuseRefresh).
     expect(a1.disabledReason).toBeNull() // creator path
     expect(a2.disabledReason).toBeNull() // reuser path — previously unbound
     expect(
@@ -646,8 +647,8 @@ describe('refresh', () => {
     //
     // Symmetric with "invalid_grant for an account not in the pool still
     // rethrows and marks the local object" — that pins resolveInvalidGrant's
-    // missing-account branch (refresh.ts:131-132); this pins commitRefresh's
-    // (refresh.ts:106-107). Without it, a regression (e.g. removing the
+    // missing-account branch (refresh.ts); this pins commitRefresh's
+    // missing-account guard. Without it, a regression (e.g. removing the
     // `if (!stored) return next` guard so `stored.access = ...` blew up on
     // undefined, or replacing it with `throw new Error('gone')`) would slip
     // past the 100% coverage gate — the LINE is "covered" by the condition
@@ -740,7 +741,7 @@ describe('accounts', () => {
 
   test('addAccount default label avoids colliding with a surviving label after a middle-of-list delete', async () => {
     // Regression: the TUI sidebar's "Delete — remove from pool" option
-    // (tui/auth-load-balancer-tui.view.tsx:115 deleteFromPool) lets the user
+    // (deleteFromPool in tui/auth-load-balancer-tui.view.tsx) lets the user
     // remove ANY account row, not just the last one. Pre-fix, addAccount
     // derived its default label from `pool.accounts.filter(...).length + 1`,
     // so after deleting a non-last row the next default-label add would

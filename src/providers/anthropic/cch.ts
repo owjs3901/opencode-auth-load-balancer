@@ -46,7 +46,7 @@ export function buildBillingHeaderValue(
   entrypoint: string,
 ): string {
   const text = extractFirstUserMessageText(messages)
-  const suffix = computeVersionSuffix(text, CLAUDE_CODE_VERSION)
+  const suffix = computeVersionSuffix(text)
   const cch = computeCCH(text)
   return (
     'x-anthropic-billing-header: ' +

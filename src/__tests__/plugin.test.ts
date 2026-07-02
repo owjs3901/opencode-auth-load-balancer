@@ -414,6 +414,55 @@ describe('load-balanced fetch — edge paths', () => {
     }
   })
 
+  test('multi-account 429 wait resumes at the SOONEST cooldown, not the latest', async () => {
+    // Every existing wait test seeds ONE account, so `soonestCooldownUntil`'s
+    // minimum scan (`if (account.cooldownUntil < soonest) …`) is never exercised
+    // with 2+ waitable accounts — a regression returning the LATEST (or first
+    // found) cooldown would pass the suite while over-blocking a recoverable
+    // pool. Here A cools for 3 s and B for ~120 ms: the fetch must wait only
+    // B's ~120 ms and resume on B (A is still cooling).
+    process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '5000'
+    try {
+      const now = Date.now()
+      await seedAB(now)
+      let n = 0
+      const auths: (string | null)[] = []
+      respond = (_url, init) => {
+        n += 1
+        auths.push(
+          new Headers(init?.headers as HeadersInit | undefined).get(
+            'authorization',
+          ),
+        )
+        if (n === 1)
+          return new Response('limited', {
+            status: 429,
+            headers: { 'retry-after': '3' },
+          })
+        if (n === 2)
+          return new Response('limited', {
+            status: 429,
+            headers: { 'retry-after': '0.12' },
+          })
+        return new Response('ok', { status: 200 })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const start = Date.now()
+      const res = await lb('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: '{}',
+      })
+      const elapsed = Date.now() - start
+      expect(res.status).toBe(200)
+      expect(n).toBe(3) // A 429, B 429, then (after waiting out B) the retry
+      expect(elapsed).toBeGreaterThanOrEqual(50) // it actually waited B's ~120 ms
+      expect(elapsed).toBeLessThan(2000) // …but NOT A's 3 s cooldown
+      expect(auths[2]).toBe('Bearer tokB') // resumed on B — the soonest to recover
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
+    }
+  })
+
   test('honors retry-after when cooling down a rate-limited account', async () => {
     const now = Date.now()
     await seedAB(now)
@@ -828,8 +877,8 @@ describe('load-balanced fetch — edge paths', () => {
     expect(pool.accounts.find((a) => a.id === 'acctB')?.cooldownUntil).toBe(0)
   })
 
-  test('assignSession prunes stale session-affinity entries past sessionTtlMs', async () => {
-    // The TTL-prune branch in assignSession (`delete pool.sessions[key]` when
+  test('recordSuccess prunes stale session-affinity entries past sessionTtlMs', async () => {
+    // The TTL-prune branch in recordSuccess (fetch.ts) (`delete pool.sessions[key]` when
     // `now - value.updatedAt > ttlMs`) is line-covered only because the for-loop
     // body executes — a regression flipping `>` to `<`, swapping the subtraction
     // order, or omitting the prune entirely would still report 100% coverage.
@@ -975,13 +1024,26 @@ describe('toast on switch + status tool', () => {
     const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
       models: {},
     })
-    respond = () => new Response('ok', { status: 200 })
+    // Respond WITH usage headers: the toast must show the response's FRESH
+    // weekly utilization (33%), not the pre-request pool snapshot (10% from
+    // the `account()` fixture) — the fetch applies the parsed headers to its
+    // local account object before `hooks.onUse` fires.
+    const resetSecs = Math.floor((Date.now() + 24 * 60 * 60 * 1000) / 1000)
+    respond = () =>
+      new Response('ok', {
+        status: 200,
+        headers: {
+          'anthropic-ratelimit-unified-7d-utilization': '0.33',
+          'anthropic-ratelimit-unified-7d-reset': String(resetSecs),
+        },
+      })
     await opts.fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       body: '{}',
     })
     expect(toasts).toHaveLength(1)
     expect(toasts[0]).toContain('toast-acct')
+    expect(toasts[0]).toContain('weekly 33%')
   })
 
   test('auth_lb_status tool renders the pool dashboard', async () => {

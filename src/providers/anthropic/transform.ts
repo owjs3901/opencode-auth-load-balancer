@@ -171,8 +171,16 @@ export function rewriteUrl(input: FetchInput): FetchInput {
     : requestUrl
 }
 
+/**
+ * Hoisted to module scope (same rationale as `MCP_TOOL_NAME_RE` above):
+ * `sanitizeSystemText` runs once per system block per Anthropic request, and an
+ * inline literal re-creates the RegExp object on every call. No `/g` flag, so
+ * `split` leaves no cross-call state and sharing one instance is safe.
+ */
+const PARAGRAPH_SPLIT_RE = /\n\n+/
+
 function sanitizeSystemText(text: string): string {
-  const paragraphs = text.split(/\n\n+/)
+  const paragraphs = text.split(PARAGRAPH_SPLIT_RE)
   const filtered = paragraphs.filter((paragraph) => {
     if (paragraph.includes(OPENCODE_IDENTITY_PREFIX)) return false
     for (const anchor of PARAGRAPH_REMOVAL_ANCHORS) {

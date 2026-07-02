@@ -447,6 +447,45 @@ describe('load-balanced fetch — edge paths', () => {
     }
   })
 
+  test('a waitable cooldown that already expired during the round resumes immediately instead of throwing', async () => {
+    // Regression lock for soonestCooldownUntil's "resume now" branch: with a
+    // sub-ms `retry-after: 0.001`, account A's cooldown has typically ALREADY
+    // expired by the time the round ends (the 429 round-trip + pool I/O take
+    // longer than 1 ms). Pre-fix, the `cooldownUntil <= now` skip then left
+    // `soonest = +Infinity` → null → the request THREW — even though clearing
+    // `tried` and retrying immediately succeeds. Post-fix an expired waitable
+    // cooldown means "resume now" (sleep ≤ 0 ms); if the 1 ms happens not to
+    // have elapsed yet the normal wait path covers it, so this test is
+    // deterministic on both sides of the race.
+    process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '5000'
+    try {
+      await mutatePool((pool) => {
+        pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+      })
+      let n = 0
+      respond = () => {
+        n += 1
+        if (n === 1)
+          return new Response('limited', {
+            status: 429,
+            headers: { 'retry-after': '0.001' },
+          })
+        return new Response('ok', { status: 200 })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const start = Date.now()
+      const res = await lb('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        body: '{}',
+      })
+      expect(res.status).toBe(200)
+      expect(n).toBe(2) // one 429, then the immediate clean-slate retry
+      expect(Date.now() - start).toBeLessThan(1000) // resumed now — no real wait
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
+    }
+  })
+
   /**
    * Shared skeleton for the 429 retry-after cooldown tests below: seed the
    * two-account fixture, answer the first request with a 429 carrying the

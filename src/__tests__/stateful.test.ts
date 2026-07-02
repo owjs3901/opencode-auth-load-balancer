@@ -1187,6 +1187,46 @@ describe('usage-refresh', () => {
     expect(reread?.usage.hourly).toEqual({ utilization: 0, resetAt: 0 })
   })
 
+  test('a malformed endpoint window keeps the stored last-known window and does not stamp freshness', async () => {
+    // Both providers' `endpointWindow` return null ONLY for a PRESENT-but-
+    // MALFORMED window (a genuinely absent one maps to `{0, 0}`), precisely so
+    // the scheduler never reads garbage as full headroom. Pre-fix, the merge
+    // here defeated that intent: `{ ...snapshot }` wrote `weekly: null` over a
+    // real stored window (utilOf(null) = 0 → the account ranked FIRST) and
+    // stamped `capturedAt: now`, suppressing the healing re-poll for
+    // SEED_TTL_MS. Lock: the stored weekly AND capturedAt survive a
+    // weekly-malformed poll while the valid hourly side still updates.
+    const now = Date.now()
+    const storedWeekly = {
+      utilization: 0.8,
+      resetAt: now + 24 * 60 * 60 * 1000,
+    }
+    const a = account({
+      usage: {
+        hourly: { utilization: 0.3, resetAt: now + 60 * 60 * 1000 },
+        weekly: storedWeekly,
+        capturedAt: 0, // stale -> polled
+      },
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      // Exactly what a provider fetchUsage yields for a valid five_hour plus
+      // a malformed seven_day (e.g. `{ utilization: 'garbage' }`): weekly null.
+      fetchUsage: async () => ({
+        hourly: { utilization: 0.55, resetAt: now + 2 * 60 * 60 * 1000 },
+        weekly: null,
+        capturedAt: now,
+      }),
+    })
+    await refreshUsageInBackground(adapter, now)
+    const reread = findAccount(await readPool(), a.id)
+    expect(reread?.usage.hourly?.utilization).toBeCloseTo(0.55, 5) // valid side updates
+    expect(reread?.usage.weekly).toEqual(storedWeekly) // last-known survives
+    expect(reread?.usage.capturedAt).toBe(0) // failed weekly refresh must NOT look fresh
+  })
+
   test('swallows errors from the refresh/usage path', async () => {
     const a = account({
       expires: Date.now() - 1,

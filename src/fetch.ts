@@ -278,9 +278,13 @@ function noUsableAccountResponse(providerID: string): Response {
  * (429/402) cooldown. Considers ONLY those ids (the accounts THIS request cooled via a
  * 429/402) — an auth cooldown or a thrown network error is NOT recoverable by waiting,
  * so those are never passed in. The ids come from `selectForSession` for THIS
- * provider in the same request, so no provider filter is needed here. Returns
- * null when none of them is still cooling (the pool won't self-heal, so the
- * caller fails fast instead of blocking).
+ * provider in the same request, so no provider filter is needed here. A waitable
+ * cooldown that ALREADY expired (a short Retry-After elapsed during the rest of
+ * the round — other accounts' fetch round-trips, pool I/O) counts as "resume
+ * now": the account is usable again, so failing the request would be wrong.
+ * Returns null only when none of the ids maps to a waitable account anymore
+ * (deleted or disabled since) — then the pool won't self-heal, so the caller
+ * fails fast instead of blocking.
  */
 function soonestCooldownUntil(
   accounts: PoolAccount[],
@@ -292,8 +296,8 @@ function soonestCooldownUntil(
   for (const account of accounts) {
     if (account.disabledReason) continue
     if (!accountIds.has(account.id)) continue
-    if (account.cooldownUntil <= now) continue
-    if (account.cooldownUntil < soonest) soonest = account.cooldownUntil
+    const until = account.cooldownUntil > now ? account.cooldownUntil : now
+    if (until < soonest) soonest = until
   }
   return Number.isFinite(soonest) ? soonest : null
 }

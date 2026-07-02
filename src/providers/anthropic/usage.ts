@@ -1,76 +1,31 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
-import { clamp01, secondsToMs } from '../../util'
+import { clamp01 } from '../../util'
+import {
+  parseWindowPairHeaders,
+  type WindowPairHeaderSpec,
+} from '../usage-headers'
 import { fetchUsageJson } from '../usage-http'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 
-/**
- * Build a single UsageWindow from the raw utilization + reset header strings.
- * Lifted from inside `parseUsageHeaders` so we don't reallocate a closure per
- * response on the inference hot path; symmetric with `openai/usage.ts`'s
- * module-level `windowFromPercent` helper. Captures NOTHING from its caller —
- * `clamp01` and `secondsToMs` are module-imported.
- *
- * `utilRaw` is `string` (NOT `string | null`): `parseUsageHeaders` short-
- * circuits on a null utilization header BEFORE calling, so the null branch
- * here would be dead code (and the matching `headers.get(...reset)` call
- * would have been a wasted map lookup for a value parseHeaderWindow would
- * immediately discard).
- */
-function parseHeaderWindow(
-  utilRaw: string,
-  resetRaw: string | null,
-): UsageWindow | null {
-  const util = Number(utilRaw)
-  if (!Number.isFinite(util)) return null
-  // secondsToMs absorbs the non-finite / overflow guard (util.ts).
-  return {
-    utilization: clamp01(util),
-    resetAt: secondsToMs(Number(resetRaw)),
-  }
+/** Header utilization is a 0..1 FRACTION (divisor 1); reset is epoch SECONDS. */
+const HEADER_SPEC: WindowPairHeaderSpec = {
+  hourlyUtil: 'anthropic-ratelimit-unified-5h-utilization',
+  hourlyReset: 'anthropic-ratelimit-unified-5h-reset',
+  weeklyUtil: 'anthropic-ratelimit-unified-7d-utilization',
+  weeklyReset: 'anthropic-ratelimit-unified-7d-reset',
+  divisor: 1,
 }
 
 /**
  * Parse usage from /v1/messages response headers (free, on every response).
- * Header utilization is a 0..1 FRACTION; reset is epoch SECONDS.
+ * The parse itself (null-short-circuit, "no capturedAt", "`{}` collapses to
+ * null") lives in the shared `parseWindowPairHeaders` — only the header names
+ * and the fraction scale are Anthropic-specific.
  */
 export function parseUsageHeaders(
   headers: Headers,
 ): Partial<UsageSnapshot> | null {
-  const h5 = headers.get('anthropic-ratelimit-unified-5h-utilization')
-  const h7 = headers.get('anthropic-ratelimit-unified-7d-utilization')
-  if (h5 === null && h7 === null) return null
-
-  // Deliberately NO `capturedAt` here: `applyUsagePartial` (fetch.ts) stamps
-  // its own timestamp, and ONLY when a weekly window arrived — the staleness
-  // gate `refreshUsageInBackground` relies on. A parser-side stamp would be
-  // dead data at best and, if a future consumer trusted it, would resurrect
-  // the weekly-less-partial-marks-fresh bug locked by plugin.test.ts.
-  const out: Partial<UsageSnapshot> = {}
-  // Short-circuit before `headers.get('...reset')` when the matching
-  // utilization header is missing — `parseHeaderWindow` would only have
-  // discarded the reset value via its now-removed null guard, so the
-  // map lookup was wasted work on every response that reported only one
-  // of the two windows.
-  const hourly =
-    h5 === null
-      ? null
-      : parseHeaderWindow(
-          h5,
-          headers.get('anthropic-ratelimit-unified-5h-reset'),
-        )
-  const weekly =
-    h7 === null
-      ? null
-      : parseHeaderWindow(
-          h7,
-          headers.get('anthropic-ratelimit-unified-7d-reset'),
-        )
-  if (hourly) out.hourly = hourly
-  if (weekly) out.weekly = weekly
-  // Headers were present but NEITHER window parsed (e.g. a malformed
-  // utilization value): return null, not a truthy empty `{}` — the contract
-  // consumers gate on (`if (partial)`) is "null = nothing usable".
-  return hourly || weekly ? out : null
+  return parseWindowPairHeaders(headers, HEADER_SPEC)
 }
 
 /** A window from the usage endpoint: utilization is a 0..100 PERCENT; resets_at varies. */

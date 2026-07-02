@@ -1,63 +1,33 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
 import { clamp01, secondsToMs } from '../../util'
+import {
+  parseWindowPairHeaders,
+  type WindowPairHeaderSpec,
+} from '../usage-headers'
 import { fetchUsageJson } from '../usage-http'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 import { resolveAccountId } from './jwt'
 
-/**
- * Build a window from a percent (0..100) + reset epoch seconds.
- *
- * `percentRaw` is `string` (NOT `string | null`): `parseUsageHeaders` short-
- * circuits on a null percent header BEFORE calling, so a null branch here
- * would be dead code (mirrors the Anthropic sibling's `parseHeaderWindow`).
- */
-function windowFromPercent(
-  percentRaw: string,
-  resetSecRaw: string | null,
-): UsageWindow | null {
-  const percent = Number(percentRaw)
-  if (!Number.isFinite(percent)) return null
-  // secondsToMs absorbs the non-finite / overflow guard (util.ts).
-  return {
-    utilization: clamp01(percent / 100),
-    resetAt: secondsToMs(Number(resetSecRaw)),
-  }
+/** used-percent is 0..100 (divisor 100); reset-at is epoch SECONDS. */
+const HEADER_SPEC: WindowPairHeaderSpec = {
+  hourlyUtil: 'x-codex-primary-used-percent',
+  hourlyReset: 'x-codex-primary-reset-at',
+  weeklyUtil: 'x-codex-secondary-used-percent',
+  weeklyReset: 'x-codex-secondary-reset-at',
+  divisor: 100,
 }
 
 /**
  * Parse usage from Codex response headers (x-codex-{primary,secondary}-*).
- * primary = ~5h window (hourly), secondary = weekly window.
- * used-percent is 0..100; reset-at is epoch seconds.
+ * primary = ~5h window (hourly), secondary = weekly window. The parse itself
+ * (null-short-circuit, "no capturedAt", "`{}` collapses to null") lives in the
+ * shared `parseWindowPairHeaders` — only the header names and the percent
+ * scale are Codex-specific.
  */
 export function parseUsageHeaders(
   headers: Headers,
 ): Partial<UsageSnapshot> | null {
-  const p = headers.get('x-codex-primary-used-percent')
-  const s = headers.get('x-codex-secondary-used-percent')
-  if (p === null && s === null) return null
-
-  // Deliberately NO `capturedAt` (mirrors the Anthropic sibling): the sole
-  // production consumer, `applyUsagePartial` (fetch.ts), stamps its own
-  // timestamp only when a weekly window arrived — the staleness-gate contract.
-  const out: Partial<UsageSnapshot> = {}
-  // Short-circuit before `headers.get('...reset-at')` when the matching
-  // percent header is missing — the map lookup would be wasted work on every
-  // response that reported only one of the two windows, and it keeps
-  // `windowFromPercent` free of a dead null branch (mirrors the Anthropic
-  // sibling).
-  const hourly =
-    p === null
-      ? null
-      : windowFromPercent(p, headers.get('x-codex-primary-reset-at'))
-  const weekly =
-    s === null
-      ? null
-      : windowFromPercent(s, headers.get('x-codex-secondary-reset-at'))
-  if (hourly) out.hourly = hourly
-  if (weekly) out.weekly = weekly
-  // Headers were present but NEITHER window parsed: return null, not a truthy
-  // empty `{}` (mirrors the Anthropic sibling; "null = nothing usable").
-  return hourly || weekly ? out : null
+  return parseWindowPairHeaders(headers, HEADER_SPEC)
 }
 
 /**

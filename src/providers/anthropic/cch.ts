@@ -12,8 +12,13 @@ function messageText({ content }: Message): string {
   if (typeof content === 'string') return content
 
   if (Array.isArray(content)) {
-    const textBlock = content.find((block) => block.type === 'text')
-    if (textBlock?.text) return textBlock.text
+    // Closure-free loop (not Array.find): this runs once per Anthropic request
+    // via rewriteRequestBody — same hot-path convention as selectAccount /
+    // findPinned. Semantics preserved exactly: the FIRST text-type block
+    // decides (a later block's text must not win when the first one is empty).
+    for (const block of content) {
+      if (block.type === 'text') return block.text || ''
+    }
   }
 
   return ''
@@ -38,15 +43,22 @@ export function computeVersionSuffix(
 
 /**
  * Build the complete billing header string for insertion into system[0], or
- * null when no user-role message exists (the single `find` here is both the
- * has-user-message gate and the text-extraction source — one prefix scan).
+ * null when no user-role message exists (the single prefix scan here is both
+ * the has-user-message gate and the text-extraction source).
  * A user message that exists but yields empty text still produces a header.
+ * Closure-free loop (not Array.find) — runs once per Anthropic request.
  */
 export function buildBillingHeaderValue(
   messages: Message[],
   entrypoint: string,
 ): string | null {
-  const userMsg = messages.find((message) => message.role === 'user')
+  let userMsg: Message | undefined
+  for (const message of messages) {
+    if (message.role === 'user') {
+      userMsg = message
+      break
+    }
+  }
   if (!userMsg) return null
 
   const text = messageText(userMsg)

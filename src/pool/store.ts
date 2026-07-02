@@ -77,19 +77,6 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Row-level trust boundary for the user-editable pool file. `Array.isArray`
- * alone trusts each row wholesale, but the README invites hand-editing — and a
- * `null` element or a row missing `usage` throws a TypeError inside
- * `selectForSession`, which runs OUTSIDE the try in `createLoadBalancedFetch`,
- * failing EVERY request (and `buildStatus`, so the dashboard too) until the
- * user repairs the file by hand. Drop non-object rows and default the fields
- * the scheduler dereferences unconditionally: `usage` (→ `emptyUsage()`),
- * `usage.capturedAt` (non-number → `NaN` comparisons that suppress usage
- * seeding forever), and `cooldownUntil` (non-number → `Math.max(undefined, …)`
- * persists `NaN` → JSON `null`). `mutatePool` writes the normalized pool back,
- * so the file self-heals on the next bookkeeping write.
- */
-/**
  * Heal a hand-edited usage window shape. A window missing a numeric
  * `utilization` is unusable — map it to `null` (the same "malformed window is
  * unusable" rule the providers' `endpointWindow` helpers apply). A usable
@@ -107,6 +94,19 @@ function normalizeWindow(w: unknown): UsageWindow | null {
   return win as UsageWindow
 }
 
+/**
+ * Row-level trust boundary for the user-editable pool file. `Array.isArray`
+ * alone trusts each row wholesale, but the README invites hand-editing — and a
+ * `null` element or a row missing `usage` throws a TypeError inside
+ * `selectForSession`, which runs OUTSIDE the try in `createLoadBalancedFetch`,
+ * failing EVERY request (and `buildStatus`, so the dashboard too) until the
+ * user repairs the file by hand. Drop non-object rows and default the fields
+ * the scheduler dereferences unconditionally: `usage` (→ `emptyUsage()`),
+ * `usage.capturedAt` (non-number → `NaN` comparisons that suppress usage
+ * seeding forever), and `cooldownUntil` (non-number → `Math.max(undefined, …)`
+ * persists `NaN` → JSON `null`). `mutatePool` writes the normalized pool back,
+ * so the file self-heals on the next bookkeeping write.
+ */
 function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
   const accounts: PoolAccount[] = []
   for (const row of rows) {

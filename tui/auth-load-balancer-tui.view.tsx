@@ -185,10 +185,21 @@ function deleteFromPool(id: string): void {
   })
 }
 
-/** Normalize a raw (loosely-typed) pool account into the strict shape the shared scorer reads. */
+/**
+ * Normalize a raw (loosely-typed) pool account into the strict shape the shared
+ * scorer reads. The pool file is user-editable and read RAW here (the server
+ * normalizes at its own read boundary — `normalizeWindow`/`normalizeAccounts`
+ * in src/pool/store.ts), so a hand-edited string `resetAt`/`cooldownUntil`
+ * would otherwise survive `?? 0` into the scorer and poison its numeric
+ * comparisons (`isWindowExpired`, `stateOf`'s `> now`) until the server heals
+ * the file — guard with typeof, not just nullish.
+ */
 function toScoreWindow(w: UsageWindow | null | undefined): ScoreWindow | null {
   return w && typeof w.utilization === 'number'
-    ? { utilization: w.utilization, resetAt: w.resetAt ?? 0 }
+    ? {
+        utilization: w.utilization,
+        resetAt: typeof w.resetAt === 'number' ? w.resetAt : 0,
+      }
     : null
 }
 function toScore(a: PoolAccount): ScoreAccount {
@@ -197,7 +208,7 @@ function toScore(a: PoolAccount): ScoreAccount {
       hourly: toScoreWindow(a.usage?.hourly),
       weekly: toScoreWindow(a.usage?.weekly),
     },
-    cooldownUntil: a.cooldownUntil ?? 0,
+    cooldownUntil: typeof a.cooldownUntil === 'number' ? a.cooldownUntil : 0,
     disabledReason: a.disabledReason ?? null,
   }
 }
@@ -206,7 +217,11 @@ function pct(u: number | null | undefined): string {
   return typeof u === 'number' ? `${Math.round(u * 100)}%` : '-'
 }
 function until(resetAt: number | undefined, now: number): string {
-  if (!resetAt || resetAt <= now) return '-'
+  // typeof guard, not just truthiness: this reads the RAW pool-file value
+  // (see the callers' "deliberately stays on the RAW resetAt" note), so a
+  // hand-edited string (`"2026-01-01"`) would make `resetAt - now` NaN and
+  // render the literal "NaNd" every poll until the server heals the file.
+  if (typeof resetAt !== 'number' || resetAt <= now) return '-'
   // Mirror the server's `relTime` (src/status.ts) semantics: floor minutes at 1
   // (a sub-30s future reset must not render "0m" — '-' is reserved for elapsed)
   // and FLOOR the day figure (36h is "1d", not "2d") so the TUI bar can never

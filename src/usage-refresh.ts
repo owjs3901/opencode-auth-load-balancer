@@ -97,14 +97,28 @@ export async function refreshUsageInBackground(
             // an out-of-band quota reset) must not erase a previously seen
             // anchor — preserve it (rolled forward) so the scheduler keeps
             // ranking the account by its REAL, possibly imminent reset.
+            //
+            // A `null` window here means PRESENT-but-MALFORMED: both providers'
+            // `endpointWindow` return null only for a non-finite/non-number
+            // utilization (a genuinely ABSENT window maps to `{0, 0}`), exactly
+            // so the scheduler does not read garbage as "full headroom". Honor
+            // that contract on merge: keep the stored last-known window instead
+            // of erasing it. `capturedAt` is weekly-scoped (types.ts) — a failed
+            // weekly refresh must not stamp freshness, or the re-poll that
+            // would heal it is suppressed for SEED_TTL_MS.
             if (stored)
               stored.usage = {
-                ...snapshot,
-                weekly: preserveWeeklyAnchor(
-                  snapshot.weekly,
-                  stored.usage.weekly,
-                  now,
-                ),
+                hourly: snapshot.hourly ?? stored.usage.hourly,
+                weekly:
+                  snapshot.weekly === null
+                    ? stored.usage.weekly
+                    : preserveWeeklyAnchor(
+                        snapshot.weekly,
+                        stored.usage.weekly,
+                        now,
+                      ),
+                capturedAt:
+                  snapshot.weekly === null ? stored.usage.capturedAt : now,
               }
           })
         }

@@ -435,7 +435,15 @@ export function createLoadBalancedFetch(
             waitableCooldownIds,
           )
           if (resumeAt !== null && resumeAt <= waitDeadline) {
-            await sleepAbortable(resumeAt - now, init?.signal ?? undefined)
+            // Fresh Date.now(), NOT the loop-start `now`: that was captured
+            // before the serialized pool read and the selection scan (plus a
+            // whole round of attempts), so sleeping `resumeAt - now` would
+            // overshoot the cooldown by that elapsed I/O time. Negative
+            // durations clamp to an immediate wake inside sleepAbortable.
+            await sleepAbortable(
+              resumeAt - Date.now(),
+              init?.signal ?? undefined,
+            )
             tried.clear()
             waitableCooldownIds.clear()
             continue

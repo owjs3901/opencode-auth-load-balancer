@@ -384,6 +384,22 @@ describe('point 3: session affinity (prompt-cache stickiness)', () => {
     const sel = sessionPick(pool, 's:sess1', new Set(['b']))
     expect(sel?.account.id).toBe('a')
   })
+
+  test('a stale CROSS-PROVIDER pin is ignored (fresh pick, not sticky)', () => {
+    // Locks the `a.providerID === providerID` conjunct in findPinned: a pool
+    // file may carry a pin to an account of a DIFFERENT provider (e.g. an
+    // older, un-namespaced session-key scheme). Without the guard, findPinned
+    // would resolve the openai account for an anthropic request and re-serve
+    // the cross-provider pin; deleting the conjunct must fail this test.
+    const o = account('o', { providerID: 'openai', weekly: win(0.1, 3 * DAY) })
+    const a = account('a', { weekly: win(0.6, 7 * DAY) })
+    const pool = poolOf([o, a], {
+      's:x': { accountId: 'o', updatedAt: NOW },
+    })
+    const sel = sessionPick(pool, 's:x')
+    expect(sel?.account.id).toBe('a')
+    expect(sel?.sticky).toBe(false)
+  })
 })
 
 describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () => {

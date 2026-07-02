@@ -68,8 +68,12 @@ export async function refreshUsageInBackground(
       const stale =
         account.usage.capturedAt === 0 ||
         now - account.usage.capturedAt > SEED_TTL_MS
-      const polledRecently = (lastPoll.get(account.id) ?? 0) > now - SEED_TTL_MS
-      if (!stale || polledRecently) return
+      // Check `stale` FIRST: in the dominant steady state (usage freshly
+      // captured from response headers) it is false, and the `lastPoll` Map
+      // lookup would be dead weight on the per-request hot path. Same
+      // short-circuit contract as the old `if (!stale || polledRecently)`.
+      if (!stale) return
+      if ((lastPoll.get(account.id) ?? 0) > now - SEED_TTL_MS) return
       lastPoll.set(account.id, now)
       try {
         await ensureAccessToken(adapter, account, now)

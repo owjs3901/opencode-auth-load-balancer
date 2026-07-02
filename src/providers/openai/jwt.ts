@@ -47,7 +47,21 @@ export function extractAccountId(idToken: string): string | undefined {
   return undefined
 }
 
+/**
+ * One-slot memo keyed by the raw access token (same pattern as `cachedBetas` /
+ * `cachedBase` in `anthropic/transform.ts`): for a pool row bootstrapped with
+ * `accountId: null`, `resolveAccountId` runs per attempt of every Codex request
+ * (via `applyAuth`) yet the decode is fully determined by the `access` string,
+ * which is constant between token refreshes. A rotated token misses the memo
+ * and re-decodes, so it self-invalidates. Stored `accountId` never touches it.
+ */
+let cachedDecode: { access: string; id: string | undefined } | null = null
+
 /** Stored ChatGPT account id, or one decoded from the access-token JWT. */
 export function resolveAccountId(account: PoolAccount): string | undefined {
-  return account.accountId ?? extractAccountId(account.access)
+  if (account.accountId != null) return account.accountId
+  if (cachedDecode?.access === account.access) return cachedDecode.id
+  const id = extractAccountId(account.access)
+  cachedDecode = { access: account.access, id }
+  return id
 }

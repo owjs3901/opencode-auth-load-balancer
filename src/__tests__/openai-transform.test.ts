@@ -43,6 +43,20 @@ describe('applyAuth', () => {
     })
     expect(h.get('chatgpt-account-id')).toBe('acc_jwt')
   })
+  test('memoizes the JWT accountId decode across attempts with the same access token', () => {
+    // Repeat call with the same access token exercises the one-slot memo hit
+    // path in resolveAccountId (same pattern as the mergeBetaHeaders memo);
+    // a DIFFERENT token must miss the memo and re-decode.
+    const account = { ...acct(null), access: jwt({ chatgpt_account_id: 'm1' }) }
+    const h1 = new Headers()
+    applyAuth(h1, account)
+    const h2 = new Headers()
+    applyAuth(h2, account)
+    expect(h2.get('chatgpt-account-id')).toBe('m1')
+    const h3 = new Headers()
+    applyAuth(h3, { ...account, access: jwt({ chatgpt_account_id: 'm2' }) })
+    expect(h3.get('chatgpt-account-id')).toBe('m2')
+  })
 })
 
 describe('rewriteUrl', () => {

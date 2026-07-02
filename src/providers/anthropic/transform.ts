@@ -231,7 +231,11 @@ function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
 
   if (typeof system === 'string') {
     const sanitized = sanitizeSystemText(system)
-    if (sanitized === CLAUDE_CODE_IDENTITY) return [identityBlock]
+    // Empty after sanitizing (the whole prompt was branded/removed content):
+    // drop it — the Anthropic API rejects text blocks shorter than 1 char, and
+    // an empty block carries zero information. Same treatment as identity-equal.
+    if (sanitized === CLAUDE_CODE_IDENTITY || sanitized === '')
+      return [identityBlock]
     return [identityBlock, { type: 'text', text: sanitized }]
   }
 
@@ -246,26 +250,35 @@ function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
     // Identity dedup, symmetric with the string branch above and the array
     // branch below: a single object already carrying the identity text must
     // not have a second identity block prepended. Keep the caller's extra
-    // fields (array-branch semantics).
+    // fields (array-branch semantics). An EMPTY sanitized block is dropped
+    // outright (Anthropic 400s on zero-length text blocks).
     if (block.text === CLAUDE_CODE_IDENTITY) return [block]
+    if (block.text === '') return [identityBlock]
     return [identityBlock, block]
   }
 
   if (!Array.isArray(system)) return [identityBlock]
 
-  const sanitized: SystemBlock[] = system.map((item: unknown) => {
-    if (typeof item === 'string')
-      return { type: 'text', text: sanitizeSystemText(item) }
-    if (
-      isRecord(item) &&
-      item.type === 'text' &&
-      typeof item.text === 'string'
-    ) {
-      return { ...item, type: 'text', text: sanitizeSystemText(item.text) }
-    }
-    return { type: 'text', text: String(item) }
-  })
+  const sanitized: SystemBlock[] = system
+    .map((item: unknown): SystemBlock => {
+      if (typeof item === 'string')
+        return { type: 'text', text: sanitizeSystemText(item) }
+      if (
+        isRecord(item) &&
+        item.type === 'text' &&
+        typeof item.text === 'string'
+      ) {
+        return { ...item, type: 'text', text: sanitizeSystemText(item.text) }
+      }
+      return { type: 'text', text: String(item) }
+    })
+    // Drop blocks whose text sanitized away entirely — the Anthropic API
+    // rejects zero-length text blocks (min length 1), and they carry nothing.
+    // Filter BEFORE the identity dedup so a leading empty block can't mask an
+    // identity block that follows it.
+    .filter((block) => block.text !== '')
 
+  if (sanitized.length === 0) return [identityBlock]
   if (sanitized[0]?.text === CLAUDE_CODE_IDENTITY) return sanitized
   return [identityBlock, ...sanitized]
 }

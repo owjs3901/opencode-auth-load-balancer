@@ -213,6 +213,56 @@ describe('rewriteRequestBody', () => {
     )
   })
 
+  test('drops a string system that sanitizes to empty (Anthropic rejects empty text blocks)', () => {
+    const out = JSON.parse(
+      rewriteRequestBody(
+        JSON.stringify({ system: 'You are OpenCode, a coding agent.' }),
+      ),
+    )
+    expect(out.system).toEqual([{ type: 'text', text: CLAUDE_CODE_IDENTITY }])
+  })
+
+  test('drops a record system whose text sanitizes to empty', () => {
+    const out = JSON.parse(
+      rewriteRequestBody(
+        JSON.stringify({
+          system: {
+            type: 'text',
+            text: 'You are OpenCode, a coding agent.',
+            extra: 'x',
+          },
+        }),
+      ),
+    )
+    expect(out.system).toEqual([{ type: 'text', text: CLAUDE_CODE_IDENTITY }])
+  })
+
+  test('filters array system items that sanitize to empty, keeping the rest', () => {
+    const out = JSON.parse(
+      rewriteRequestBody(
+        JSON.stringify({
+          system: [
+            'You are OpenCode, a coding agent.',
+            { type: 'text', text: 'keep me' },
+          ],
+        }),
+      ),
+    )
+    expect(out.system).toEqual([
+      { type: 'text', text: CLAUDE_CODE_IDENTITY },
+      { type: 'text', text: 'keep me' },
+    ])
+  })
+
+  test('returns only the identity when EVERY array system item sanitizes to empty', () => {
+    const out = JSON.parse(
+      rewriteRequestBody(
+        JSON.stringify({ system: ['You are OpenCode, a coding agent.'] }),
+      ),
+    )
+    expect(out.system).toEqual([{ type: 'text', text: CLAUDE_CODE_IDENTITY }])
+  })
+
   test('rewrites EVERY occurrence of a branded text-replacement phrase', () => {
     // The branded fingerprint phrase appears twice in the same paragraph. With
     // the first-occurrence `.replace`, the second copy survived and could trip

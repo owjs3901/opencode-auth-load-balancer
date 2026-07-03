@@ -1,3 +1,5 @@
+import { MAX_QUOTA_RESET_BOUND_MS } from './providers/http-timeouts'
+
 /** Shared no-op for swallowing rejected promises / throwaway callbacks. */
 export const ignore = (): undefined => undefined
 
@@ -152,20 +154,8 @@ export function memoOne<K, V>(compute: (key: K) => V): (key: K) => V {
 }
 
 /**
- * Upper bound (ms) on how far past the current wall clock a parsed reset
- * timestamp may plausibly sit. A real quota window resets at most weekly, so
- * anything further out is a broken server/proxy clock, not a real reset.
- * Mirrors `RETRY_AFTER_MAX_MS` (fetch.ts) and `TIER_RESET_MAX_MS`
- * (providers/anthropic/fallback.ts), both single-sourced from
- * `MAX_QUOTA_RESET_BOUND_MS` (providers/http-timeouts.ts) — that constant is
- * duplicated here (not imported) so util.ts stays dependency-free of
- * `providers/` (same precedent as `WEEK_MS` in score-core.ts).
- */
-const MAX_RESET_FUTURE_MS = 8 * 24 * 60 * 60 * 1000
-
-/**
  * True when `candidateMs` (an absolute epoch-ms reset timestamp) sits further
- * in the future than `MAX_RESET_FUTURE_MS` past the real wall clock — used to
+ * in the future than `MAX_QUOTA_RESET_BOUND_MS` past the real wall clock — used to
  * reject a FINITE-but-absurd reset (e.g. a corrupted proxy emitting
  * `99999999999` seconds ≈ year 5138) that would otherwise silently become the
  * account's `resetAt`, permanently near-zero-ranking it in `weeklyUrgency`
@@ -183,7 +173,7 @@ const MAX_RESET_FUTURE_MS = 8 * 24 * 60 * 60 * 1000
  * elsewhere (`isWindowExpired`), not a broken-clock symptom.
  */
 export function isImplausiblyFarFuture(candidateMs: number): boolean {
-  return candidateMs - Date.now() > MAX_RESET_FUTURE_MS
+  return candidateMs - Date.now() > MAX_QUOTA_RESET_BOUND_MS
 }
 
 /**

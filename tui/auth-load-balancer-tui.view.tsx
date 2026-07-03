@@ -241,7 +241,7 @@ function toScoreWindow(w: UsageWindow | null | undefined): ScoreWindow | null {
   return w && isFiniteNumber(w.utilization)
     ? {
         utilization: w.utilization,
-        resetAt: isFiniteNumber(w.resetAt) ? w.resetAt : 0,
+        resetAt: isFiniteNumber(w.resetAt) && w.resetAt >= 0 ? w.resetAt : 0,
       }
     : null
 }

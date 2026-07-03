@@ -91,7 +91,8 @@ function normalizeWindow(w: unknown): UsageWindow | null {
   if (!isPlainObject(w)) return null
   const win = w as Partial<UsageWindow>
   if (!Number.isFinite(win.utilization)) return null
-  if (!Number.isFinite(win.resetAt)) win.resetAt = 0
+  if (!Number.isFinite(win.resetAt) || (win.resetAt as number) < 0)
+    win.resetAt = 0
   return win as UsageWindow
 }
 

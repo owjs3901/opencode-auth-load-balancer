@@ -268,6 +268,34 @@ describe('pool store', () => {
     expect(rendered).toContain('50%') // the healed weekly window still renders
   })
 
+  test("readPool heals a negative resetAt to 0 (must not desync weeklyUrgency's elapsed-anchor branch)", async () => {
+    // `resetAt < 0` is finite, so pre-fix `Number.isFinite` alone let it
+    // through unhealed. `resetAt === 0` is the documented "unknown reset"
+    // sentinel `weeklyUrgency` uses to pick the "assume imminent" branch; a
+    // surviving negative value instead took the elapsed-anchor roll-forward
+    // branch, silently mis-ranking the account. Mirrors the sibling
+    // `modelCooldownsUntil` heal (`until <= 0` deleted) a few lines below in
+    // the same file.
+    const edited = JSON.parse(JSON.stringify(account())) as {
+      usage: Record<string, unknown>
+    }
+    edited.usage.weekly = { utilization: 0.5, resetAt: -5000 }
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [edited],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const pool = await readPool()
+    expect(pool.accounts[0]?.usage.weekly).toEqual({
+      utilization: 0.5,
+      resetAt: 0,
+    })
+  })
+
   test('readPool heals a non-number expires to 0 (forces a repairing refresh)', async () => {
     // A hand-edited `"expires": "never"` makes needsRefresh's
     // `expires - skew <= now` compare NaN -> false forever: the stale access

@@ -566,8 +566,9 @@ export function createLoadBalancedFetch(
         requestBytes,
       )
       if (!selection) {
-        // No account exists for this provider at all: return a clean 401 rather than
-        // leaking the SDK's empty x-api-key through the global fetch (see
+        // No usable account exists for this provider (none registered, or
+        // every one is disabled): return a clean 401 rather than leaking the
+        // SDK's empty x-api-key through the global fetch (see
         // noUsableAccountResponse).
         if (tried.size === 0) return noUsableAccountResponse(adapter.id)
 

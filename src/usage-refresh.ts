@@ -10,6 +10,17 @@ const SEED_TTL_MS = 5 * 60 * 1000
 const lastPoll = new Map<string, number>()
 
 /**
+ * Test-only window into the module-private `lastPoll` throttle map. Never
+ * imported by production code — only by usage-refresh tests that need to
+ * assert on the prune's exact membership (a net-neutral delete+re-add cycle
+ * cannot be distinguished by fetchUsage call counts alone, since a freshly
+ * added account never collides with a stale id).
+ */
+export function _lastPollIdsForTests(): Set<string> {
+  return new Set(lastPoll.keys())
+}
+
+/**
  * Best-effort: seed/refresh usage for accounts whose WEEKLY snapshot is missing or
  * stale (`capturedAt` is stamped only when a weekly window arrives — see
  * `applyUsagePartial` in fetch.ts), via the provider's dedicated usage endpoint.
@@ -34,25 +45,6 @@ export async function refreshUsageInBackground(
   poolSnapshot?: PoolFile,
 ): Promise<void> {
   const pool = poolSnapshot ?? (await readPool())
-  // Prune `lastPoll` entries for accounts that no longer exist in the pool —
-  // TUI-sidebar deletes (`deleteFromPool` in `auth-load-balancer-tui.view.tsx`)
-  // remove the row but cannot reach into this module's throttle map, and
-  // `addAccount` coins a fresh `randomUUID` per add, so a deleted account's id
-  // would otherwise linger in `lastPoll` forever (a bounded but real leak —
-  // never iterated for prune, never collected). Use `pool.accounts` (the FULL
-  // account list — NOT the per-provider stale subset the loop below collects)
-  // for the alive set so a *disabled* row keeps its throttle slot —
-  // re-enabling it shouldn't immediately re-poll the usage endpoint and risk
-  // its own rate limit. The `> pool.accounts.length` gate keeps the
-  // steady-state hot path (no deletions) free; comparing against a
-  // per-provider count would have misfired on every call in a mixed pool
-  // (lastPoll spans BOTH providers but such a count narrows to one), running
-  // the idempotent prune loop pointlessly. The prune itself is
-  // O(lastPoll.size), bounded by the historical account count.
-  if (lastPoll.size > pool.accounts.length) {
-    const alive = new Set(pool.accounts.map((a) => a.id))
-    for (const id of lastPoll.keys()) if (!alive.has(id)) lastPoll.delete(id)
-  }
   // Collect the stale, poll-eligible subset in ONE synchronous loop — provider
   // filter, staleness gate, and `lastPoll` throttle fused. This runs once per
   // request (fire-and-forget from the fetch retry loop), and in the dominant
@@ -62,8 +54,30 @@ export async function refreshUsageInBackground(
   // every closure to bail at its staleness gate. Now nothing allocates unless
   // an account is genuinely stale. The `lastPoll.set` stays here — before any
   // await — so re-entrant concurrent calls still short-circuit on the throttle.
+  //
+  // The SAME pass also builds an alive-id Set — but ONLY when `lastPoll`
+  // already has entries, so the very first call (no throttle history yet)
+  // pays nothing extra — used below to prune `lastPoll` entries for accounts
+  // that no longer exist. TUI-sidebar deletes (`deleteFromPool` in
+  // `auth-load-balancer-tui.view.tsx`) remove the row but cannot reach into
+  // this module's throttle map, and `addAccount` coins a fresh `randomUUID`
+  // per add, so a deleted account's id would otherwise linger in `lastPoll`
+  // forever (a bounded but real leak). Pruning by exact Set membership
+  // (rather than comparing `lastPoll.size` against `pool.accounts.length`)
+  // also catches a delete-then-add cycle that keeps the account COUNT
+  // constant — e.g. the TUI sidebar's Delete followed by a fresh login —
+  // where a size-only comparison can never detect the churn since both sides
+  // stay equal. Every account (including the openai `continue` below) is
+  // added to the alive set BEFORE any `continue`, so it costs no extra
+  // iteration over `pool.accounts`; disabled rows are included too, so a
+  // disabled account keeps its throttle slot — re-enabling it shouldn't
+  // immediately re-poll the usage endpoint and risk its own rate limit. The
+  // final prune loop is O(lastPoll.size), bounded by the historical account
+  // count, and runs once after this loop instead of gating on a size compare.
+  const aliveIds = lastPoll.size > 0 ? new Set<string>() : undefined
   let stale: PoolAccount[] | undefined
   for (const account of pool.accounts) {
+    aliveIds?.add(account.id)
     if (account.providerID !== adapter.id || account.disabledReason) continue
     // Check staleness FIRST: in the steady state it is false, and the
     // `lastPoll` Map lookup would be dead weight on the per-request hot path.
@@ -76,6 +90,9 @@ export async function refreshUsageInBackground(
     lastPoll.set(account.id, now)
     stale ??= []
     stale.push(account)
+  }
+  if (aliveIds) {
+    for (const id of lastPoll.keys()) if (!aliveIds.has(id)) lastPoll.delete(id)
   }
   if (!stale) return
   // Parallelize across the stale subset: per-account refresh locks in

@@ -29,7 +29,10 @@ import {
   type TokenSet,
   type UsageSnapshot,
 } from '../types'
-import { refreshUsageInBackground } from '../usage-refresh'
+import {
+  _lastPollIdsForTests,
+  refreshUsageInBackground,
+} from '../usage-refresh'
 import { sleep } from '../util'
 import { testAccount } from './fixtures/account'
 import { fakeAdapter } from './fixtures/adapter'
@@ -1765,6 +1768,42 @@ describe('usage-refresh', () => {
     await refreshUsageInBackground(adapter, t)
     // 2nd + 3rd same-`t` calls short-circuit via polledRecently — throttle intact.
     expect(fetched).toBe(2)
+  })
+
+  test('prunes a lastPoll entry left by a net-neutral delete+re-add cycle', async () => {
+    // Regression for the net-neutral-churn gap: the OLD gate
+    // `lastPoll.size > pool.accounts.length` only fires on a net DECREASE in
+    // account count. A delete-then-add cycle that keeps the account COUNT
+    // constant (e.g. the TUI sidebar's Delete followed by a fresh login) left
+    // `lastPoll.size` exactly equal to `pool.accounts.length` again, so the
+    // deleted account's stale throttle entry was never reclaimed. Asserted
+    // directly via `_lastPollIdsForTests` — a fetchUsage-call-count assertion
+    // alone cannot distinguish this, since a freshly added account never
+    // collides with the deleted one's id and gets polled either way.
+    const gone = account({ providerID: 'anthropic', usage: emptyUsage() })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...gone })
+    })
+    const adapter = fakeAdapter({
+      fetchUsage: async () => ({
+        hourly: null,
+        weekly: null,
+        capturedAt: Date.now(),
+      }),
+    })
+    const t = Date.now()
+    await refreshUsageInBackground(adapter, t) // seeds lastPoll with `gone`'s id
+    expect(_lastPollIdsForTests().has(gone.id)).toBe(true)
+
+    // Net-neutral churn: delete `gone`, add a fresh replacement — the account
+    // COUNT stays 1 either way, so the old size-comparison gate never fires.
+    const fresh = account({ providerID: 'anthropic', usage: emptyUsage() })
+    await mutatePool((pool) => {
+      pool.accounts = [{ ...fresh }]
+    })
+    await refreshUsageInBackground(adapter, t)
+    expect(_lastPollIdsForTests().has(gone.id)).toBe(false) // reclaimed
+    expect(_lastPollIdsForTests().has(fresh.id)).toBe(true)
   })
 
   test('uses a passed pool snapshot instead of re-reading the pool file', async () => {

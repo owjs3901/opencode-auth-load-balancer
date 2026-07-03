@@ -8,7 +8,7 @@ import {
   type SessionAssignment,
   type UsageWindow,
 } from '../types'
-import { ignore, isPlainObject, sleep } from '../util'
+import { clamp01, ignore, isPlainObject, sleep } from '../util'
 import { type LockOptions, withLock as withFileLock } from './lock'
 import { poolFilePath } from './paths'
 
@@ -84,13 +84,23 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
  * window whose `resetAt` is not a number (deleted, or `"2026-01-01"`) would
  * otherwise flow into `relTime`'s `Math.round((undefined - now) / 60_000)`
  * and render the literal string `NaNdNaNh` in the status tool/CLI dashboards —
- * coerce it to `0` ("no reset scheduled"). Scoring is already safe
- * (`clamp01`/`?? 0` absorb these), so this is purely a display/type boundary.
+ * coerce it to `0` ("no reset scheduled"). `scoreAccount`/`isExhausted`/
+ * `isAvailable` are already safe regardless (they funnel through `utilOf`,
+ * which itself calls `clamp01`) — but the degraded-fallback tie-break in
+ * `selectAccount` (`scheduler/select.ts`) and the dashboard ranking in
+ * `buildStatus` (`status.ts`) both deliberately read the RAW stored
+ * `utilization` (not `utilOf`) for their "least-bad cooling-down account"
+ * comparison, so an out-of-range hand-edited value (e.g. `-3`) would win that
+ * tie-break ahead of a genuinely healthier account. Clamp here too so every
+ * reader sees the same in-range value; a no-op for anything the server itself
+ * ever writes (`headerWindow`/`endpointWindow` already `clamp01` before
+ * storing).
  */
 function normalizeWindow(w: unknown): UsageWindow | null {
   if (!isPlainObject(w)) return null
   const win = w as Partial<UsageWindow>
   if (!Number.isFinite(win.utilization)) return null
+  win.utilization = clamp01(win.utilization as number)
   if (!Number.isFinite(win.resetAt) || (win.resetAt as number) < 0)
     win.resetAt = 0
   return win as UsageWindow

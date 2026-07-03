@@ -296,6 +296,74 @@ describe('pool store', () => {
     })
   })
 
+  test('readPool clamps an out-of-range utilization into [0,1] (stops raw magnitude from winning the degraded-fallback tie-break)', async () => {
+    // A hand-edited weekly.utilization outside [0,1] passed `Number.isFinite`
+    // unhealed pre-fix. `scoreAccount`/`isExhausted`/`isAvailable` are safe
+    // regardless (they funnel through `utilOf`'s own `clamp01`), but the
+    // degraded-fallback tie-break in `selectAccount` (scheduler/select.ts)
+    // and the dashboard ranking in `buildStatus` (status.ts) both
+    // deliberately read the RAW stored value for their "least-bad
+    // cooling-down account" comparison — so the invariant must hold at the
+    // normalizer, not just at those two call sites.
+    const negative = JSON.parse(JSON.stringify(account())) as {
+      usage: Record<string, unknown>
+    }
+    negative.usage.weekly = { utilization: -3, resetAt: 0 }
+    const over = JSON.parse(JSON.stringify(account())) as {
+      usage: Record<string, unknown>
+    }
+    over.usage.weekly = { utilization: 5, resetAt: 0 }
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [negative, over],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const pool = await readPool()
+    expect(pool.accounts[0]?.usage.weekly).toEqual({
+      utilization: 0,
+      resetAt: 0,
+    })
+    expect(pool.accounts[1]?.usage.weekly).toEqual({
+      utilization: 1,
+      resetAt: 0,
+    })
+
+    // selectAccount-level proof: two accounts hand-edited to out-of-range
+    // NEGATIVE weekly utilization, both cooling down (unavailable). Pre-fix,
+    // raw ordering picked whichever was MORE negative (-3 < -0.5, so the
+    // second-checked row would win purely because it was more corrupted).
+    // Post-fix both clamp to the same in-range value (0), so the tie
+    // resolves to the first-checked candidate — the same stable rule every
+    // other tie in this comparator already follows — instead of favoring
+    // whichever raw number happened to be the most extreme.
+    const now = Date.now()
+    const firstChecked = JSON.parse(
+      JSON.stringify(account({ cooldownUntil: now + 60_000 })),
+    ) as { usage: Record<string, unknown> }
+    firstChecked.usage.weekly = { utilization: -0.5, resetAt: 0 }
+    const secondChecked = JSON.parse(
+      JSON.stringify(account({ cooldownUntil: now + 60_000 })),
+    ) as { usage: Record<string, unknown> }
+    secondChecked.usage.weekly = { utilization: -3, resetAt: 0 }
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [firstChecked, secondChecked],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const degradedPool = await readPool()
+    const selection = selectAccount(degradedPool.accounts, 'anthropic', now)
+    expect(selection?.degraded).toBe(true)
+    expect(selection?.account.id).toBe(degradedPool.accounts[0]?.id)
+  })
+
   test('readPool heals a non-number expires to 0 (forces a repairing refresh)', async () => {
     // A hand-edited `"expires": "never"` makes needsRefresh's
     // `expires - skew <= now` compare NaN -> false forever: the stale access

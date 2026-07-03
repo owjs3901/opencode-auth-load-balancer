@@ -7,7 +7,7 @@ import {
   type OpencodeAuthGetter,
 } from './accounts'
 import { createLoadBalancedFetch } from './fetch'
-import { notifyOnSwitch, type ToastClient } from './notify'
+import { notifyModelFallback, notifyOnSwitch, type ToastClient } from './notify'
 import { mutatePool, readPool } from './pool/store'
 import { primeInUse } from './prime'
 import { anthropicAdapter } from './providers/anthropic/adapter'
@@ -73,6 +73,15 @@ function buildAuthHook(
         fetch: createLoadBalancedFetch(adapter, {
           onUse: (providerID, account) => {
             void notifyOnSwitch(client, providerID, account)
+          },
+          onModelFallback: (providerID, account, fromModel, toModel) => {
+            void notifyModelFallback(
+              client,
+              providerID,
+              account,
+              fromModel,
+              toModel,
+            )
           },
         }),
       }

@@ -193,6 +193,29 @@ describe('renderStatus', () => {
   test('reports when no accounts are registered', () => {
     expect(renderStatus([], NOW)).toContain('no accounts registered')
   })
+
+  test('an Opus-tier limit annotates the usable state with an opus countdown (never "cooldown")', () => {
+    // The account stays AVAILABLE (Opus auto-downgrades to the fallback; non-Opus
+    // traffic is unaffected), so its state is the usable base ("in use"/"ready")
+    // annotated with when Opus recovers — NOT a whole-account "cooldown" (the bug
+    // that showed every account as cooled down when only Opus was exhausted).
+    const p = pool(
+      [
+        {
+          ...acc({ id: 'op', weekly: win(0.3, 20 * HOUR) }),
+          opusCooldownUntil: NOW + 4 * HOUR,
+        },
+      ],
+      { anthropic: 'op' },
+    )
+    const status = buildStatus(p, NOW)
+    const row = status[0]!.accounts.find((a) => a.id === 'op')!
+    expect(row.available).toBe(true)
+    expect(row.opusCooldownUntil).toBe(NOW + 4 * HOUR)
+    const out = renderStatus(status, NOW)
+    expect(out).toContain('in use · opus 4h0m')
+    expect(out).not.toContain('cooldown')
+  })
 })
 
 describe('readStatus', () => {

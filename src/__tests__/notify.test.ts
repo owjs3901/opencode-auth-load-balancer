@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
-import { notifyOnSwitch, type ToastClient } from '../notify'
+import {
+  notifyModelFallback,
+  notifyOnSwitch,
+  type ToastClient,
+} from '../notify'
 import type { PoolAccount } from '../types'
 import { testAccount } from './fixtures/account'
 
@@ -100,5 +104,61 @@ describe('notifyOnSwitch', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]?.message).toContain('weekly 0%')
     expect(calls[0]?.message).toContain('5h -')
+  })
+})
+
+describe('notifyModelFallback', () => {
+  test('toasts the downgrade once per account+source-model, re-toasting only when the source changes', async () => {
+    const { client, calls } = spyClient()
+    const a = testAccount({ id: 'fb1', label: 'fb1' })
+    await notifyModelFallback(
+      client,
+      'p1',
+      a,
+      'claude-opus-4-7',
+      'claude-sonnet-4-6',
+    )
+    // Same account + same source model on the next turn -> deduped (no re-toast).
+    await notifyModelFallback(
+      client,
+      'p1',
+      a,
+      'claude-opus-4-7',
+      'claude-sonnet-4-6',
+    )
+    // A different source model on the same account -> toasts again.
+    await notifyModelFallback(
+      client,
+      'p1',
+      a,
+      'claude-opus-4-1',
+      'claude-sonnet-4-6',
+    )
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.title).toContain('model fallback')
+    expect(calls[0]?.message).toContain('fb1')
+    expect(calls[0]?.message).toContain('claude-opus-4-7')
+    expect(calls[0]?.message).toContain('claude-sonnet-4-6')
+    expect(calls[1]?.message).toContain('claude-opus-4-1')
+  })
+
+  test('survives a failing toast (best-effort, never affects the request)', async () => {
+    const client: ToastClient = {
+      tui: {
+        showToast: async () => {
+          throw new Error('tui down')
+        },
+      },
+    }
+    await expect(
+      notifyModelFallback(
+        client,
+        'p-fail',
+        testAccount({ id: 'fbz', label: 'fbz' }),
+        'claude-opus-4-7',
+        'claude-sonnet-4-6',
+      ),
+    ).resolves.toBeUndefined()
   })
 })

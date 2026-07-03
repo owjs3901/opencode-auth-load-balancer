@@ -1101,6 +1101,160 @@ describe('load-balanced fetch — edge paths', () => {
   })
 })
 
+describe('Opus model-tier fallback', () => {
+  const OPUS = 'claude-opus-4-7'
+  const SONNET = 'claude-sonnet-4-6' // the built-in default fallback
+  const DAY = 24 * 60 * 60 * 1000
+
+  function opusPost(): { method: 'POST'; body: string } {
+    return {
+      method: 'POST',
+      body: JSON.stringify({ model: OPUS, messages: [] }),
+    }
+  }
+  function spyClient() {
+    const toasts: string[] = []
+    const client: ToastClient = {
+      tui: {
+        showToast: async (o) => {
+          toasts.push(o.body.message)
+          return undefined
+        },
+      },
+    }
+    return { client, toasts }
+  }
+  function opusLimited(now: number, withReset = true): Response {
+    const headers: Record<string, string> = {
+      'anthropic-ratelimit-unified-representative-claim': 'seven_day_opus',
+    }
+    if (withReset)
+      headers['anthropic-ratelimit-unified-reset'] = String(
+        Math.floor((now + 3 * DAY) / 1000),
+      )
+    return new Response('opus limited', { status: 429, headers })
+  }
+
+  test('an Opus-tier 429 downgrades the model and retries the SAME account, without cooling it down', async () => {
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'OPUS_A', access: 'tokA' }))
+    })
+    const models: string[] = []
+    const auths: (string | null)[] = []
+    let n = 0
+    respond = (_url, init) => {
+      n += 1
+      const parsed = JSON.parse(String(init?.body)) as { model: string }
+      models.push(parsed.model)
+      auths.push(
+        new Headers(init?.headers as HeadersInit | undefined).get(
+          'authorization',
+        ),
+      )
+      return n === 1 ? opusLimited(now) : new Response('ok', { status: 200 })
+    }
+    const { client, toasts } = spyClient()
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+    const res = await opts.fetch(
+      'https://api.anthropic.com/v1/messages',
+      opusPost(),
+    )
+    expect(res.status).toBe(200)
+    expect(n).toBe(2) // Opus 429, then the downgraded retry
+    // Same account both attempts; model rewritten Opus → Sonnet on the retry.
+    expect(auths).toEqual(['Bearer tokA', 'Bearer tokA'])
+    expect(models).toEqual([OPUS, SONNET])
+    const a = (await readPool()).accounts.find((x) => x.id === 'OPUS_A')
+    expect(a?.cooldownUntil).toBe(0) // NOT sidelined account-wide
+    expect(a?.opusCooldownUntil ?? 0).toBeGreaterThan(now) // Opus tier persisted
+    // The downgrade is announced, not silent.
+    expect(toasts.some((m) => m.includes(OPUS) && m.includes(SONNET))).toBe(
+      true,
+    )
+  })
+
+  test('a persisted Opus cooldown downgrades the model PROACTIVELY (no rejected round-trip)', async () => {
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({
+          id: 'OPUS_P',
+          access: 'tokP',
+          opusCooldownUntil: now + DAY,
+        }),
+      )
+    })
+    const models: string[] = []
+    let n = 0
+    respond = (_url, init) => {
+      n += 1
+      models.push((JSON.parse(String(init?.body)) as { model: string }).model)
+      return new Response('ok', { status: 200 })
+    }
+    const { client, toasts } = spyClient()
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+    const res = await opts.fetch(
+      'https://api.anthropic.com/v1/messages',
+      opusPost(),
+    )
+    expect(res.status).toBe(200)
+    expect(n).toBe(1) // downgraded up front — no 429 round-trip
+    expect(models).toEqual([SONNET])
+    expect(toasts.some((m) => m.includes(SONNET))).toBe(true)
+  })
+
+  test('a fallback-side 429 (the downgraded retry also fails) cools the account down and rotates', async () => {
+    const now = Date.now()
+    await seedAB(now)
+    let n = 0
+    respond = () => {
+      n += 1
+      if (n === 1) return opusLimited(now) // A: Opus-tier 429 → downgrade
+      if (n === 2) return new Response('still limited', { status: 429 }) // downgraded retry also 429s
+      return new Response('ok', { status: 200 }) // rotate to B
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', opusPost())
+    expect(res.status).toBe(200)
+    expect(n).toBe(3) // A opus-429, A downgraded-429, then B 200
+    const a = (await readPool()).accounts.find((x) => x.id === 'A')
+    // The second 429 was NOT an Opus-tier fallback (fallbackInfo already set),
+    // so it cooled A down account-wide and rotated — legacy behavior resumes.
+    expect(a?.cooldownUntil).toBeGreaterThan(now)
+    expect(a?.opusCooldownUntil ?? 0).toBeGreaterThan(now) // opus reset still recorded
+    expect((await readPool()).lastSelected.anthropic).toBe('B')
+  })
+
+  test('with the fallback DISABLED (empty env) an Opus-tier 429 cools the whole account down', async () => {
+    process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL = ''
+    try {
+      const now = Date.now()
+      await seedAB(now)
+      let n = 0
+      respond = () => {
+        n += 1
+        return n === 1 ? opusLimited(now) : new Response('ok', { status: 200 })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const res = await lb('https://api.anthropic.com/v1/messages', opusPost())
+      expect(res.status).toBe(200)
+      expect(n).toBe(2) // no inline downgrade — A cooled, rotated to B
+      const a = (await readPool()).accounts.find((x) => x.id === 'A')
+      expect(a?.cooldownUntil).toBeGreaterThan(now)
+      expect(a?.opusCooldownUntil ?? 0).toBe(0) // no Opus persistence when disabled
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL
+    }
+  })
+})
+
 describe('toast on switch + status tool', () => {
   test("the loader's fetch toasts the in-use account on a successful request", async () => {
     await mutatePool((pool) => {

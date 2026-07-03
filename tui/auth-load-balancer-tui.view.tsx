@@ -76,6 +76,8 @@ interface PoolAccount {
   label: string
   usage?: { weekly?: UsageWindow | null; hourly?: UsageWindow | null } | null
   cooldownUntil?: number
+  /** epoch ms until the Opus model-tier cap resets (Opus auto-downgrades to the fallback until then). */
+  opusCooldownUntil?: number
   disabledReason?: string | null
 }
 /** Loosely-typed view of the on-disk pool JSON (one shape for reads AND read-modify-writes). */
@@ -275,10 +277,13 @@ function until(resetAt: number | undefined, now: number): string {
 function winPct(w: UsageWindow | null | undefined, now: number): string {
   return pct(displayUtil(toScoreWindow(w), now))
 }
-function stateOf(sa: ScoreAccount, now: number): string {
+function stateOf(sa: ScoreAccount, opusResetAt: number, now: number): string {
   if (sa.disabledReason) return 're-login'
   if (sa.cooldownUntil > now) return 'cooldown'
   if (isExhausted(sa, cfg, now)) return 'full'
+  // An Opus-tier limit keeps the account usable (non-Opus traffic + auto-
+  // downgrade), so it annotates rather than sidelines — mirrors src/status.ts.
+  if (opusResetAt > now) return `opus ${until(opusResetAt, now)}`
   return ''
 }
 
@@ -405,7 +410,14 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           wkReset: until(a.usage?.weekly?.resetAt, now),
           h: pct(displayUtil(sa.usage.hourly, now)),
           hReset: until(a.usage?.hourly?.resetAt, now),
-          state: stateOf(sa, now),
+          // Finiteness-guarded like the other RAW reads above: a hand-edited
+          // `1e999` opusCooldownUntil (Infinity via JSON.parse) would otherwise
+          // render "opus" forever until the server heals the file.
+          state: stateOf(
+            sa,
+            isFiniteNumber(a.opusCooldownUntil) ? a.opusCooldownUntil : 0,
+            now,
+          ),
         }
       })
       return { provider: PROVIDER_NAMES[providerID] ?? providerID, rows }

@@ -26,6 +26,26 @@ export const OAUTH_SCOPES = [
 
 export const TOOL_PREFIX = 'mcp_'
 
+/**
+ * Default target when auto-downgrading an Opus request whose account has hit its
+ * Opus-specific weekly cap (429 with `anthropic-ratelimit-unified-representative-
+ * claim: seven_day_opus`). Overridable via
+ * `OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`; set that env to an empty
+ * string to DISABLE the downgrade (revert to cooling the whole account down).
+ * The current first-party Sonnet default id.
+ */
+export const DEFAULT_OPUS_FALLBACK_MODEL = 'claude-sonnet-4-6'
+
+/** 429 header naming which rate-limit window is the binding constraint. */
+export const REPRESENTATIVE_CLAIM_HEADER =
+  'anthropic-ratelimit-unified-representative-claim'
+
+/** `representative-claim` value meaning the Opus-specific weekly cap is exhausted. */
+export const SEVEN_DAY_OPUS_CLAIM = 'seven_day_opus'
+
+/** 429 header with the unix-seconds reset time of the binding window. */
+export const UNIFIED_RESET_HEADER = 'anthropic-ratelimit-unified-reset'
+
 export const REQUIRED_BETAS = [
   'oauth-2025-04-20',
   'interleaved-thinking-2025-05-14',

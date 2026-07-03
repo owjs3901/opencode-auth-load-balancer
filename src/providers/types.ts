@@ -48,6 +48,30 @@ export interface AuthorizeRequest {
 }
 
 /**
+ * A request-body rewrite that downgrades the requested model to a cheaper
+ * fallback (e.g. Claude Opus → Sonnet) when the primary model's tier quota is
+ * exhausted on the chosen account. `body` is the rewritten JSON string to send;
+ * `fromModel`/`toModel` drive the user-facing switch toast/log.
+ */
+export interface ModelFallback {
+  body: string
+  fromModel: string
+  toModel: string
+}
+
+/**
+ * Reactive-fallback plan returned from a rejected (429) response whose headers
+ * indicate a MODEL-TIER cap (not an account-wide limit). `fallback` is the
+ * downgraded body to retry on the SAME account; `resetAt` (epoch ms) is when the
+ * tier recovers — persisted as `PoolAccount.opusCooldownUntil` so subsequent
+ * turns downgrade PROACTIVELY without paying another rejected round-trip.
+ */
+export interface ReactiveModelFallback {
+  resetAt: number
+  fallback: ModelFallback
+}
+
+/**
  * A provider adapter encapsulates everything provider-specific: OAuth, request
  * shaping (headers/body/url transforms), usage parsing, and error classification.
  * The scheduler, pool store, and load-balanced fetch are all provider-agnostic and
@@ -92,4 +116,30 @@ export interface ProviderAdapter {
 
   /** Classify an HTTP status for rotation decisions. */
   classifyError(status: number): ErrorClass
+
+  // --- model-tier fallback (optional; Anthropic Opus→Sonnet) ---------------
+  /**
+   * PROACTIVE downgrade (pre-send): when this account's model-tier cap is
+   * known-exhausted (`account.opusCooldownUntil > now`) and `body` requests that
+   * tier's model, return a body with the model rewritten to the fallback so the
+   * request never pays a rejected round-trip. null = send `body` unchanged.
+   * Absent on providers without a model-tier fallback (OpenAI) — the fetch loop
+   * treats an absent hook as "no downgrade".
+   */
+  planProactiveFallback?(
+    body: string,
+    account: PoolAccount,
+    now: number,
+  ): ModelFallback | null
+  /**
+   * REACTIVE downgrade (post-429): when a rejected response's headers indicate a
+   * MODEL-TIER cap (not account-wide) that `body`'s model can fall back from,
+   * return the downgraded body to retry on the SAME account plus the tier
+   * `resetAt` to persist. null = treat the 429 as a normal account rotation.
+   */
+  planReactiveFallback?(
+    res: Response,
+    body: string,
+    now: number,
+  ): ReactiveModelFallback | null
 }

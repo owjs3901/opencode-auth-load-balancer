@@ -37,6 +37,8 @@ interface AccountStatus {
   weeklyResetAt: number
   available: boolean
   cooldownUntil: number
+  /** epoch ms until the Opus model-tier cap resets (0 = not exhausted). */
+  opusCooldownUntil: number
   disabledReason: string | null
   /** The account that most recently served a request for this provider. */
   current: boolean
@@ -83,6 +85,7 @@ function toStatus(
     weeklyResetAt: weekly && !weeklyExpired ? weekly.resetAt : 0,
     available,
     cooldownUntil: account.cooldownUntil,
+    opusCooldownUntil: account.opusCooldownUntil ?? 0,
     disabledReason: account.disabledReason,
     current,
     rank,
@@ -173,7 +176,13 @@ function stateOf(a: AccountStatus, now: number): string {
   if (a.disabledReason) return 're-login'
   if (a.cooldownUntil > now) return `cooldown ${relTime(a.cooldownUntil, now)}`
   if (!a.available) return 'exhausted'
-  return a.current ? 'in use' : 'ready'
+  const base = a.current ? 'in use' : 'ready'
+  // An Opus-tier limit does NOT sideline the account (it still serves non-Opus
+  // traffic and auto-downgrades Opus to the fallback) — so it annotates the
+  // usable state rather than replacing it, showing when Opus recovers.
+  if (a.opusCooldownUntil > now)
+    return `${base} · opus ${relTime(a.opusCooldownUntil, now)}`
+  return base
 }
 
 export function providerName(providerID: string): string {

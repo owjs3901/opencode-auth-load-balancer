@@ -65,6 +65,17 @@ export interface PoolAccount {
   usage: UsageSnapshot
   /** epoch ms; the account is skipped until this time. 0 = no cooldown. */
   cooldownUntil: number
+  /**
+   * epoch ms until this account's Opus model-tier WEEKLY cap resets. While
+   * `> now`, Opus requests on this account are auto-downgraded to the fallback
+   * model (see `OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`) instead of
+   * cooling the WHOLE account down — the account still serves non-Opus traffic.
+   * Distinct from `cooldownUntil` (account-wide) and NOT a scheduling signal:
+   * scoring/`isAvailable` ignore it, so it never sidelines the account. 0/absent
+   * = the Opus tier is not known-exhausted. Anthropic-only; absent on legacy pool
+   * files and for OpenAI accounts (read as 0).
+   */
+  opusCooldownUntil?: number
   /** Non-null when the account needs manual re-login (e.g. revoked refresh token). */
   disabledReason: string | null
   createdAt: number

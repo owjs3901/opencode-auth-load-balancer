@@ -11,6 +11,7 @@ Selection is **not** round-robin. It is weighted primarily by **weekly** usage, 
 - **Account pool** — register many Claude / Codex OAuth accounts; the plugin manages and rotates them.
 - **Weekly-usage-weighted scheduling** — `urgency = weeklyRemaining / daysUntilWeeklyReset`. A sooner reset (e.g. 3 days) outranks a later one (7 days) at equal headroom; perishable quota is drained progressively, never crammed into the final hour.
 - **Automatic rotation** — on `429`/auth errors an account is cooled down and the next-best is tried; `retry-after` is honored.
+- **Opus model-tier fallback** — Claude Max accounts have a *separate* weekly cap for Opus. When only that cap is exhausted, the balancer auto-downgrades the request to a fallback model (default `claude-sonnet-4-6`) on the **same** account — with a toast — instead of cooling the whole account down (which used to cascade every account into a false "cooldown"). Configurable / disablable via `OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`.
 - **Session affinity** — a conversation stays pinned to one account so you keep its prompt cache and don't re-send context on every turn.
 - **Proactive migration** — leaves an account at a configurable soft threshold (~95%) instead of waiting for a hard 100% wall (which can break in-flight subagents).
 - **Single-use refresh-token safety** — per-account singleflight refresh; rotated tokens are persisted immediately.
@@ -176,6 +177,7 @@ All knobs are environment variables with sane defaults.
 | `OPENCODE_AUTH_LB_DRAIN_MIGRATE_MARGIN` | `1.5` | Urgency factor required to justify a drain switch. |
 | `OPENCODE_AUTH_LB_SESSION_TTL_MS` | `21600000` | Session→account assignments older than this are pruned. |
 | `OPENCODE_AUTH_LB_MAX_WAIT_MS` | `305000` | When **every** account is rate-limited (a `429`/`402` cooldown), how long a single request may **block** waiting for the soonest account's cooldown to expire (honoring `Retry-After`) before auto-retrying — instead of failing the turn abruptly. A client abort (cancelling the turn) interrupts the wait immediately. Must exceed the 5-min account cooldown to cover a `429` with no `Retry-After`. `0` disables waiting (fail fast). Auth (`401`/`403`) errors are never waited on. |
+| `OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL` | `claude-sonnet-4-6` | Claude Max accounts have a **separate weekly cap for Opus**. When it is exhausted, an Opus request 429s (`anthropic-ratelimit-unified-representative-claim: seven_day_opus`) even though the account's aggregate 5h/7d windows still have headroom and non-Opus models work. Instead of cooling the **whole account** down (which cascaded every account into "cooldown"), the balancer auto-downgrades the request's model to this fallback **on the same account** and toasts the switch. Set to an **empty string** to disable (revert to the account-wide cooldown). |
 | `OPENCODE_AUTH_LB_DIR` | — | Override the pool-file directory (handy for tests). |
 | `OPENCODE_AUTH_LB_DEBUG` | — | `1`/`true` logs each selection to stderr. |
 | `ANTHROPIC_BASE_URL` | — | Route Anthropic requests through a custom base URL. |

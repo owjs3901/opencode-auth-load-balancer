@@ -139,6 +139,19 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
       row.usage.weekly = normalizeWindow(row.usage.weekly)
     }
     if (!Number.isFinite(row.cooldownUntil)) row.cooldownUntil = 0
+    // Mirror the `cooldownUntil` heal for the Opus model-tier cooldown. Unlike
+    // the fields above it is OPTIONAL (absent on legacy files / OpenAI rows), so
+    // leave `undefined` compact — but heal a hand-edited non-finite value
+    // (`"opusCooldownUntil": "soon"`, or `1e999` → Infinity via JSON.parse):
+    // both `stateOf`'s `> now` and `planProactiveFallback`'s gate would
+    // otherwise treat Infinity as "Opus exhausted forever", silently downgrading
+    // every Opus request to the fallback model until the file is repaired.
+    if (
+      row.opusCooldownUntil !== undefined &&
+      !Number.isFinite(row.opusCooldownUntil)
+    ) {
+      row.opusCooldownUntil = 0
+    }
     // A hand-edited non-number `expires` ("tomorrow") makes `needsRefresh`'s
     // `expires - skew <= now` compare NaN → false FOREVER: the long-expired
     // access token is treated as eternally fresh, every request 401s into an

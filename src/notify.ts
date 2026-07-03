@@ -45,3 +45,35 @@ export async function notifyOnSwitch(
     })
     .catch(ignore)
 }
+
+/** Last `fromModel` toasted per provider+account, so a downgraded sticky session doesn't re-toast every turn. */
+const lastFallbackToasted = new Map<string, string>()
+
+/**
+ * Toast (once per account + source-model) when a request's model was
+ * auto-downgraded to a fallback because the account's Opus weekly cap is
+ * exhausted — so the downgrade is visible, not silent. De-duped so a session
+ * pinned on the fallback for many turns toasts only when the source model
+ * changes. Best-effort: a failed toast never affects the request.
+ */
+export async function notifyModelFallback(
+  client: ToastClient,
+  providerID: string,
+  account: PoolAccount,
+  fromModel: string,
+  toModel: string,
+): Promise<void> {
+  const key = `${providerID}:${account.id}`
+  if (lastFallbackToasted.get(key) === fromModel) return
+  lastFallbackToasted.set(key, fromModel)
+  await client.tui
+    .showToast({
+      body: {
+        title: `${providerName(providerID)} model fallback`,
+        message: `▶ ${account.label}  ·  ${fromModel} → ${toModel} (Opus weekly limit)`,
+        variant: 'warning',
+        duration: 6000,
+      },
+    })
+    .catch(ignore)
+}

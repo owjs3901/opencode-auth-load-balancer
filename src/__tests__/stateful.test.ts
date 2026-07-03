@@ -333,6 +333,10 @@ describe('pool store', () => {
     >
     edited.expires = 'INF_EXPIRES'
     edited.cooldownUntil = 'INF_COOLDOWN'
+    // `"opusCooldownUntil": 1e999` (Infinity) would otherwise downgrade EVERY
+    // Opus request to the fallback model forever + render "opus" in the
+    // dashboards — same soft-fail family as cooldownUntil.
+    edited.opusCooldownUntil = 'INF_OPUS'
     edited.usage = {
       capturedAt: 'INF_CAPTURED',
       hourly: { utilization: 'INF_UTIL', resetAt: 100 },
@@ -346,6 +350,7 @@ describe('pool store', () => {
     })
       .replaceAll('"INF_EXPIRES"', '1e999')
       .replaceAll('"INF_COOLDOWN"', '1e999')
+      .replaceAll('"INF_OPUS"', '1e999')
       .replaceAll('"INF_CAPTURED"', '1e999')
       .replaceAll('"INF_RESET"', '1e999')
       .replaceAll('"INF_UTIL"', '-1e999') // -Infinity: isFinite catches both signs
@@ -355,6 +360,7 @@ describe('pool store', () => {
     expect(row?.expires).toBe(0)
     expect(row && needsRefresh(row, Date.now())).toBe(true) // repairing refresh
     expect(row?.cooldownUntil).toBe(0) // no permanent sideline
+    expect(row?.opusCooldownUntil).toBe(0) // no permanent Opus downgrade
     expect(row?.usage.capturedAt).toBe(0) // seeding stays eligible
     expect(row?.usage.hourly).toBeNull() // non-finite utilization → unusable
     expect(row?.usage.weekly).toEqual({ utilization: 0.5, resetAt: 0 })

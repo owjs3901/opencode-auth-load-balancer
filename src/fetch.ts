@@ -196,6 +196,31 @@ async function recordRotation(
 }
 
 /**
+ * Persist an account's Opus model-tier cooldown (epoch ms until the Opus weekly
+ * cap resets) WITHOUT touching the account-wide `cooldownUntil`. Deliberately
+ * separate from `recordRotation`: an Opus-tier 429 does NOT sideline the account
+ * (it still serves non-Opus traffic and the current request retries inline on
+ * the downgraded model) — this write only lets FUTURE turns downgrade
+ * proactively. Best-effort like every other bookkeeping write: a lock/read/write
+ * skip just means the next turn re-discovers the limit via one more 429.
+ */
+async function recordOpusCooldown(
+  accountId: string,
+  until: number,
+): Promise<void> {
+  await bestEffort('opus-cooldown', () =>
+    mutatePool((pool) => {
+      const account = findAccount(pool, accountId)
+      if (account)
+        account.opusCooldownUntil = Math.max(
+          account.opusCooldownUntil ?? 0,
+          until,
+        )
+    }),
+  )
+}
+
+/**
  * Fold the success path's two pool writes (`recordUsage` + session pin / TTL prune)
  * into ONE atomic `mutatePool` callback. Each `mutatePool` acquires the in-process
  * mutex AND the cross-process pool file lock, then reads + atomically rewrites
@@ -256,6 +281,17 @@ async function recordSuccess(
 interface FetchHooks {
   /** Called with the account that successfully served a request (for toasts/logs). */
   onUse?: (providerID: string, account: PoolAccount) => void
+  /**
+   * Called on a successful request whose model was auto-downgraded to a fallback
+   * (Opus→Sonnet) because the account's Opus model-tier weekly cap is exhausted.
+   * Drives the user-facing "model switched" toast so the downgrade is never silent.
+   */
+  onModelFallback?: (
+    providerID: string,
+    account: PoolAccount,
+    fromModel: string,
+    toModel: string,
+  ) => void
 }
 
 /**
@@ -478,6 +514,25 @@ export function createLoadBalancedFetch(
       const { account, degraded, sticky } = selection
       tried.add(account.id)
 
+      // PROACTIVE model downgrade: when this account's Opus model-tier cap is
+      // known-exhausted (persisted `opusCooldownUntil`), rewrite the outgoing
+      // model to the fallback UP FRONT so the request never pays a rejected
+      // round-trip. Only meaningful for a string body (Anthropic /v1/messages);
+      // OpenAI leaves `planProactiveFallback` unset, so this is null there.
+      const proactive =
+        typeof transformedBody === 'string'
+          ? (adapter.planProactiveFallback?.(transformedBody, account, now) ??
+            null)
+          : null
+      // The body actually sent this attempt (downgraded or original). `let`
+      // because a reactive Opus-tier 429 rewrites it for a same-account retry.
+      let attemptBody = proactive ? proactive.body : transformedBody
+      // Non-null once THIS request downgraded on THIS account (proactively, or
+      // after a reactive retry). Gates the reactive path to fire at most ONCE
+      // per account (so the inner send loop can't spin) and drives the success
+      // toast via `onModelFallback`.
+      let fallbackInfo = proactive
+
       try {
         await ensureAccessToken(adapter, account, now)
 
@@ -495,67 +550,118 @@ export function createLoadBalancedFetch(
         // prettier-ignore
         if (DEBUG) log(`-> ${adapter.id} via ${account.label}${sticky ? ' (sticky)' : ''}${degraded ? ' (degraded)' : ''}`)
 
-        const res = await fetch(transformedUrl, {
-          ...init,
-          body: transformedBody,
-          headers,
-        })
+        // Inner send loop for ONE account: the original request, then — after
+        // an Opus model-tier 429 — at most ONE model-downgraded retry on the
+        // SAME account. `fallbackInfo` becoming non-null blocks a second
+        // reactive attempt, so this loop runs at most twice before it returns
+        // (success), breaks (rotate), or throws (caught below).
+        for (;;) {
+          const res = await fetch(transformedUrl, {
+            ...init,
+            body: attemptBody,
+            headers,
+          })
 
-        // Split usage recording across the two outcomes so the dominant
-        // success path needs only ONE pool write (combined with the session
-        // pin via `recordSuccess`) instead of two. On rotation we fold the
-        // usage record + cooldown into ONE pool write via `recordRotation`
-        // (disjoint, commutative fields that both must land before retrying),
-        // halving post-response lock cycles during a rate-limit storm.
-        const cls = adapter.classifyError(res.status)
-        if (cls === 'account' || cls === 'auth') {
-          const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
-          // Release the rejected response's body stream — and its HTTP
-          // connection — BEFORE the `recordRotation` pool write below: rate-
-          // limit storms are exactly when the pool lock is most contended
-          // (worst case a 30 s POOL_WRITE_LOCK timeout), and the immediate
-          // retry should not wait behind a socket pinned to a dead response.
-          // `recordRotation` reads only `res.headers` (usage + retry-after),
-          // which stay readable after a body cancel.
-          await res.body?.cancel().catch(ignore)
-          // Fresh Date.now(), NOT the loop-start `now`: that was captured before
-          // ensureAccessToken (up to a 30 s network refresh) and the upstream
-          // fetch, so basing the cooldown on it would understate `Retry-After`
-          // by the request latency and retry the account before the server
-          // said it may be. The success path already stamps response time.
-          await recordRotation(adapter, account.id, res, ms, Date.now())
-          // Only an `account`-class (429/402) cooldown is worth waiting out; an auth
-          // (401/403) failure needs a re-login, not time, so it stays out of the set.
-          if (cls === 'account') waitableCooldownIds.add(account.id)
-          lastError = new Error(
-            `${adapter.id} account "${account.label}" returned ${res.status}`,
+          // Split usage recording across the two outcomes so the dominant
+          // success path needs only ONE pool write (combined with the session
+          // pin via `recordSuccess`) instead of two. On rotation we fold the
+          // usage record + cooldown into ONE pool write via `recordRotation`
+          // (disjoint, commutative fields that both must land before retrying),
+          // halving post-response lock cycles during a rate-limit storm.
+          const cls = adapter.classifyError(res.status)
+          if (cls === 'account' || cls === 'auth') {
+            // Opus model-tier fallback: a 429 whose BINDING limit is the Opus
+            // weekly cap (`representative-claim: seven_day_opus`) is NOT the
+            // account's fault — the account still serves non-Opus traffic. So
+            // instead of cooling the WHOLE account down (which cascaded every
+            // account into cooldown), downgrade the model and retry the SAME
+            // account inline. `recordOpusCooldown` persists the tier reset for
+            // FUTURE turns (best-effort), but the retry uses the in-memory
+            // downgraded body, so the current request never depends on that
+            // write landing. `!fallbackInfo` gates it to fire at most once, so
+            // a fallback-side 429 falls through to a normal account cooldown.
+            if (
+              cls === 'account' &&
+              !fallbackInfo &&
+              typeof attemptBody === 'string'
+            ) {
+              const plan = adapter.planReactiveFallback?.(
+                res,
+                attemptBody,
+                Date.now(),
+              )
+              if (plan) {
+                await res.body?.cancel().catch(ignore)
+                await recordOpusCooldown(account.id, plan.resetAt)
+                attemptBody = plan.fallback.body
+                fallbackInfo = plan.fallback
+                // prettier-ignore
+                if (DEBUG) log(`~~ ${account.label} Opus limited -> ${plan.fallback.toModel} (retry same account)`)
+                continue
+              }
+            }
+
+            const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
+            // Release the rejected response's body stream — and its HTTP
+            // connection — BEFORE the `recordRotation` pool write below: rate-
+            // limit storms are exactly when the pool lock is most contended
+            // (worst case a 30 s POOL_WRITE_LOCK timeout), and the immediate
+            // retry should not wait behind a socket pinned to a dead response.
+            // `recordRotation` reads only `res.headers` (usage + retry-after),
+            // which stay readable after a body cancel.
+            await res.body?.cancel().catch(ignore)
+            // Fresh Date.now(), NOT the loop-start `now`: that was captured before
+            // ensureAccessToken (up to a 30 s network refresh) and the upstream
+            // fetch, so basing the cooldown on it would understate `Retry-After`
+            // by the request latency and retry the account before the server
+            // said it may be. The success path already stamps response time.
+            await recordRotation(adapter, account.id, res, ms, Date.now())
+            // Only an `account`-class (429/402) cooldown is worth waiting out; an auth
+            // (401/403) failure needs a re-login, not time, so it stays out of the set.
+            if (cls === 'account') waitableCooldownIds.add(account.id)
+            lastError = new Error(
+              `${adapter.id} account "${account.label}" returned ${res.status}`,
+            )
+            // Same call-site DEBUG gate as the success path above:
+            // don't build the template literal during a rate-limit storm.
+            // prettier-ignore
+            if (DEBUG) log(`!! ${account.label} ${res.status} (${cls}) -> rotating`)
+            break
+          }
+
+          // Parse the response's usage headers ONCE, here, and apply them to the
+          // LOCAL account object before `onUse` fires: the switch toast (which by
+          // definition fires on the first request to an account in a while) then
+          // shows the response's fresh percentages instead of the pre-request
+          // snapshot read at loop start. The same partial is handed to
+          // `recordSuccess` so the stored-row merge is unchanged.
+          const successNow = Date.now()
+          const partial = adapter.parseUsageHeaders(res.headers)
+          if (partial) applyUsagePartial(account, partial, successNow)
+          // Toast the model downgrade (de-duped per account in notify) so the
+          // user knows this turn ran on the fallback model, not the one they
+          // selected. Fires whether the downgrade was proactive or reactive.
+          if (fallbackInfo)
+            hooks.onModelFallback?.(
+              adapter.id,
+              account,
+              fallbackInfo.fromModel,
+              fallbackInfo.toModel,
+            )
+          hooks.onUse?.(adapter.id, account)
+          await recordSuccess(
+            adapter,
+            account.id,
+            partial,
+            sessionKey,
+            successNow,
+            cfg.sessionTtlMs,
           )
-          // Same call-site DEBUG gate as the success path above (line ~494):
-          // don't build the template literal during a rate-limit storm.
-          // prettier-ignore
-          if (DEBUG) log(`!! ${account.label} ${res.status} (${cls}) -> rotating`)
-          continue
+          return adapter.transformResponse(res)
         }
-
-        // Parse the response's usage headers ONCE, here, and apply them to the
-        // LOCAL account object before `onUse` fires: the switch toast (which by
-        // definition fires on the first request to an account in a while) then
-        // shows the response's fresh percentages instead of the pre-request
-        // snapshot read at loop start. The same partial is handed to
-        // `recordSuccess` so the stored-row merge is unchanged.
-        const successNow = Date.now()
-        const partial = adapter.parseUsageHeaders(res.headers)
-        if (partial) applyUsagePartial(account, partial, successNow)
-        hooks.onUse?.(adapter.id, account)
-        await recordSuccess(
-          adapter,
-          account.id,
-          partial,
-          sessionKey,
-          successNow,
-          cfg.sessionTtlMs,
-        )
-        return adapter.transformResponse(res)
+        // Inner loop broke: an account/auth rejection that was NOT a reactive
+        // model downgrade. Rotate to the next-best account.
+        continue
       } catch (error) {
         lastError = error
         // A client-side abort (opencode restarting, or the user cancelling the turn) is

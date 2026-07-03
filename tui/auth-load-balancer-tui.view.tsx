@@ -31,6 +31,7 @@ import {
 } from './auth-load-balancer-scoring'
 import {
   cfg,
+  compareAscii,
   deleteFromPool,
   pct,
   type PoolShape,
@@ -86,7 +87,7 @@ function BottomBar(props: { api: TuiPluginApi }) {
     // provider id (byte-deterministic `< / >`, no locale) so the bar lists
     // providers in the same order as the sidebar, CLI, and status tool.
     const selected = Object.entries(p.lastSelected ?? {}).sort(([x], [y]) =>
-      x < y ? -1 : x > y ? 1 : 0,
+      compareAscii(x, y),
     )
     for (const [providerID, id] of selected) {
       const a = accounts.find((x) => x.id === id)

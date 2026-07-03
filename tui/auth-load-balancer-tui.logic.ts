@@ -284,6 +284,16 @@ export function toScore(a: PoolAccount): ScoreAccount {
   }
 }
 
+/**
+ * Byte-deterministic ASCII string comparator (never `localeCompare` — keeps
+ * tier/provider ordering byte-identical regardless of host locale). Ships its
+ * own copy independent of `src/status.ts`'s identical helper — this file
+ * already documents that the TUI runtime cannot import `src/`.
+ */
+export function compareAscii(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
 export function pct(u: number | null | undefined): string {
   return typeof u === 'number' ? `${Math.round(u * 100)}%` : '-'
 }
@@ -334,7 +344,7 @@ export function tierResets(a: PoolAccount, now: number): [string, number][] {
   if (isFiniteNumber(a.opusCooldownUntil) && a.opusCooldownUntil > now) {
     merged.opus = Math.max(merged.opus ?? 0, a.opusCooldownUntil)
   }
-  return Object.entries(merged).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
+  return Object.entries(merged).sort(([x], [y]) => compareAscii(x, y))
 }
 export function stateOf(
   sa: ScoreAccount,

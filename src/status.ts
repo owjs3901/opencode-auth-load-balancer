@@ -18,15 +18,22 @@ const PROVIDER_NAMES: Record<string, string> = {
 }
 
 /**
- * Deterministic ASCII order for provider sections by id (`anthropic` before
- * `openai`). Uses raw `< / >` rather than `localeCompare` to stay
- * byte-deterministic regardless of host locale.
+ * Byte-deterministic ASCII string comparator. Uses raw `< / >` rather than
+ * `localeCompare` to stay byte-deterministic regardless of host locale.
+ * Shared by every raw-ASCII sort site in this file (provider sections,
+ * model-tier names) so the "why raw `< / >` and not `localeCompare`"
+ * rationale lives in one place instead of being repeated per call site.
  */
+function compareAscii(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/** Deterministic ASCII order for provider sections by id (`anthropic` before `openai`). */
 function byProviderId(
   a: [string, PoolAccount[]],
   b: [string, PoolAccount[]],
 ): number {
-  return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0
+  return compareAscii(a[0], b[0])
 }
 
 interface AccountStatus {
@@ -219,7 +226,7 @@ function stateOf(a: AccountStatus, now: number): string {
   // no locale) so the rendered bytes are deterministic.
   const tiers = Object.entries(a.modelCooldownsUntil)
     .filter(([, until]) => until > now)
-    .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
+    .sort(([x], [y]) => compareAscii(x, y))
     .map(([tier, until]) => `${tier} ${relTime(until, now)}`)
   if (tiers.length > 0) return `${base} · ${tiers.join(' · ')}`
   return base

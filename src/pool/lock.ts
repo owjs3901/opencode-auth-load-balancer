@@ -130,7 +130,7 @@ async function readOwnerId(lockDir: string): Promise<string | null> {
  */
 async function tryClaim(
   lockDir: string,
-  meta: LockMeta,
+  payload: string,
 ): Promise<'claimed' | 'held' | 'noparent'> {
   try {
     await mkdir(lockDir, { recursive: false })
@@ -149,7 +149,7 @@ async function tryClaim(
   // immediately reclaimable; the fallback remains for hard crashes this
   // try/catch cannot survive.
   try {
-    await writeFile(metaFile(lockDir), JSON.stringify(meta), { mode: 0o600 })
+    await writeFile(metaFile(lockDir), payload, { mode: 0o600 })
   } catch (error) {
     await rm(lockDir, { recursive: true, force: true }).catch(ignore)
     throw error
@@ -157,18 +157,13 @@ async function tryClaim(
   return 'claimed'
 }
 
+// `payload` is the acquisition's fixed, pre-serialized lock meta (see
+// `acquireLock`): each tick just rewrites the same bytes to refresh the mtime.
 function startHeartbeat(
   lockDir: string,
-  meta: LockMeta,
+  payload: string,
   heartbeatMs: number,
 ): () => void {
-  // `meta` is `readonly` for the lifetime of the lock, so the serialized payload
-  // is fixed. Stringify ONCE up front rather than re-running `JSON.stringify` on
-  // every tick — and mirrors the sibling `tryClaim` site, which already
-  // stringifies once outside any loop. Intent ("write a fixed payload to refresh
-  // mtime") becomes explicit at the call site instead of hiding inside a
-  // per-tick stringification.
-  const payload = JSON.stringify(meta)
   const timer = setInterval(() => {
     void writeFile(metaFile(lockDir), payload, { mode: 0o600 }).catch(ignore)
   }, heartbeatMs)
@@ -215,6 +210,11 @@ export async function acquireLock(
     host: HOSTNAME,
     acquiredAt: Date.now(),
   }
+  // `meta` is immutable for the life of this acquisition, so serialize it
+  // exactly ONCE and thread the string through both writers (`tryClaim`'s
+  // initial claim and every `startHeartbeat` mtime-refresh tick) instead of
+  // re-running `JSON.stringify` per writer.
+  const payload = JSON.stringify(meta)
   const deadline = Date.now() + opts.timeoutMs
   // Parent-dir self-heal runs ONLY when a claim failed BECAUSE the parent is
   // missing (`'noparent'`), at most once per acquisition. `acquireLock` sits
@@ -229,12 +229,12 @@ export async function acquireLock(
   // LockTimeoutError via the deadline path instead of self-heal spinning.
   let parentEnsured = false
   for (;;) {
-    const claim = await tryClaim(lockDir, meta)
+    const claim = await tryClaim(lockDir, payload)
     if (claim === 'claimed') {
       return makeHandle(
         lockDir,
         meta.ownerId,
-        startHeartbeat(lockDir, meta, opts.heartbeatMs),
+        startHeartbeat(lockDir, payload, opts.heartbeatMs),
       )
     }
     if (claim === 'noparent' && !parentEnsured) {

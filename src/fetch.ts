@@ -405,8 +405,10 @@ export function createLoadBalancedFetch(
     // Accounts cooled by an `account`-class 429/402 THIS request — the only cooldowns
     // worth WAITING out (they reflect a real Retry-After / quota window that WILL clear).
     // Auth (401/403) cooldowns and thrown network errors are NOT added, so the wait path
-    // below never blocks on a credential problem or a client abort.
-    const waitableCooldownIds = new Set<string>()
+    // below never blocks on a credential problem or a client abort. Allocated
+    // LAZILY at the sole add site: the dominant success path never rotates, so
+    // it should not pay for a Set it provably never touches.
+    let waitableCooldownIds: Set<string> | null = null
     let lastError: unknown = null
 
     // `bodyStr` is captured from the enclosing closure and never reassigned, so its
@@ -511,9 +513,10 @@ export function createLoadBalancedFetch(
         // the fetch catch below. When nothing recoverable is left (no waitable cooldown,
         // or it is beyond the budget) we fall through and throw the last error as before.
         // The O(accounts) scan runs only when waiting is enabled at all
-        // (`maxWaitMs=0` is the explicit fail-fast opt-out) — don't compute a
-        // resume point that could never be used.
-        if (cfg.maxWaitMs > 0) {
+        // (`maxWaitMs=0` is the explicit fail-fast opt-out) AND some account
+        // actually entered a waitable cooldown (the Set stays null otherwise) —
+        // don't compute a resume point that could never be used.
+        if (cfg.maxWaitMs > 0 && waitableCooldownIds) {
           const resumeAt = soonestCooldownUntil(
             pool.accounts,
             now,
@@ -662,7 +665,10 @@ export function createLoadBalancedFetch(
             await recordRotation(adapter, account.id, res, ms, Date.now())
             // Only an `account`-class (429/402) cooldown is worth waiting out; an auth
             // (401/403) failure needs a re-login, not time, so it stays out of the set.
-            if (cls === 'account') waitableCooldownIds.add(account.id)
+            if (cls === 'account') {
+              waitableCooldownIds ??= new Set()
+              waitableCooldownIds.add(account.id)
+            }
             lastError = new Error(
               `${adapter.id} account "${account.label}" returned ${res.status}`,
             )

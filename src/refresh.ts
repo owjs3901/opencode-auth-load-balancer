@@ -41,12 +41,18 @@ export function needsRefresh(account: PoolAccount, now: number): boolean {
   return !account.access || account.expires - REFRESH_SKEW_MS <= now
 }
 
+// Hoisted to module scope like the repo's other repeatedly-evaluated regexes:
+// `isInvalidGrant` runs on every failed refresh (twice when in-flight joiners
+// exist). Sharing one instance is safe — no `/g` flag, and `match` leaves no
+// cross-call state on the RegExp.
+const REFRESH_STATUS_RE = /^Token refresh failed: (\d+)/
+
 function isInvalidGrant(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   // The "Token refresh failed: <status>" prefix both OAuth paths throw makes the
   // HTTP status AUTHORITATIVE — only a real 400/401 is invalid_grant (RFC 6749
   // §5.2). Body text on a 5xx must NOT flip the verdict (locked in stateful.test).
-  const m = error.message.match(/^Token refresh failed: (\d+)/)
+  const m = error.message.match(REFRESH_STATUS_RE)
   if (m) {
     const status = Number(m[1])
     return status === 400 || status === 401

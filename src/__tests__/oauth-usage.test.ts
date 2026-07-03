@@ -94,6 +94,19 @@ describe('anthropic oauth', () => {
     expect(await aExchange('C#', 'v', 'cb', 'S')).toBeNull()
   })
 
+  test('exchange does not misread a valid URL fragment missing state as the hash format', async () => {
+    // A syntactically valid absolute URL with a `#fragment` but no `state`
+    // query param must NOT be parsed via the legacy hash-split (which would
+    // wrongly read the fragment as `state`) — it must fall through to the
+    // key=value parse and fail, since the URL step already consumed the
+    // string and found no usable code/state. A throwing responder proves the
+    // token endpoint is never hit.
+    respond = () => {
+      throw new Error('network must not be hit')
+    }
+    expect(await aExchange('https://cb?code=C#S', 'v', 'cb', 'S')).toBeNull()
+  })
+
   test('exchange returns null on unparsable input, state mismatch, and non-ok', async () => {
     expect(await aExchange('garbage', 'v', 'cb', 'S')).toBeNull()
     expect(

@@ -187,19 +187,21 @@ export function resolveFallbackSetting(): FallbackSetting {
 }
 
 /**
- * The ladder pick for a capped `from` model: the best catalog model of the
- * first family strictly BELOW `from`'s in the configured order. A family not
- * in the order at all (a future top tier — historically new premium tiers
- * appear at the top) starts the walk from the order's first entry. Null when
- * no lower family has a catalog model (the caller falls back to the static
- * last-resort default).
+ * The ladder pick for a capped model whose family is already known: the best
+ * catalog model of the first family strictly BELOW `fromFamily` in the
+ * configured order. A family not in the order at all (a future top tier —
+ * historically new premium tiers appear at the top) starts the walk from the
+ * order's first entry. Null `fromFamily` (unknown family) also starts the
+ * walk from the order's first entry. Null when no lower family has a catalog
+ * model (the caller falls back to the static last-resort default). Split out
+ * from `resolveLadderTarget` so callers that already computed the family
+ * (e.g. `downgradeModel`) don't re-derive it from the raw model id.
  */
-export function resolveLadderTarget(
-  from: string,
+function ladderTargetForFamily(
+  fromFamily: string | null,
   models: readonly string[],
 ): string | null {
   const order = resolveFamilyOrder()
-  const fromFamily = modelFamily(from)
   // indexOf -1 (unknown family) + 1 = 0 — the walk covers the whole order.
   const start = order.indexOf(fromFamily ?? '') + 1
   for (let i = start; i < order.length; i++) {
@@ -209,6 +211,18 @@ export function resolveLadderTarget(
     if (best !== null) return best
   }
   return null
+}
+
+/**
+ * The ladder pick for a capped `from` model: the best catalog model of the
+ * first family strictly BELOW `from`'s in the configured order. Thin wrapper
+ * over `ladderTargetForFamily` for callers that only have the raw model id.
+ */
+export function resolveLadderTarget(
+  from: string,
+  models: readonly string[],
+): string | null {
+  return ladderTargetForFamily(modelFamily(from), models)
 }
 
 /**
@@ -241,7 +255,8 @@ export function downgradeModel(
   const target =
     setting.kind === 'pinned'
       ? setting.model
-      : (resolveLadderTarget(from, models) ?? DEFAULT_OPUS_FALLBACK_MODEL)
+      : (ladderTargetForFamily(fromFamily, models) ??
+        DEFAULT_OPUS_FALLBACK_MODEL)
   if (modelFamily(target) === fromFamily) return null
   parsed.model = target
   return { body: JSON.stringify(parsed), fromModel: from, toModel: target }

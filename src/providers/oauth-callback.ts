@@ -136,8 +136,10 @@ export function parseCallbackInput(
 ): { code: string; state: string } | null {
   const trimmed = input.trim()
 
+  let isUrl = false
   try {
     const url = new URL(trimmed)
+    isUrl = true
     const code = url.searchParams.get('code')
     const state = url.searchParams.get('state')
     if (code && state) return { code, state }
@@ -145,7 +147,11 @@ export function parseCallbackInput(
     // Fall through to legacy/manual formats.
   }
 
-  if (options.allowHashFormat) {
+  // The legacy `<code>#<state>` hash format is for a raw manual paste, not a
+  // real URL — a syntactically valid URL that merely lacks `code`/`state`
+  // (e.g. one with a `#fragment`) must fall through to the key=value parse
+  // below instead of having its fragment misread as `state`.
+  if (options.allowHashFormat && !isUrl) {
     const hashSplits = trimmed.split('#')
     if (hashSplits.length === 2 && hashSplits[0] && hashSplits[1]) {
       return { code: hashSplits[0], state: hashSplits[1] }

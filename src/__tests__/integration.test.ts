@@ -40,7 +40,6 @@ function acct(o: {
       weekly: { utilization: o.weeklyUtil, resetAt: now + 30 * HOUR },
       capturedAt: now, // fresh -> background seeding skips it
     },
-    createdAt: now,
   })
 }
 

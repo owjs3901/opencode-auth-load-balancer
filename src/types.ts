@@ -87,7 +87,6 @@ export interface PoolAccount {
   opusCooldownUntil?: number
   /** Non-null when the account needs manual re-login (e.g. revoked refresh token). */
   disabledReason: string | null
-  createdAt: number
 }
 
 /** A conversation's sticky account assignment (preserves prompt cache across turns). */

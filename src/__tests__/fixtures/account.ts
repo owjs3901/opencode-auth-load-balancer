@@ -18,7 +18,6 @@ export function testAccount(over: Partial<PoolAccount> = {}): PoolAccount {
     usage: emptyUsage(),
     cooldownUntil: 0,
     disabledReason: null,
-    createdAt: 0,
     ...over,
   }
 }

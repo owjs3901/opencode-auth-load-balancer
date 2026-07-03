@@ -49,7 +49,6 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
     refresh: 'ref',
     expires: Date.now() + 60 * 60 * 1000,
     usage: { hourly: null, weekly: null, capturedAt: Date.now() },
-    createdAt: Date.now(),
     ...over,
   })
 }

@@ -16,7 +16,6 @@ function makeAccount(
   label: string,
   tokens: TokenSet,
 ): PoolAccount {
-  const now = Date.now()
   return {
     id: randomUUID(),
     providerID,
@@ -29,7 +28,6 @@ function makeAccount(
     usage: emptyUsage(),
     cooldownUntil: 0,
     disabledReason: null,
-    createdAt: now,
   }
 }
 

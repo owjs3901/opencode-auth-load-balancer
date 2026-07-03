@@ -53,7 +53,6 @@ function staleAccount(id: string): PoolAccount {
     refresh: 'refresh-0',
     expires: now - 1, // already expired -> needsRefresh
     tokenGen: 0,
-    createdAt: now,
   })
 }
 

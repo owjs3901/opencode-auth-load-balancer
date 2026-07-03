@@ -118,7 +118,6 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
       weekly: { utilization: 0.1, resetAt: Date.now() + 30 * 60 * 60 * 1000 },
       capturedAt: Date.now(),
     },
-    createdAt: Date.now(),
     ...over,
   })
 }

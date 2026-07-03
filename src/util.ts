@@ -127,16 +127,19 @@ export function setBounded<K, V>(
  * A single-slot memo keyed by a raw value compared with `===`. Returns a
  * closure that recomputes only when the key changes since the last call —
  * the "cache the value derived from a raw env/token string, keyed by that
- * string" pattern previously hand-rolled five separate times across the
- * Anthropic/OpenAI provider modules (`mergeBetaHeaders`/`resolveBaseUrl` in
+ * string" pattern previously hand-rolled four separate times across the
+ * Anthropic provider module (`mergeBetaHeaders`/`resolveBaseUrl` in
  * `providers/anthropic/transform.ts`, `resolveFamilyOrder`/
- * `resolveFallbackSetting` in `providers/anthropic/fallback.ts`,
- * `resolveAccountId` in `providers/openai/jwt.ts`). Each caller keeps any
- * fast-path early return (e.g. "no raw value at all") BEFORE calling into
- * this memo — the memo only covers the "check cache, else compute and
- * reseat" part. NOTE: `src/scheduler/score-core.ts` deliberately does NOT use
- * this — that file is byte-copied into `tui/auth-load-balancer-scoring.ts`
- * and must stay dependency-free.
+ * `resolveFallbackSetting` in `providers/anthropic/fallback.ts`). Each
+ * caller keeps any fast-path early return (e.g. "no raw value at all")
+ * BEFORE calling into this memo — the memo only covers the "check cache,
+ * else compute and reseat" part. NOTE: `providers/openai/jwt.ts`'s
+ * `resolveAccountId` needed a MULTI-slot `Map` variant instead of this
+ * (a one-slot memo thrashes there because the plugin decodes MULTIPLE
+ * OpenAI accounts' access tokens concurrently — see that file's own
+ * `decodedAccountIdCache` doc comment). `src/scheduler/score-core.ts`
+ * deliberately does NOT use this either — that file is byte-copied into
+ * `tui/auth-load-balancer-scoring.ts` and must stay dependency-free.
  */
 export function memoOne<K, V>(compute: (key: K) => V): (key: K) => V {
   let cache: { key: K; value: V } | null = null

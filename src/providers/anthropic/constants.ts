@@ -31,11 +31,11 @@ export const TOOL_PREFIX = 'mcp_'
  * the fallback LADDER cannot produce a candidate (the provider's model catalog
  * is empty or has no model in a lower family). The normal path walks
  * `DEFAULT_FAMILY_ORDER` through the catalog instead — see
- * `resolveLadderTarget` in fallback.ts. Also the historic name of the
- * override env (`OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`): set it to
- * a model id to PIN the downgrade target (bypassing the ladder), or to an
- * empty string to DISABLE downgrading (revert to cooling the whole account
- * down).
+ * `ladderTargetForFamily`/`downgradeModel` in fallback.ts. Also the historic
+ * name of the override env (`OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`):
+ * set it to a model id to PIN the downgrade target (bypassing the ladder), or
+ * to an empty string to DISABLE downgrading (revert to cooling the whole
+ * account down).
  */
 export const DEFAULT_OPUS_FALLBACK_MODEL = 'claude-sonnet-4-6'
 

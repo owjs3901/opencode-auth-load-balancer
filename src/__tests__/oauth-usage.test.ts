@@ -151,6 +151,26 @@ describe('anthropic oauth', () => {
     ).toBeNull()
   })
 
+  test('exchange rejects a non-string refresh_token (never commits a non-string refresh)', async () => {
+    // PoolAccount.refresh is typed `string`; a malformed-but-200 body carrying
+    // a numeric refresh_token must be rejected at the same trust boundary as
+    // access_token/expires_in above (mirroring readTokenResponse's other
+    // field guards) instead of writing a non-string value that only the
+    // next readPool()'s normalizeAccounts heals.
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          access_token: 'a',
+          refresh_token: 12345,
+          expires_in: 3600,
+        }),
+        { status: 200 },
+      )
+    expect(
+      await aExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
+  })
+
   test('refresh returns rotated tokens and throws on non-ok', async () => {
     respond = () =>
       new Response(
@@ -206,6 +226,23 @@ describe('anthropic oauth', () => {
       new Response(JSON.stringify({ access_token: '', expires_in: 3600 }), {
         status: 200,
       })
+    await expect(aRefresh('r1')).rejects.toThrow('malformed')
+  })
+
+  test('refresh throws (never commits a non-string refresh_token)', async () => {
+    // Refresh-side sibling of the exchange non-string-refresh_token test
+    // above: the same malformed body must throw the status-prefixed
+    // "malformed" error instead of committing a non-string `refresh` via
+    // commitRefresh.
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          access_token: 'a2',
+          refresh_token: 12345,
+          expires_in: 3600,
+        }),
+        { status: 200 },
+      )
     await expect(aRefresh('r1')).rejects.toThrow('malformed')
   })
 

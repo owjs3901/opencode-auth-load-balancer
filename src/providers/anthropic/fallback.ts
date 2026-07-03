@@ -192,9 +192,9 @@ export function resolveFallbackSetting(): FallbackSetting {
  * historically new premium tiers appear at the top) starts the walk from the
  * order's first entry. Null `fromFamily` (unknown family) also starts the
  * walk from the order's first entry. Null when no lower family has a catalog
- * model (the caller falls back to the static last-resort default). Split out
- * from `resolveLadderTarget` so callers that already computed the family
- * (e.g. `downgradeModel`) don't re-derive it from the raw model id.
+ * model (the caller falls back to the static last-resort default). Takes the
+ * family directly so callers that already computed it (e.g. `downgradeModel`)
+ * don't re-derive it from the raw model id.
  */
 function ladderTargetForFamily(
   fromFamily: string | null,
@@ -210,18 +210,6 @@ function ladderTargetForFamily(
     if (best !== null) return best
   }
   return null
-}
-
-/**
- * The ladder pick for a capped `from` model: the best catalog model of the
- * first family strictly BELOW `from`'s in the configured order. Thin wrapper
- * over `ladderTargetForFamily` for callers that only have the raw model id.
- */
-export function resolveLadderTarget(
-  from: string,
-  models: readonly string[],
-): string | null {
-  return ladderTargetForFamily(modelFamily(from), models)
 }
 
 /**

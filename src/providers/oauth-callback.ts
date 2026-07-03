@@ -43,12 +43,18 @@ export function toTokenSet(
 
 /**
  * Parse and validate an OAuth token-endpoint 200 body. Returns null when the
- * body is not JSON, `access_token` is missing/empty, or `expires_in` is
- * missing — otherwise a SyntaxError escapes into the login flow, an
- * empty-string `access_token` writes `access: ''` onto the pool row (silently
- * bricking auth until the next self-healing refresh), or a missing
- * `expires_in` poisons the pool with `expires: NaN` (which `needsRefresh`
- * never treats as stale).
+ * body is not JSON, `access_token` is missing/empty, `expires_in` is
+ * missing, or a PRESENT `refresh_token` is non-string — otherwise a
+ * SyntaxError escapes into the login flow, an empty-string `access_token`
+ * writes `access: ''` onto the pool row (silently bricking auth until the
+ * next self-healing refresh), a missing `expires_in` poisons the pool with
+ * `expires: NaN` (which `needsRefresh` never treats as stale), or a
+ * malformed `refresh_token` (e.g. a number) writes a non-string value onto
+ * `PoolAccount.refresh` (typed `string`) via `toTokenSet`'s
+ * `json.refresh_token || previousRefresh` — until the next `readPool()`
+ * heals it via `normalizeAccounts`'s own `typeof row.refresh !== 'string'`
+ * guard (`pool/store.ts`). `refresh_token` is still OPTIONAL per RFC 6749
+ * §5.1 — only a present-but-wrong-type value is rejected.
  * `expires_in` must be FINITE, not just a number: `JSON.parse('1e999')`
  * legally yields `Infinity`, which would poison the pool with
  * `expires: Infinity` — the same never-stale soft-brick as NaN.
@@ -76,7 +82,8 @@ export async function readTokenResponse<
     json.access_token === '' ||
     !Number.isFinite(json.expires_in) ||
     json.expires_in <= 0 ||
-    !Number.isFinite(json.expires_in * 1000)
+    !Number.isFinite(json.expires_in * 1000) ||
+    (json.refresh_token !== undefined && typeof json.refresh_token !== 'string')
   )
     return null
   return json

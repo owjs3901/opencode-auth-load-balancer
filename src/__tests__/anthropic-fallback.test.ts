@@ -8,7 +8,6 @@ import {
   requestModelTier,
   resolveFallbackSetting,
   resolveFamilyOrder,
-  resolveLadderTarget,
 } from '../providers/anthropic/fallback'
 
 const ENV = 'OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL'
@@ -111,55 +110,6 @@ describe('resolveFallbackSetting', () => {
   })
 })
 
-describe('resolveLadderTarget', () => {
-  test('a capped Fable lands on the HIGHEST-versioned Opus in the catalog (4-9 over 4-8)', () => {
-    expect(resolveLadderTarget(FABLE, CATALOG)).toBe('claude-opus-4-9')
-  })
-
-  test('without a 4-9 in the catalog, 4-8 wins', () => {
-    const catalog = CATALOG.filter((m) => m !== 'claude-opus-4-9')
-    expect(resolveLadderTarget(FABLE, catalog)).toBe('claude-opus-4-8')
-  })
-
-  test('a capped Opus skips its own family and lands on Sonnet', () => {
-    expect(resolveLadderTarget(OPUS, CATALOG)).toBe('claude-sonnet-4-6')
-  })
-
-  test('skips families with no catalog model (fable capped, no opus in catalog → sonnet)', () => {
-    const catalog = ['claude-fable-5', 'claude-sonnet-4-6']
-    expect(resolveLadderTarget(FABLE, catalog)).toBe('claude-sonnet-4-6')
-  })
-
-  test('an UNKNOWN (future top-tier) family starts the walk at the top of the order', () => {
-    expect(resolveLadderTarget('claude-myth-1', CATALOG)).toBe('claude-fable-5')
-  })
-
-  test('version comparison handles old-style, dated, and exactly-tied ids', () => {
-    // Old-style 3-5 loses to 4-6; the dated snapshot extends (and wins) a
-    // tie against its undated alias; an EXACT version tie keeps the first
-    // catalog entry (deterministic first-wins, like the scheduler's sorts).
-    const catalog = [
-      'claude-3-5-sonnet-latest',
-      'claude-sonnet-4-6',
-      'claude-sonnet-4-6-20260101',
-      'claude-4-6-sonnet-20260101', // same [4,6,20260101] vector — tie
-    ]
-    expect(resolveLadderTarget(OPUS, catalog)).toBe(
-      'claude-sonnet-4-6-20260101',
-    )
-  })
-
-  test('no lower family in the catalog → null (caller falls back to the static default)', () => {
-    expect(resolveLadderTarget('claude-haiku-4-5', CATALOG)).toBeNull()
-    expect(resolveLadderTarget(FABLE, [])).toBeNull()
-  })
-
-  test('honors a custom family order', () => {
-    process.env[ORDER_ENV] = 'fable,haiku,opus'
-    expect(resolveLadderTarget(FABLE, CATALOG)).toBe('claude-haiku-4-5')
-  })
-})
-
 describe('downgradeModel', () => {
   test('disabled (empty env) → null even for a premium-tier body', () => {
     process.env[ENV] = ''
@@ -197,6 +147,21 @@ describe('downgradeModel', () => {
   test('ladder: a capped Opus body descends to Sonnet', () => {
     expect(downgradeModel(body(OPUS), CATALOG)?.toModel).toBe(
       'claude-sonnet-4-6',
+    )
+  })
+
+  test('version comparison handles old-style, dated, and an exactly-tied id', () => {
+    // Old-style 3-5 loses to 4-6; the dated snapshot extends (and wins) a
+    // tie against its undated alias; an EXACT version tie keeps the first
+    // catalog entry (deterministic first-wins, like the scheduler's sorts).
+    const catalog = [
+      'claude-3-5-sonnet-latest',
+      'claude-sonnet-4-6',
+      'claude-sonnet-4-6-20260101',
+      'claude-4-6-sonnet-20260101', // same [4,6,20260101] vector — tie
+    ]
+    expect(downgradeModel(body(OPUS), catalog)?.toModel).toBe(
+      'claude-sonnet-4-6-20260101',
     )
   })
 

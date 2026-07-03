@@ -44,7 +44,7 @@ export async function notifyOnSwitch(
   if (lastToasted.get(providerID) === account.id) return
   lastToasted.set(providerID, account.id)
   const now = Date.now()
-  const message = `▶ ${account.label}  ·  weekly ${pct(displayUtil(account.usage.weekly, now))} · 5h ${pct(displayUtil(account.usage.hourly, now))}`
+  const message = `▶ ${account.label}  ·  weekly ${pct(displayUtil(account.usage.weekly, now))}  ·  5h ${pct(displayUtil(account.usage.hourly, now))}`
   await postToast(client, {
     title: `${providerName(providerID)} account`,
     message,

@@ -190,19 +190,18 @@ export function resolveFallbackSetting(): FallbackSetting {
  * catalog model of the first family strictly BELOW `fromFamily` in the
  * configured order. A family not in the order at all (a future top tier —
  * historically new premium tiers appear at the top) starts the walk from the
- * order's first entry. Null `fromFamily` (unknown family) also starts the
- * walk from the order's first entry. Null when no lower family has a catalog
- * model (the caller falls back to the static last-resort default). Takes the
- * family directly so callers that already computed it (e.g. `downgradeModel`)
- * don't re-derive it from the raw model id.
+ * order's first entry. Null when no lower family has a catalog model (the
+ * caller falls back to the static last-resort default). Takes the family
+ * directly so callers that already computed it (e.g. `downgradeModel`) don't
+ * re-derive it from the raw model id.
  */
 function ladderTargetForFamily(
-  fromFamily: string | null,
+  fromFamily: string,
   models: readonly string[],
 ): string | null {
   const order = resolveFamilyOrder()
   // indexOf -1 (unknown family) + 1 = 0 — the walk covers the whole order.
-  const start = order.indexOf(fromFamily ?? '') + 1
+  const start = order.indexOf(fromFamily) + 1
   for (let i = start; i < order.length; i++) {
     const family = order[i]
     if (family === undefined) continue

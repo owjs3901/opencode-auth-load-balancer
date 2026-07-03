@@ -313,13 +313,19 @@ export function scoreAccount(
   // finite and `0 * finite === 0` — skip the whole hourly chain (exact identity).
   if (urgency === 0) return 0
   // Hoist `account.usage.hourly` to a local — same rationale as `weekly`
-  // in `weeklyUrgency` above (per-candidate, per-request hot path).
+  // in `weeklyUrgency` above (per-candidate, per-request hot path). Checked
+  // for null BEFORE `utilOf` (rather than after, via `hourly?.resetAt ?? 0`):
+  // `utilOf` returns 0 for a null window anyway, so this narrows `hourly` to
+  // non-null for the `resetAt` read below instead of leaving a provably-dead
+  // `?.`/`?? 0` — unlike `weeklyUrgency`'s sibling `weekly?.resetAt ?? 0`,
+  // where `weekly` CAN legitimately be null with a non-zero `drainable`.
   const hourly = account.usage.hourly
+  if (!hourly) return urgency
   const hourlyUtil = utilOf(hourly, now)
   // With no 5h pressure `pressure === 0`, so `score = urgency * (1 - influence*0) = urgency`
   // — skip the resetAt/msToReset/resetFactor/multiply chain (exact identity).
   if (hourlyUtil === 0) return urgency
-  const resetAt = hourly?.resetAt ?? 0
+  const resetAt = hourly.resetAt
   const msToReset = resetAt > now ? resetAt - now : HOURLY_WINDOW_MS
   const resetFactor = clamp01(msToReset / HOURLY_WINDOW_MS)
   const pressure = hourlyUtil * resetFactor

@@ -3,6 +3,10 @@ coverage = true
 coverageSkipTestFiles = true
 coverageReporter = ["text"]
 # CLI entry point (thin wrapper around the tested status engine; runs on import).
-coveragePathIgnorePatterns = ["src/cli/**"]
+# tui/auth-load-balancer-scoring.ts is a byte-identical copy of src/scheduler/score-core.ts
+# (enforced by tui-scoring-sync.test.ts) — its logic is already 100%-covered by score-core's
+# OWN test suite; importing it transitively (via tui/auth-load-balancer-tui.logic.ts's tests)
+# must not require re-covering every branch of the copy a second time.
+coveragePathIgnorePatterns = ["src/cli/**", "tui/auth-load-balancer-scoring.ts"]
 # Enforced at 100% — every source line and function must be exercised.
 coverageThreshold = 1.0

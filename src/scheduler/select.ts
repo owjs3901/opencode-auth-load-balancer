@@ -3,8 +3,8 @@ import { DEFAULT_CONFIG, type SchedulerConfig } from './config'
 import {
   isAvailable,
   maxUtil,
-  overSoftThreshold,
   scoreAccount,
+  utilOf,
   weeklyUrgency,
 } from './score-core'
 
@@ -198,16 +198,25 @@ export function selectForSession(
   // account is a full per-account prompt-cache WRITE (~1.25x, no read discount).
   // Two-stage gate keeps the steady-state healthy follow-up turn (the dominant path)
   // free: skip the O(N) `selectAccount` scan AND the cost/imminence math whenever the
-  // pin is below its soft threshold and drainMigrate is off. `overSoftThreshold` is
-  // computed once (it re-reads usage.{weekly,hourly} + re-runs utilOf), so the extra
-  // `maxUtil(pinned)` below is only paid on the migration-reachable path.
-  const pinnedOverSoft = overSoftThreshold(pinned, cfg, now)
+  // pin is below its soft threshold and drainMigrate is off. Both windows' `utilOf`
+  // are read ONCE here and reused for both `pinnedOverSoft` (inlining
+  // `overSoftThreshold`'s OR) and `pinnedUtil` (inlining `maxUtil`'s max) below —
+  // the same "hoist repeated window reads" pattern score-core.ts already applies on
+  // this hot path — instead of `overSoftThreshold` and a second `maxUtil(pinned)`
+  // call each re-running `utilOf` on both windows independently.
+  const weeklyUtilPinned = utilOf(pinned.usage.weekly, now)
+  const hourlyUtilPinned = utilOf(pinned.usage.hourly, now)
+  const pinnedOverSoft =
+    weeklyUtilPinned >= cfg.weeklyDrainTarget ||
+    hourlyUtilPinned >= cfg.migrateAt
   if (pinnedOverSoft || cfg.drainMigrate) {
     // `pinnedUtil` is read ONLY under `pinnedOverSoft` (in `pinnedImminent`, whose
     // own definition short-circuits on `pinnedOverSoft`, and lines gated by
     // `if (pinnedOverSoft)`). On the drain-only path (`!pinnedOverSoft &&
-    // drainMigrate`) it is never observed, so skip the `maxUtil` work there.
-    const pinnedUtil = pinnedOverSoft ? maxUtil(pinned, now) : 0
+    // drainMigrate`) it is never observed, so skip the max work there.
+    const pinnedUtil = pinnedOverSoft
+      ? Math.max(hourlyUtilPinned, weeklyUtilPinned)
+      : 0
     // Imminence is only meaningful on the `pinnedOverSoft` side, so fold
     // `pinnedOverSoft &&` into the definition: on the drain-only path
     // (`!pinnedOverSoft && drainMigrate`) `pinnedImminent` is then plainly false

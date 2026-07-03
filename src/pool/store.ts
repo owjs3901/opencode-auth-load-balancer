@@ -109,13 +109,23 @@ function normalizeWindow(w: unknown): UsageWindow | null {
  * so the file self-heals on the next bookkeeping write.
  */
 function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
-  const accounts: PoolAccount[] = []
-  for (const row of rows) {
+  // Build the result lazily (same pattern as `applyInstructions` in
+  // providers/openai/transform.ts): this runs on EVERY readPool — 2-4× per
+  // served request — and in the dominant steady state no row is dropped, so
+  // the all-valid read must not allocate a copy. Heals mutate rows in place,
+  // so returning the original array unchanged is behaviorally identical;
+  // materialize a copy only when the FIRST row is actually dropped (all
+  // earlier rows were kept, so `rows.slice(0, i)` is exact).
+  let accounts: PoolAccount[] | null = null
+  for (const [i, row] of rows.entries()) {
     // Arrays must be rejected alongside null/primitive rows: a healed array
     // row NEVER self-heals (JSON.stringify of an array with grafted named
     // properties serializes back to `[]`), becoming a permanent phantom
     // account under an `undefined` provider in every dashboard.
-    if (!isPlainObject(row)) continue
+    if (!isPlainObject(row)) {
+      accounts ??= rows.slice(0, i)
+      continue
+    }
     // Identity fields are irreparable: an id/providerID cannot be guessed
     // (`makeAccount` always writes both), and a surviving id-less row is
     // still SELECTABLE — fetch then pins `sessions[key].accountId =
@@ -124,6 +134,7 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     // renders a phantom `undefined` provider section in every dashboard
     // forever. Drop such rows like the null/primitive/array rows above.
     if (typeof row.id !== 'string' || typeof row.providerID !== 'string') {
+      accounts ??= rows.slice(0, i)
       continue
     }
     // Arrays need the same explicit reject as account rows above: grafting
@@ -196,9 +207,9 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     if (row.disabledReason !== null && typeof row.disabledReason !== 'string') {
       row.disabledReason = null
     }
-    accounts.push(row)
+    if (accounts !== null) accounts.push(row)
   }
-  return accounts
+  return accounts ?? rows
 }
 
 /**

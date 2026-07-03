@@ -427,7 +427,7 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
     pool: PoolFile,
     key: string,
     cfg = DEFAULT_CONFIG,
-    requestBytes = 0,
+    requestBytes: number | (() => number) = 0,
     exclude: Set<string> = new Set(),
   ) => selectForSession(pool, 'anthropic', key, NOW, cfg, exclude, requestBytes)
 
@@ -471,6 +471,32 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
     expect(migPick(pinnedTo([a, b], 'b'), 's:1', cfg, 500)?.account.id).toBe(
       'a',
     )
+  })
+
+  test('a requestBytes THUNK is not invoked on the healthy sticky path, only when the gate is consulted', () => {
+    // Locks the lazy-cost contract: fetch.ts passes a memoized thunk so the
+    // full-body UTF-8 walk is paid ONLY when the non-forced-migration block
+    // actually reads the byte gate. On the dominant steady-state path (pin
+    // healthy below migrateAt, drainMigrate off) the thunk must never fire.
+    let calls = 0
+    const thunk = () => {
+      calls += 1
+      return 500
+    }
+    const cfg = { ...DEFAULT_CONFIG, cheapSwitchMaxBytes: 1000 }
+    const a = account('a', { weekly: win(0.2, 5 * DAY) })
+    const healthy = account('b', { weekly: win(0.5, 5 * DAY) }) // below migrateAt
+    const stick = migPick(pinnedTo([a, healthy], 'b'), 's:1', cfg, thunk)
+    expect(stick?.account.id).toBe('b')
+    expect(stick?.sticky).toBe(true)
+    expect(calls).toBe(0) // dominant path never pays the byte walk
+
+    // Pin over the drain target -> migration block consults the gate -> the
+    // thunk resolves (once) and its 500 bytes pass the 1000-byte gate.
+    const over = account('c', { weekly: win(0.985, 5 * DAY) })
+    const moved = migPick(pinnedTo([a, over], 'c'), 's:1', cfg, thunk)
+    expect(moved?.account.id).toBe('a')
+    expect(calls).toBe(1)
   })
 
   test('drainMigrate on: cost gate holds the drain switch on a large request', () => {

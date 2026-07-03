@@ -108,9 +108,14 @@ describe('notifyOnSwitch', () => {
 })
 
 describe('notifyModelFallback', () => {
-  test('toasts the downgrade once per account+source-model, re-toasting only when the source changes', async () => {
+  test('toasts the downgrade once per account+source-model within a window, re-toasting when the source changes', async () => {
     const { client, calls } = spyClient()
-    const a = testAccount({ id: 'fb1', label: 'fb1' })
+    const windowEnd = Date.now() + 3 * 24 * 60 * 60 * 1000
+    const a = testAccount({
+      id: 'fb1',
+      label: 'fb1',
+      opusCooldownUntil: windowEnd,
+    })
     await notifyModelFallback(
       client,
       'p1',
@@ -118,7 +123,8 @@ describe('notifyModelFallback', () => {
       'claude-opus-4-7',
       'claude-sonnet-4-6',
     )
-    // Same account + same source model on the next turn -> deduped (no re-toast).
+    // Same account + same source model + same exhaustion window on the next
+    // turn -> deduped (no re-toast).
     await notifyModelFallback(
       client,
       'p1',
@@ -141,6 +147,39 @@ describe('notifyModelFallback', () => {
     expect(calls[0]?.message).toContain('claude-opus-4-7')
     expect(calls[0]?.message).toContain('claude-sonnet-4-6')
     expect(calls[1]?.message).toContain('claude-opus-4-1')
+  })
+
+  test('re-toasts when the Opus tier re-exhausts in a NEW window (fresh opusCooldownUntil)', async () => {
+    // The README promises the downgrade is "never silent". A de-dupe keyed on
+    // fromModel alone silenced every exhaustion window after the first in a
+    // process's lifetime: cap exhausts -> toast; cap RESETS and Opus serves for
+    // days; cap exhausts again -> silent. The de-dupe value is scoped to the
+    // exhaustion window (`fromModel@opusCooldownUntil`), so a new window must
+    // toast again while turns WITHIN one window stay deduped.
+    const { client, calls } = spyClient()
+    const DAY = 24 * 60 * 60 * 1000
+    const firstWindow = Date.now() + 3 * DAY
+    const first = testAccount({
+      id: 'fbw',
+      label: 'fbw',
+      opusCooldownUntil: firstWindow,
+    })
+    await notifyModelFallback(client, 'p1', first, 'opus', 'sonnet')
+    await notifyModelFallback(client, 'p1', first, 'opus', 'sonnet') // same window -> deduped
+    expect(calls).toHaveLength(1)
+
+    // The Opus cap reset, served for days, then re-exhausted: same account id,
+    // NEW cooldown window -> the downgrade must be announced again.
+    const second = testAccount({
+      id: 'fbw',
+      label: 'fbw',
+      opusCooldownUntil: firstWindow + 7 * DAY,
+    })
+    await notifyModelFallback(client, 'p1', second, 'opus', 'sonnet')
+    expect(calls).toHaveLength(2)
+    // ...and turns within the second window are deduped again.
+    await notifyModelFallback(client, 'p1', second, 'opus', 'sonnet')
+    expect(calls).toHaveLength(2)
   })
 
   test('survives a failing toast (best-effort, never affects the request)', async () => {

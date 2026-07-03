@@ -46,15 +46,19 @@ export async function notifyOnSwitch(
     .catch(ignore)
 }
 
-/** Last `fromModel` toasted per provider+account, so a downgraded sticky session doesn't re-toast every turn. */
+/** Last `fromModel@window` toasted per provider+account, so a downgraded sticky session doesn't re-toast every turn. */
 const lastFallbackToasted = new Map<string, string>()
 
 /**
- * Toast (once per account + source-model) when a request's model was
- * auto-downgraded to a fallback because the account's Opus weekly cap is
- * exhausted — so the downgrade is visible, not silent. De-duped so a session
- * pinned on the fallback for many turns toasts only when the source model
- * changes. Best-effort: a failed toast never affects the request.
+ * Toast (once per account + source-model + exhaustion window) when a request's
+ * model was auto-downgraded to a fallback because the account's Opus weekly cap
+ * is exhausted — so the downgrade is visible, not silent. The de-dupe value is
+ * scoped to the tier's exhaustion window (`opusCooldownUntil`): turns within
+ * one window toast once, but after the Opus cap RESETS and later re-exhausts (a
+ * NEW window, hence a new cooldown timestamp) the downgrade toasts again —
+ * otherwise every window after the first in a process's lifetime would be
+ * silent. A source-model change re-toasts within a window too. Best-effort: a
+ * failed toast never affects the request.
  */
 export async function notifyModelFallback(
   client: ToastClient,
@@ -64,8 +68,9 @@ export async function notifyModelFallback(
   toModel: string,
 ): Promise<void> {
   const key = `${providerID}:${account.id}`
-  if (lastFallbackToasted.get(key) === fromModel) return
-  lastFallbackToasted.set(key, fromModel)
+  const window = `${fromModel}@${account.opusCooldownUntil ?? 0}`
+  if (lastFallbackToasted.get(key) === window) return
+  lastFallbackToasted.set(key, window)
   await client.tui
     .showToast({
       body: {

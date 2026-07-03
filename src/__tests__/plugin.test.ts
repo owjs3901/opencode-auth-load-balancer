@@ -1177,6 +1177,48 @@ describe('Opus model-tier fallback', () => {
     )
   })
 
+  test("an Opus-tier 429's usage headers land in the pool via the recordOpusCooldown write", async () => {
+    // The Opus-429 branch is the one Anthropic response outcome that used to
+    // DISCARD its usage headers (rotation folds them into recordRotation,
+    // success into recordSuccess). Lock that the fresh 5h/7d numbers from the
+    // 429 are persisted with the tier cooldown — the downgraded retry here
+    // returns NO usage headers, so the only possible source of the 66% weekly
+    // reading below is the 429 response itself.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'OPUS_U', access: 'tokU' }))
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      if (n === 1)
+        return new Response('opus limited', {
+          status: 429,
+          headers: {
+            'anthropic-ratelimit-unified-representative-claim':
+              'seven_day_opus',
+            'anthropic-ratelimit-unified-reset': String(
+              Math.floor((now + 3 * DAY) / 1000),
+            ),
+            'anthropic-ratelimit-unified-7d-utilization': '0.66',
+            'anthropic-ratelimit-unified-7d-reset': String(
+              Math.floor((now + 2 * DAY) / 1000),
+            ),
+            'anthropic-ratelimit-unified-5h-utilization': '0.25',
+          },
+        })
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', opusPost())
+    expect(res.status).toBe(200)
+    expect(n).toBe(2) // Opus 429, then the downgraded retry
+    const a = (await readPool()).accounts.find((x) => x.id === 'OPUS_U')
+    expect(a?.opusCooldownUntil ?? 0).toBeGreaterThan(now)
+    expect(a?.usage.weekly?.utilization).toBe(0.66) // from the 429's headers
+    expect(a?.usage.hourly?.utilization).toBe(0.25)
+  })
+
   test('a persisted Opus cooldown downgrades the model PROACTIVELY (no rejected round-trip)', async () => {
     const now = Date.now()
     await mutatePool((pool) => {

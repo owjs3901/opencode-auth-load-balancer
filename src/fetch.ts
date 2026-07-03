@@ -203,19 +203,29 @@ async function recordRotation(
  * the downgraded model) — this write only lets FUTURE turns downgrade
  * proactively. Best-effort like every other bookkeeping write: a lock/read/write
  * skip just means the next turn re-discovers the limit via one more 429.
+ *
+ * `partial` is the Opus-429 response's parsed usage headers: both sibling
+ * outcomes of an Anthropic response record theirs (`recordRotation` on
+ * rotation, `recordSuccess` on success), and this write is ALREADY holding the
+ * pool lock — folding the fresh 5h/7d numbers in here (disjoint, commutative
+ * fields; zero extra I/O) keeps the scheduler ranking on them even when the
+ * downgraded same-account retry subsequently fails or throws.
  */
 async function recordOpusCooldown(
   accountId: string,
   until: number,
+  partial: Partial<UsageSnapshot> | null,
+  now: number,
 ): Promise<void> {
   await bestEffort('opus-cooldown', () =>
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
-      if (account)
-        account.opusCooldownUntil = Math.max(
-          account.opusCooldownUntil ?? 0,
-          until,
-        )
+      if (!account) return
+      if (partial) applyUsagePartial(account, partial, now)
+      account.opusCooldownUntil = Math.max(
+        account.opusCooldownUntil ?? 0,
+        until,
+      )
     }),
   )
 }
@@ -363,8 +373,8 @@ export function createLoadBalancedFetch(
     // Merge the user's request headers ONCE per request and reuse the result
     // throughout the retry loop (clone via `new Headers(baseHeaders)` per
     // attempt so each attempt's `applyAuth` mutation stays isolated). Before
-    // this hoist, `mergeHeaders(input, init)` was called 1 + MAX_ATTEMPTS
-    // times per request (once for deriveSessionKey, once per retry attempt)
+    // this hoist, `mergeHeaders(input, init)` was re-run once for
+    // deriveSessionKey plus once per rotation attempt of the retry loop
     // and `headers.delete(SESSION_HEADER)` ran defensively on every attempt
     // even though the value to strip is deterministic from input/init.
     const baseHeaders = mergeHeaders(input, init)
@@ -400,11 +410,9 @@ export function createLoadBalancedFetch(
     let lastError: unknown = null
 
     // `bodyStr` is captured from the enclosing closure and never reassigned, so its
-    // UTF-8 byte length is fixed per request. Hoist it out of the retry loop so it
-    // is computed ONCE (not up to MAX_ATTEMPTS times) and the "this is the request
-    // body's size" intent is explicit at the call site. The CJK cost-gate
-    // regression lock in plugin.test.ts exercises this value on both the
-    // gate-held and gate-passed branches.
+    // UTF-8 byte length is fixed per request; the memo below computes it at most
+    // ONCE. The CJK cost-gate regression lock in plugin.test.ts exercises the
+    // resolved value on both the gate-held and gate-passed branches.
     // Skip the UTF-8 walk entirely when the cost gate is DISABLED
     // (`cheapSwitchMaxBytes <= 0` — an explicit opt-out, NO LONGER the default):
     // a `<= 0` gate makes every moment "cheap", so `selectForSession` never reads
@@ -413,13 +421,23 @@ export function createLoadBalancedFetch(
     // pinned-session switch decisions (`isCheapMoment` inside `selectForSession`'s
     // non-forced branch), which are reachable only with a session key — with
     // `sessionKey === null` selection goes straight to `selectAccount` and
-    // `requestBytes` is provably never read, so skipping the walk is an exact
-    // identity (the parameter already defaults to 0).
-    // With the gate ON and a session pinned the walk runs per request — a native,
-    // allocation-free length the gate genuinely needs to size the request.
+    // `requestBytes` is provably never read, so passing 0 is an exact identity
+    // (the parameter already defaults to 0).
+    // With the gate ON and a session pinned, pass a memoized THUNK instead of an
+    // eager length: `selectForSession` reads `requestBytes` only inside its
+    // non-forced-migration block (pin over the soft threshold, or drainMigrate
+    // on) — on the dominant steady-state sticky path the value is provably never
+    // read, so the full-body UTF-8 walk would be pure waste there. The thunk
+    // defers the walk to the single read site and the memo keeps it at most one
+    // walk per request across rotation rounds.
+    let cachedRequestBytes = -1
     const requestBytes =
       cfg.cheapSwitchMaxBytes > 0 && sessionKey !== null && bodyStr
-        ? Buffer.byteLength(bodyStr, 'utf8')
+        ? () => {
+            if (cachedRequestBytes < 0)
+              cachedRequestBytes = Buffer.byteLength(bodyStr, 'utf8')
+            return cachedRequestBytes
+          }
         : 0
 
     // `transformBody` / `transformUrl` are deterministic in `bodyStr` / `input`,
@@ -433,7 +451,7 @@ export function createLoadBalancedFetch(
     // `resolveBaseUrl()` re-read of `ANTHROPIC_BASE_URL`; on OpenAI it meant
     // `JSON.parse` + `applyInstructions` + `include` Set merge + `JSON.stringify`
     // + `new URL(...)` + `/responses` rewrite. With this hoist that work runs
-    // once per request, not up to MAX_ATTEMPTS times during a 429/401 rotation.
+    // once per request, not once per attempt of a 429/401 rotation round.
     const transformedBody =
       bodyStr !== undefined ? adapter.transformBody(bodyStr) : init?.body
     const transformedUrl = adapter.transformUrl(input)
@@ -585,14 +603,35 @@ export function createLoadBalancedFetch(
               !fallbackInfo &&
               typeof attemptBody === 'string'
             ) {
+              // Fresh Date.now() for the same reason as `recordRotation` below:
+              // the loop-start `now` predates ensureAccessToken + the fetch.
+              const reactiveNow = Date.now()
               const plan = adapter.planReactiveFallback?.(
                 res,
                 attemptBody,
-                Date.now(),
+                reactiveNow,
               )
               if (plan) {
                 await res.body?.cancel().catch(ignore)
-                await recordOpusCooldown(account.id, plan.resetAt)
+                // Fold the 429's usage headers into the SAME pool write as the
+                // tier cooldown (headers stay readable after the body cancel) —
+                // otherwise a failing downgraded retry would leave the scheduler
+                // on the stale pre-request snapshot.
+                await recordOpusCooldown(
+                  account.id,
+                  plan.resetAt,
+                  adapter.parseUsageHeaders(res.headers),
+                  reactiveNow,
+                )
+                // Sync the LOCAL account object with what was just persisted:
+                // the fallback toast's per-window de-dupe key (notify.ts) reads
+                // `opusCooldownUntil`, so without this the very first (reactive)
+                // downgrade would toast under window `0` and a later real
+                // window value would spuriously re-toast the same exhaustion.
+                account.opusCooldownUntil = Math.max(
+                  account.opusCooldownUntil ?? 0,
+                  plan.resetAt,
+                )
                 attemptBody = plan.fallback.body
                 fallbackInfo = plan.fallback
                 // prettier-ignore

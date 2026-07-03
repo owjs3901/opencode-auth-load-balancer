@@ -173,7 +173,7 @@ export function selectForSession(
   now: number,
   cfg: SchedulerConfig = DEFAULT_CONFIG,
   exclude: ReadonlySet<string> = new Set(),
-  requestBytes = 0,
+  requestBytes: number | (() => number) = 0,
 ): Selection | null {
   const pinned = sessionKey
     ? findPinned(pool, providerID, sessionKey, exclude)
@@ -201,7 +201,14 @@ export function selectForSession(
     // `if (pinnedOverSoft)`). On the drain-only path (`!pinnedOverSoft &&
     // drainMigrate`) it is never observed, so skip the `maxUtil` work there.
     const pinnedUtil = pinnedOverSoft ? maxUtil(pinned, now) : 0
-    const cheap = isCheapMoment(requestBytes, cfg)
+    // Resolve the byte size HERE, at its single read site: callers on the hot
+    // path (fetch.ts) pass a memoized thunk so the full-body UTF-8 walk is paid
+    // only when this migration-reachable branch actually consults the gate —
+    // never on the dominant sticky path, which returns before this block.
+    const cheap = isCheapMoment(
+      typeof requestBytes === 'function' ? requestBytes() : requestBytes,
+      cfg,
+    )
     // Imminence is only meaningful on the `pinnedOverSoft` side, so fold
     // `pinnedOverSoft &&` into the definition: on the drain-only path
     // (`!pinnedOverSoft && drainMigrate`) `pinnedImminent` is then plainly false

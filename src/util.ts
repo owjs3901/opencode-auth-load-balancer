@@ -104,9 +104,10 @@ export function joinBlockTexts(content: unknown, separator: string): string {
 /**
  * Set `key`→`value` on a bounded `Map`, clearing it first once it is already
  * at `max` — a "clear-on-full" cache eviction with no LRU bookkeeping,
- * appropriate for the two call sites that only need a rough memory cap, not
- * exact recency: `sanitizeCache` in `providers/anthropic/transform.ts` and
- * `lastFallbackToasted` in `notify.ts`. Both were previously the same 2-line
+ * appropriate for the three call sites that only need a rough memory cap, not
+ * exact recency: `sanitizeCache` in `providers/anthropic/transform.ts`,
+ * `cachedHeader` in `providers/anthropic/cch.ts`, and `lastFallbackToasted`
+ * in `notify.ts`. The first two were previously the same 2-line
  * `if (map.size >= max) map.clear(); map.set(key, value)` block, each
  * commented as duplicating the other — this is that logic unified. Each call
  * site keeps its own cap constant and key/value semantics; only the eviction

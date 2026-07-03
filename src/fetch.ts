@@ -62,12 +62,12 @@ export async function bestEffort(
 
 /**
  * Merge a parsed usage partial into an account's usage snapshot in place. Shared
- * by THREE call sites — `recordRotation` (rotation path, stored row),
- * `recordSuccess` (success path, stored row), and the success path's local
- * pre-`onUse` apply (on the request's in-memory account object, so the switch
- * toast shows the response's fresh percentages) — so the field-merge contract
- * lives in ONE place and the paths can never diverge. Only defined fields
- * overwrite.
+ * by FOUR call sites — `recordRotation` (rotation path, stored row),
+ * `recordModelCooldown` (tier-cooldown path, stored row), `recordSuccess`
+ * (success path, stored row), and the success path's local pre-`onUse` apply
+ * (on the request's in-memory account object, so the switch toast shows the
+ * response's fresh percentages) — so the field-merge contract lives in ONE
+ * place and the paths can never diverge. Only defined fields overwrite.
  *
  * `capturedAt` is stamped ONLY when the partial actually delivered a WEEKLY
  * window. `capturedAt` is the gate `refreshUsageInBackground` uses to decide

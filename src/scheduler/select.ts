@@ -199,11 +199,12 @@ export function selectForSession(
   // Two-stage gate keeps the steady-state healthy follow-up turn (the dominant path)
   // free: skip the O(N) `selectAccount` scan AND the cost/imminence math whenever the
   // pin is below its soft threshold and drainMigrate is off. Both windows' `utilOf`
-  // are read ONCE here and reused for both `pinnedOverSoft` (inlining
-  // `overSoftThreshold`'s OR) and `pinnedUtil` (inlining `maxUtil`'s max) below —
-  // the same "hoist repeated window reads" pattern score-core.ts already applies on
-  // this hot path — instead of `overSoftThreshold` and a second `maxUtil(pinned)`
-  // call each re-running `utilOf` on both windows independently.
+  // are read ONCE here and reused for both `pinnedOverSoft` (the soft-threshold OR:
+  // weekly >= weeklyDrainTarget || hourly >= migrateAt) and `pinnedUtil` (inlining
+  // `maxUtil`'s max) below — the same "hoist repeated window reads" pattern
+  // score-core.ts already applies on this hot path — instead of a dedicated helper
+  // and a second `maxUtil(pinned)` call each re-running `utilOf` on both windows
+  // independently.
   const weeklyUtilPinned = utilOf(pinned.usage.weekly, now)
   const hourlyUtilPinned = utilOf(pinned.usage.hourly, now)
   const pinnedOverSoft =

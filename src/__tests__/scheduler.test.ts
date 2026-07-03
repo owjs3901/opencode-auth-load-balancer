@@ -4,7 +4,6 @@ import { DEFAULT_CONFIG } from '../scheduler/config'
 import {
   isAvailable,
   isExhausted,
-  overSoftThreshold,
   weeklyUrgency,
 } from '../scheduler/score-core'
 import { selectAccount, selectForSession } from '../scheduler/select'
@@ -290,41 +289,6 @@ describe('exclusion', () => {
     const a = account('a', { weekly: win(0.1, 30 * HOUR) })
     const b = account('b', { weekly: win(0.6, 30 * HOUR) })
     expect(pick([a, b], new Set(['a']))).toBe('b')
-  })
-})
-
-describe('overSoftThreshold (proactive-migration gate: weekly >= weeklyDrainTarget OR hourly >= migrateAt)', () => {
-  // Direct unit tests for the exported pure function itself: `selectForSession`
-  // (point 3a/3b/3c below) exercises it only through end-to-end selection outcomes,
-  // and select.ts's own soft-threshold check now inlines the same OR (see the
-  // "hoist repeated window reads" comment in select.ts) instead of calling this
-  // function, so its own branches need this direct coverage.
-  test('true when the WEEKLY window is at/over weeklyDrainTarget, regardless of the 5h window', () => {
-    const a = account('a', {
-      weekly: win(0.98, 30 * HOUR),
-      hourly: win(0, HOUR),
-    })
-    expect(overSoftThreshold(a, DEFAULT_CONFIG, NOW)).toBe(true)
-  })
-
-  test('true when the 5h window is at/over migrateAt, regardless of the weekly window', () => {
-    const a = account('a', {
-      weekly: win(0, 30 * HOUR),
-      hourly: win(0.95, HOUR),
-    })
-    expect(overSoftThreshold(a, DEFAULT_CONFIG, NOW)).toBe(true)
-  })
-
-  test('false when both windows are below their thresholds', () => {
-    const a = account('a', {
-      weekly: win(0.9, 30 * HOUR),
-      hourly: win(0.5, HOUR),
-    })
-    expect(overSoftThreshold(a, DEFAULT_CONFIG, NOW)).toBe(false)
-  })
-
-  test('false with no usage data at all (missing windows utilOf to 0)', () => {
-    expect(overSoftThreshold(account('a'), DEFAULT_CONFIG, NOW)).toBe(false)
   })
 })
 

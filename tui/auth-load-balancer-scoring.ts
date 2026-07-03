@@ -193,24 +193,6 @@ export function isExhausted(
   return maxUtil(account, now) >= cfg.exhaustedAt
 }
 
-/**
- * True once a pinned session should proactively move on — BEFORE the hard `exhaustedAt`
- * wall — so in-flight subagents never hit a 100% limit. The two windows use different
- * thresholds: the WEEKLY window drains to `weeklyDrainTarget` (~0.98 — perishable
- * use-it-or-lose-it quota, drained nearly full), while the shorter 5h window migrates
- * earlier at `migrateAt` (~0.95) for hard-limit safety.
- */
-export function overSoftThreshold(
-  account: ScoreAccount,
-  cfg: ScoreConfig,
-  now: number,
-): boolean {
-  return (
-    utilOf(account.usage.weekly, now) >= cfg.weeklyDrainTarget ||
-    utilOf(account.usage.hourly, now) >= cfg.migrateAt
-  )
-}
-
 /** Available = not disabled, not in cooldown, and not exhausted. */
 export function isAvailable(
   account: ScoreAccount,

@@ -1464,11 +1464,13 @@ describe('model-tier fallback (Opus/Fable → Sonnet)', () => {
       return new Response('ok', { status: 200 })
     }
     const toasts: string[] = []
+    const tiers: (string | undefined)[] = []
     const lb = createLoadBalancedFetch(
       anthropicAdapter,
       {
-        onModelFallback: (_p, _a, fromModel, toModel) => {
+        onModelFallback: (_p, _a, fromModel, toModel, fromTier) => {
           toasts.push(`${fromModel} -> ${toModel}`)
+          tiers.push(fromTier)
         },
       },
       catalog,
@@ -1485,6 +1487,12 @@ describe('model-tier fallback (Opus/Fable → Sonnet)', () => {
     expect(a?.modelCooldownsUntil?.opus ?? 0).toBeGreaterThan(now)
     // The chained toast reports what the user asked for → what served.
     expect(toasts).toEqual([`${FABLE} -> ${SONNET}`])
+    // The threaded tier reflects the LAST rung that actually triggered a
+    // downgrade (opus — the tier whose 429 immediately preceded the
+    // successful sonnet send), not the original fable trigger, which is
+    // exactly what notify.ts's de-dupe key needs to disambiguate from the
+    // still-active fable cooldown.
+    expect(tiers).toEqual(['opus'])
   })
 
   test('persisted cooldowns on BOTH tiers skip two rungs up front (fable body → sonnet, single upload)', async () => {

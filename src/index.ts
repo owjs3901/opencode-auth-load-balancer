@@ -76,13 +76,20 @@ function buildAuthHook(
             onUse: (providerID, account) => {
               void notifyOnSwitch(client, providerID, account)
             },
-            onModelFallback: (providerID, account, fromModel, toModel) => {
+            onModelFallback: (
+              providerID,
+              account,
+              fromModel,
+              toModel,
+              fromTier,
+            ) => {
               void notifyModelFallback(
                 client,
                 providerID,
                 account,
                 fromModel,
                 toModel,
+                fromTier,
               )
             },
           },

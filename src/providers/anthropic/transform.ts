@@ -1,4 +1,4 @@
-import { ignore, isPlainObject } from '../../util'
+import { ignore, isPlainObject, setBounded } from '../../util'
 import { type FetchInput, urlFromInput } from '../types'
 import { buildBillingHeaderValue } from './cch'
 import {
@@ -26,6 +26,12 @@ function prefixName(name: string): string {
 }
 
 function unprefixName(name: string): string {
+  // `StructuredOutput` is a REAL tool name whose canonical form is already
+  // PascalCase (unlike every other tool, which is camelCase before
+  // `prefixName` uppercases its first letter). Lowercasing it here — the
+  // inverse `prefixName` applies on the way in — would rename it to
+  // `structuredOutput` and silently break that tool's round-trip. This
+  // asymmetry with `prefixName` is intentional, not a bug: do not "fix" it.
   if (name === 'StructuredOutput') return name
   return `${name.charAt(0).toLowerCase()}${name.slice(1)}`
 }
@@ -243,8 +249,7 @@ function sanitizeSystemText(text: string): string {
     // `rule.match` is a literal string, so this is a safe global literal replace.
     result = result.replaceAll(rule.match, rule.replacement)
   const sanitized = result.trim()
-  if (sanitizeCache.size >= SANITIZE_CACHE_MAX) sanitizeCache.clear()
-  sanitizeCache.set(text, sanitized)
+  setBounded(sanitizeCache, text, sanitized, SANITIZE_CACHE_MAX)
   return sanitized
 }
 

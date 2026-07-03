@@ -309,6 +309,7 @@ interface FetchHooks {
     account: PoolAccount,
     fromModel: string,
     toModel: string,
+    fromTier?: string,
   ) => void
 }
 
@@ -805,6 +806,7 @@ export function createLoadBalancedFetch(
             account,
             fallbackInfo.fromModel,
             fallbackInfo.toModel,
+            fallbackInfo.fromTier,
           )
         hooks.onUse?.(adapter.id, account)
         await recordSuccess(
@@ -827,6 +829,14 @@ export function createLoadBalancedFetch(
           signal?.aborted === true ||
           (error instanceof Error && error.name === 'AbortError')
         if (aborted) throw error
+        // Any OTHER thrown error here (network/DNS/timeout failure, or
+        // `ensureAccessToken` rejecting on a refresh problem) intentionally
+        // shares the SHORT `AUTH_COOLDOWN_MS`, not the longer
+        // `ACCOUNT_COOLDOWN_MS` or a dedicated constant: most such failures
+        // are transient (a blip, a slow network), so assume that and retry
+        // the account sooner. A genuine credential problem keeps throwing on
+        // every attempt and re-cools each time, so it never gets treated as
+        // healthy for longer than a real rate-limit cooldown would allow.
         if (!account.disabledReason)
           await applyCooldown(account.id, AUTH_COOLDOWN_MS)
         // prettier-ignore

@@ -269,8 +269,12 @@ function until(resetAt: number | undefined, now: number): string {
   if (!isFiniteNumber(resetAt) || resetAt <= now) return '-'
   // Mirror the server's `relTime` (src/status.ts) semantics: floor minutes at 1
   // (a sub-30s future reset must not render "0m" — '-' is reserved for elapsed)
-  // and FLOOR the day figure (36h is "1d", not "2d") so the TUI bar can never
-  // disagree with the CLI/tool dashboard about the same account's countdown.
+  // and FLOOR the day figure (36h is "1d", not "2d") so the TUI bar's day/minute
+  // rounding can never disagree with the CLI/tool dashboard's. NOTE: this is
+  // coarser than the CLI within the hour band on purpose (bar-width budget) —
+  // the CLI renders `${hrs}h${mins % 60}m` (e.g. "3h25m"), this renders just
+  // `${hrs}h` (e.g. "3h"). Same day-level bucket, less precision inside it —
+  // not byte-identical output.
   const mins = Math.max(1, Math.round((resetAt - now) / 60_000))
   if (mins < 60) return `${mins}m`
   const hrs = Math.floor(mins / 60)

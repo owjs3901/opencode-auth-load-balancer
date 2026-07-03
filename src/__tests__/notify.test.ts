@@ -246,6 +246,86 @@ describe('notifyModelFallback', () => {
     expect(calls).toHaveLength(2)
   })
 
+  test('with fromTier supplied, scopes the de-dupe window to the TRIGGERING tier, not the max-scan', async () => {
+    // Two simultaneously-active tiers (a chained fable -> opus -> sonnet
+    // downgrade, both still cooling down): the max-scan alone would pick
+    // whichever window is LATER, not necessarily the tier that actually
+    // triggered this toast. `fromTier` must override that.
+    const { client, calls } = spyClient()
+    const now = Date.now()
+    const DAY = 24 * 60 * 60 * 1000
+    const fableWindow = now + DAY // triggering tier: the SMALLER window
+    const opusWindow = now + 5 * DAY // unrelated, but numerically LARGER
+    const a = testAccount({
+      id: 'tiered1',
+      label: 'tiered1',
+      modelCooldownsUntil: { fable: fableWindow, opus: opusWindow },
+    })
+    await notifyModelFallback(
+      client,
+      'p1',
+      a,
+      'claude-fable-5',
+      'claude-sonnet-4-6',
+      'fable',
+    )
+    expect(calls).toHaveLength(1)
+
+    // Same triggering tier/window on the next turn -> deduped, exactly like
+    // the max-scan path.
+    await notifyModelFallback(
+      client,
+      'p1',
+      a,
+      'claude-fable-5',
+      'claude-sonnet-4-6',
+      'fable',
+    )
+    expect(calls).toHaveLength(1)
+
+    // The fable tier re-exhausts in a NEW window -> announces again, even
+    // though the unrelated (larger) opus window is unchanged — proving the
+    // de-dupe key tracked fable's own window, not the max of the two.
+    const b = testAccount({
+      id: 'tiered1',
+      label: 'tiered1',
+      modelCooldownsUntil: { fable: fableWindow + DAY, opus: opusWindow },
+    })
+    await notifyModelFallback(
+      client,
+      'p1',
+      b,
+      'claude-fable-5',
+      'claude-sonnet-4-6',
+      'fable',
+    )
+    expect(calls).toHaveLength(2)
+  })
+
+  test('fromTier whose own window already expired falls back to the max-scan heuristic', async () => {
+    const { client, calls } = spyClient()
+    const now = Date.now()
+    const activeWindow = now + 24 * 60 * 60 * 1000
+    const a = testAccount({
+      id: 'staletier1',
+      label: 'staletier1',
+      // `fromTier` names a tier whose OWN cooldown already lapsed (stale
+      // bookkeeping), while a different tier is still genuinely active.
+      modelCooldownsUntil: { opus: now - 1000, sonnet: activeWindow },
+    })
+    await notifyModelFallback(
+      client,
+      'p1',
+      a,
+      'claude-opus-4-7',
+      'claude-sonnet-4-6',
+      'opus',
+    )
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.message).toContain('claude-opus-4-7')
+    expect(calls[0]?.message).toContain('claude-sonnet-4-6')
+  })
+
   test('survives a failing toast (best-effort, never affects the request)', async () => {
     const client: ToastClient = {
       tui: {

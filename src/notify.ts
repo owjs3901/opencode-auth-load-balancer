@@ -1,7 +1,7 @@
 import { displayUtil } from './scheduler/score-core'
 import { pct, providerName } from './status'
 import type { PoolAccount } from './types'
-import { ignore } from './util'
+import { ignore, setBounded } from './util'
 
 /** The slice of the opencode SDK client we need to show a toast. */
 export interface ToastClient {
@@ -57,7 +57,8 @@ export async function notifyOnSwitch(
 const lastFallbackToasted = new Map<string, string>()
 
 /**
- * Bounded cap for `lastFallbackToasted` (same "clear-on-full" pattern as
+ * Bounded cap for `lastFallbackToasted` (evicted via the shared `setBounded`
+ * helper in `src/util.ts` — the same "clear-on-full" pattern as
  * `sanitizeCache` in `src/providers/anthropic/transform.ts`): the map is keyed
  * by `${providerID}:${account.id}` and grows by one entry the first time an
  * account's model-tier downgrade is toasted. A long-running process that
@@ -84,8 +85,16 @@ const LAST_FALLBACK_TOASTED_MAX = 256
  * long-reset tier's timestamp can otherwise outrank a fresh, currently-active
  * tier's smaller timestamp and mask a genuinely NEW exhaustion window behind
  * an unchanged de-dupe key — silently suppressing the toast this function
- * exists to guarantee. Best-effort: a failed toast never affects the
- * request.
+ * exists to guarantee. When the caller supplies `fromTier` (the SPECIFIC
+ * tier that triggered this downgrade — `ModelFallback.fromTier`, threaded
+ * through from `downgradeModel`), that tier's own window is used directly
+ * instead of the max-scan: with two tiers simultaneously active on one
+ * account (e.g. `fable` capped, downgrade to `opus`, `opus` ALSO capped,
+ * downgrade to `sonnet`) the max-scan could pick whichever window is later,
+ * not necessarily the one that actually triggered this toast. Callers that
+ * don't supply `fromTier` (older call sites, or a provider with no tier
+ * concept) keep the max-scan heuristic unchanged. Best-effort: a failed
+ * toast never affects the request.
  */
 export async function notifyModelFallback(
   client: ToastClient,
@@ -93,21 +102,23 @@ export async function notifyModelFallback(
   account: PoolAccount,
   fromModel: string,
   toModel: string,
+  fromTier?: string,
 ): Promise<void> {
   const key = `${providerID}:${account.id}`
   const now = Date.now()
-  let latestWindow = 0
   const tiers = account.modelCooldownsUntil
-  if (tiers) {
+  let latestWindow = 0
+  const triggeringWindow = fromTier ? tiers?.[fromTier] : undefined
+  if (triggeringWindow !== undefined && triggeringWindow > now) {
+    latestWindow = triggeringWindow
+  } else if (tiers) {
     for (const until of Object.values(tiers)) {
       if (until > now && until > latestWindow) latestWindow = until
     }
   }
   const window = `${fromModel}@${latestWindow}`
   if (lastFallbackToasted.get(key) === window) return
-  if (lastFallbackToasted.size >= LAST_FALLBACK_TOASTED_MAX)
-    lastFallbackToasted.clear()
-  lastFallbackToasted.set(key, window)
+  setBounded(lastFallbackToasted, key, window, LAST_FALLBACK_TOASTED_MAX)
   await postToast(client, {
     title: `${providerName(providerID)} model fallback`,
     message: `▶ ${account.label}  ·  ${fromModel} → ${toModel} (model-tier weekly limit)`,

@@ -261,7 +261,16 @@ export function downgradeModel(
         DEFAULT_OPUS_FALLBACK_MODEL)
   if (modelFamily(target) === fromFamily) return null
   parsed.model = target
-  return { body: JSON.stringify(parsed), fromModel: from, toModel: target }
+  return {
+    body: JSON.stringify(parsed),
+    fromModel: from,
+    toModel: target,
+    // The tier that triggered this downgrade — already computed above as
+    // `fromFamily` — threaded through so `notifyModelFallback`'s de-dupe key
+    // can scope to the SPECIFIC tier instead of scanning for the max active
+    // cooldown (see `ModelFallback.fromTier`'s doc comment).
+    fromTier: fromFamily,
+  }
 }
 
 /** Decode the tier reset (unix seconds header → epoch ms), clamped/defaulted. */

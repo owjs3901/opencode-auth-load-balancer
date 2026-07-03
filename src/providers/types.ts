@@ -51,12 +51,18 @@ export interface AuthorizeRequest {
  * A request-body rewrite that downgrades the requested model to a cheaper
  * fallback (e.g. Claude Opus → Sonnet) when the primary model's tier quota is
  * exhausted on the chosen account. `body` is the rewritten JSON string to send;
- * `fromModel`/`toModel` drive the user-facing switch toast/log.
+ * `fromModel`/`toModel` drive the user-facing switch toast/log. `fromTier` is
+ * the specific tier name (e.g. "opus", "fable") that triggered the downgrade,
+ * when the adapter can identify it — optional so providers/callers that don't
+ * supply it (OpenAI, or tests predating this field) stay unaffected; consumers
+ * that key off a tier (`notifyModelFallback`'s de-dupe window) fall back to
+ * their previous heuristic when it's absent.
  */
 export interface ModelFallback {
   body: string
   fromModel: string
   toModel: string
+  fromTier?: string
 }
 
 /**

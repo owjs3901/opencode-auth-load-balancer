@@ -183,6 +183,8 @@ describe('downgradeModel', () => {
     const out = downgradeModel(body(FABLE), CATALOG)
     expect(out?.fromModel).toBe(FABLE)
     expect(out?.toModel).toBe('claude-opus-4-9')
+    // The triggering tier is threaded through for notify.ts's de-dupe key.
+    expect(out?.fromTier).toBe('fable')
     expect((JSON.parse(out!.body) as { model: string }).model).toBe(
       'claude-opus-4-9',
     )

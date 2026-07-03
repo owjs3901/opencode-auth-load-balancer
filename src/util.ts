@@ -101,6 +101,27 @@ export function joinBlockTexts(content: unknown, separator: string): string {
 }
 
 /**
+ * Set `key`→`value` on a bounded `Map`, clearing it first once it is already
+ * at `max` — a "clear-on-full" cache eviction with no LRU bookkeeping,
+ * appropriate for the two call sites that only need a rough memory cap, not
+ * exact recency: `sanitizeCache` in `providers/anthropic/transform.ts` and
+ * `lastFallbackToasted` in `notify.ts`. Both were previously the same 2-line
+ * `if (map.size >= max) map.clear(); map.set(key, value)` block, each
+ * commented as duplicating the other — this is that logic unified. Each call
+ * site keeps its own cap constant and key/value semantics; only the eviction
+ * mechanics are shared.
+ */
+export function setBounded<K, V>(
+  map: Map<K, V>,
+  key: K,
+  value: V,
+  max: number,
+): void {
+  if (map.size >= max) map.clear()
+  map.set(key, value)
+}
+
+/**
  * Convert epoch-seconds → epoch-ms while rejecting non-finite/zero/negative inputs
  * AND the `Number.MAX_VALUE`-overflow case: `1e308` is finite but `1e308 * 1000`
  * collapses to +Infinity, which would silently commit Infinity to

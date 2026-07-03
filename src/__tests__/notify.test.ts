@@ -184,6 +184,68 @@ describe('notifyModelFallback', () => {
     expect(calls).toHaveLength(2)
   })
 
+  test('ignores a stale, larger tier timestamp so a fresh smaller-window fallback still toasts', async () => {
+    // Nothing in the codebase purges a `modelCooldownsUntil[tier]` entry once
+    // it expires, so a long-reset tier exhausted weeks ago can still be
+    // sitting in the map with a NUMERICALLY LARGER (but already-past)
+    // timestamp than the tier that just triggered THIS downgrade. The max
+    // scan must ignore expired entries, or the de-dupe key stays unchanged
+    // across a genuinely new exhaustion window and the toast goes silent.
+    const { client, calls } = spyClient()
+    const now = Date.now()
+    const DAY = 24 * 60 * 60 * 1000
+    const a = testAccount({
+      id: 'stale1',
+      label: 'stale1',
+      modelCooldownsUntil: {
+        // Stale: expired long ago, but numerically larger than the fresh
+        // window below.
+        opus: now - DAY,
+        // Fresh: currently active, the tier that actually triggered this
+        // fallback, with a smaller absolute timestamp than the stale entry.
+        fable: now + 1000,
+      },
+    })
+    await notifyModelFallback(
+      client,
+      'p1',
+      a,
+      'claude-fable-5',
+      'claude-opus-4-9',
+    )
+    expect(calls).toHaveLength(1)
+
+    // Same account/source-model/fresh-window on the next turn -> deduped,
+    // exactly like the non-stale case.
+    await notifyModelFallback(
+      client,
+      'p1',
+      a,
+      'claude-fable-5',
+      'claude-opus-4-9',
+    )
+    expect(calls).toHaveLength(1)
+
+    // The fable tier re-exhausts in a NEW window -> must announce again, even
+    // though the stale opus entry is still sitting in the map unchanged.
+    const b = testAccount({
+      id: 'stale1',
+      label: 'stale1',
+      modelCooldownsUntil: {
+        opus: now - DAY,
+        fable: now + 2 * DAY,
+      },
+    })
+    await notifyModelFallback(
+      client,
+      'p1',
+      b,
+      'claude-fable-5',
+      'claude-opus-4-9',
+    )
+    expect(calls).toHaveLength(2)
+  })
+
   test('survives a failing toast (best-effort, never affects the request)', async () => {
     const client: ToastClient = {
       tui: {

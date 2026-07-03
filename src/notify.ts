@@ -78,8 +78,14 @@ const LAST_FALLBACK_TOASTED_MAX = 256
  * tier cap RESETS and later re-exhausts (a NEW window, hence a new cooldown
  * timestamp) the downgrade toasts again — otherwise every window after the
  * first in a process's lifetime would be silent. A source-model change
- * re-toasts within a window too. Best-effort: a failed toast never affects
- * the request.
+ * re-toasts within a window too. The scan ignores tier entries that have
+ * already expired (`until <= now`): nothing in the codebase purges a stale
+ * `modelCooldownsUntil[tier]` entry once its window passes, so an old,
+ * long-reset tier's timestamp can otherwise outrank a fresh, currently-active
+ * tier's smaller timestamp and mask a genuinely NEW exhaustion window behind
+ * an unchanged de-dupe key — silently suppressing the toast this function
+ * exists to guarantee. Best-effort: a failed toast never affects the
+ * request.
  */
 export async function notifyModelFallback(
   client: ToastClient,
@@ -89,11 +95,12 @@ export async function notifyModelFallback(
   toModel: string,
 ): Promise<void> {
   const key = `${providerID}:${account.id}`
+  const now = Date.now()
   let latestWindow = 0
   const tiers = account.modelCooldownsUntil
   if (tiers) {
     for (const until of Object.values(tiers)) {
-      if (until > latestWindow) latestWindow = until
+      if (until > now && until > latestWindow) latestWindow = until
     }
   }
   const window = `${fromModel}@${latestWindow}`

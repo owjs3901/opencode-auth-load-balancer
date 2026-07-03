@@ -690,7 +690,7 @@ describe('stateOf', () => {
         [],
         now,
       ),
-    ).toBe('cooldown')
+    ).toBe('cooldown 1m')
   })
 
   test('exhausted usage -> "full"', () => {

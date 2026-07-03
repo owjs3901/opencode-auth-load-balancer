@@ -26,7 +26,7 @@ export const USAGE_USER_AGENT = 'codex-cli'
 export const ORIGINATOR = 'opencode'
 export const OPENAI_BETA = 'responses=experimental'
 
-export const USER_AGENT = `opencode/0.1.0 (${platform()} ${release()}; ${arch()})`
+export const USER_AGENT = `opencode/0.2.0 (${platform()} ${release()}; ${arch()})`
 
 /** Stable per-process session id sent as the `session-id` header. */
 export const SESSION_ID = crypto.randomUUID()

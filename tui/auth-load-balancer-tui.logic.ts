@@ -352,7 +352,7 @@ export function stateOf(
   now: number,
 ): string {
   if (sa.disabledReason) return 're-login'
-  if (sa.cooldownUntil > now) return 'cooldown'
+  if (sa.cooldownUntil > now) return `cooldown ${until(sa.cooldownUntil, now)}`
   if (isExhausted(sa, cfg, now)) return 'full'
   // A model-tier limit keeps the account usable (other models + downgrade),
   // so it annotates rather than sidelines — mirrors src/status.ts.

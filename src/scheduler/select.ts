@@ -201,14 +201,6 @@ export function selectForSession(
     // `if (pinnedOverSoft)`). On the drain-only path (`!pinnedOverSoft &&
     // drainMigrate`) it is never observed, so skip the `maxUtil` work there.
     const pinnedUtil = pinnedOverSoft ? maxUtil(pinned, now) : 0
-    // Resolve the byte size HERE, at its single read site: callers on the hot
-    // path (fetch.ts) pass a memoized thunk so the full-body UTF-8 walk is paid
-    // only when this migration-reachable branch actually consults the gate —
-    // never on the dominant sticky path, which returns before this block.
-    const cheap = isCheapMoment(
-      typeof requestBytes === 'function' ? requestBytes() : requestBytes,
-      cfg,
-    )
     // Imminence is only meaningful on the `pinnedOverSoft` side, so fold
     // `pinnedOverSoft &&` into the definition: on the drain-only path
     // (`!pinnedOverSoft && drainMigrate`) `pinnedImminent` is then plainly false
@@ -216,12 +208,26 @@ export function selectForSession(
     // short-circuits on `pinnedOverSoft`, so this is behavior-neutral.
     const pinnedImminent =
       pinnedOverSoft && pinnedUtil >= cfg.exhaustedAt - IMMINENT_EXHAUSTION_BAND
+    // Resolve the byte size HERE, at its single read site: callers on the hot
+    // path (fetch.ts) pass a memoized thunk so the full-body UTF-8 walk is paid
+    // only when this migration-reachable branch actually consults the gate —
+    // never on the dominant sticky path, which returns before this block.
+    // `cheap` is only ever OBSERVED when the pin is not imminent (imminence
+    // bypasses the byte gate below) or when drainMigrate is on — so skip the
+    // full-body walk entirely in the one case its result can never be read
+    // (`pinnedImminent && !drainMigrate`, exactly where bodies are largest).
+    const cheap =
+      (!pinnedImminent || cfg.drainMigrate) &&
+      isCheapMoment(
+        typeof requestBytes === 'function' ? requestBytes() : requestBytes,
+        cfg,
+      )
     if (
       // Within `IMMINENT_EXHAUSTION_BAND` of hard exhaustion, a forced (cost-gate-
       // ignoring) switch is coming next turn anyway; migrating now is cheaper because
       // the re-sent conversation only grows. So a PROACTIVE move bypasses the byte gate
       // here — drain never does (it is opportunistic, not imminent).
-      (pinnedOverSoft && (cheap || pinnedImminent)) ||
+      (pinnedOverSoft && (pinnedImminent || cheap)) ||
       (cfg.drainMigrate && cheap)
     ) {
       const alt = selectAccount(

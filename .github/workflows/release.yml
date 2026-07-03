@@ -5,7 +5,7 @@ name: CI & Release
 #
 # changepacks-driven npm publishing:
 # On a pull request: the `release` job's changepacks/action posts/updates a
-# comment summarising the pending changepacks (whether the package will bump).
+h# comment summarising the pending changepacks (whether the package will bump).
 # On push to main:
 # - if changepack logs (.changepacks/changepack_log_*.json) are pending, the
 #   action opens/updates a "Update Versions" PR that runs `changepacks update`;
@@ -91,4 +91,4 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           publish: true
         env:
-          NPM_CONFIG_PROVENANCE: "true"
+                    NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

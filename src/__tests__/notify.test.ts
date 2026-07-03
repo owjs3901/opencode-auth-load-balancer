@@ -202,4 +202,42 @@ describe('notifyModelFallback', () => {
       ),
     ).resolves.toBeUndefined()
   })
+
+  test('lastFallbackToasted cache clears when full (LAST_FALLBACK_TOASTED_MAX = 256), re-toasting a pre-clear key but never missing a post-clear one', async () => {
+    // Bounded-resource regression test: without the cap, this map leaks one
+    // entry per distinct provider+account ever downgraded for the life of a
+    // long-running process (TUI sidebar deletes + re-logins over
+    // weeks/months). `lastFallbackToasted` is a MODULE-LEVEL singleton shared
+    // across every test in this file, so this test drives well past the cap
+    // (300 distinct keys, vs. the 256 max) rather than asserting an exact
+    // absolute size — that stays correct regardless of how many entries
+    // earlier tests in this describe block already left behind.
+    const { client, calls } = spyClient()
+    const windowEnd = Date.now() + 3 * 24 * 60 * 60 * 1000
+    const acctAt = (i: number) =>
+      testAccount({
+        id: `cap${i}`,
+        label: `cap${i}`,
+        modelCooldownsUntil: { opus: windowEnd },
+      })
+
+    const TOTAL = 300
+    for (let i = 0; i < TOTAL; i++) {
+      await notifyModelFallback(client, 'p1', acctAt(i), 'opus', 'sonnet')
+    }
+    expect(calls).toHaveLength(TOTAL) // every distinct key toasts once
+
+    // The MOST RECENTLY inserted key cannot yet have been evicted by a
+    // clear — its repeat still dedupes.
+    await notifyModelFallback(client, 'p1', acctAt(TOTAL - 1), 'opus', 'sonnet')
+    expect(calls).toHaveLength(TOTAL)
+
+    // 300 distinct inserts is well past the 256 cap, so at least one
+    // clear-on-full boundary fired somewhere in the loop above, wiping the
+    // FIRST key this test inserted. Its repeat (same exhaustion window) now
+    // re-toasts — the accepted trade-off: a clear can cause one EXTRA
+    // toast, but never a MISSED one.
+    await notifyModelFallback(client, 'p1', acctAt(0), 'opus', 'sonnet')
+    expect(calls).toHaveLength(TOTAL + 1)
+  })
 })

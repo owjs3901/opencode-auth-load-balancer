@@ -57,6 +57,19 @@ export async function notifyOnSwitch(
 const lastFallbackToasted = new Map<string, string>()
 
 /**
+ * Bounded cap for `lastFallbackToasted` (same "clear-on-full" pattern as
+ * `sanitizeCache` in `src/providers/anthropic/transform.ts`): the map is keyed
+ * by `${providerID}:${account.id}` and grows by one entry the first time an
+ * account's model-tier downgrade is toasted. A long-running process that
+ * accumulates account churn (TUI sidebar deletes + re-logins over
+ * weeks/months) would otherwise leak one entry per distinct account ever
+ * downgraded, unbounded for the process lifetime. 256 is generous headroom
+ * for any realistic pool; a clear only risks one spurious re-toast for an
+ * account that had already been deduped, never a missed one.
+ */
+const LAST_FALLBACK_TOASTED_MAX = 256
+
+/**
  * Toast (once per account + source-model + exhaustion window) when a request's
  * model was auto-downgraded to a fallback because its MODEL TIER's weekly cap
  * is exhausted — so the downgrade is visible, not silent. The de-dupe value is
@@ -85,6 +98,8 @@ export async function notifyModelFallback(
   }
   const window = `${fromModel}@${latestWindow}`
   if (lastFallbackToasted.get(key) === window) return
+  if (lastFallbackToasted.size >= LAST_FALLBACK_TOASTED_MAX)
+    lastFallbackToasted.clear()
   lastFallbackToasted.set(key, window)
   await postToast(client, {
     title: `${providerName(providerID)} model fallback`,

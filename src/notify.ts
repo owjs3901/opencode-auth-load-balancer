@@ -17,6 +17,17 @@ export interface ToastClient {
   }
 }
 
+/**
+ * Post a toast best-effort — a failed toast never affects the request. Both
+ * notifiers share this shell so the failure contract lives in one place.
+ */
+async function postToast(
+  client: ToastClient,
+  body: Parameters<ToastClient['tui']['showToast']>[0]['body'],
+): Promise<void> {
+  await client.tui.showToast({ body }).catch(ignore)
+}
+
 /** Last account toasted per provider, so we only notify on an actual switch. */
 const lastToasted = new Map<string, string>()
 
@@ -34,16 +45,12 @@ export async function notifyOnSwitch(
   lastToasted.set(providerID, account.id)
   const now = Date.now()
   const message = `▶ ${account.label}  ·  weekly ${pct(displayUtil(account.usage.weekly, now))} · 5h ${pct(displayUtil(account.usage.hourly, now))}`
-  await client.tui
-    .showToast({
-      body: {
-        title: `${providerName(providerID)} account`,
-        message,
-        variant: 'info',
-        duration: 4000,
-      },
-    })
-    .catch(ignore)
+  await postToast(client, {
+    title: `${providerName(providerID)} account`,
+    message,
+    variant: 'info',
+    duration: 4000,
+  })
 }
 
 /** Last `fromModel@window` toasted per provider+account, so a downgraded sticky session doesn't re-toast every turn. */
@@ -71,14 +78,10 @@ export async function notifyModelFallback(
   const window = `${fromModel}@${account.opusCooldownUntil ?? 0}`
   if (lastFallbackToasted.get(key) === window) return
   lastFallbackToasted.set(key, window)
-  await client.tui
-    .showToast({
-      body: {
-        title: `${providerName(providerID)} model fallback`,
-        message: `▶ ${account.label}  ·  ${fromModel} → ${toModel} (Opus weekly limit)`,
-        variant: 'warning',
-        duration: 6000,
-      },
-    })
-    .catch(ignore)
+  await postToast(client, {
+    title: `${providerName(providerID)} model fallback`,
+    message: `▶ ${account.label}  ·  ${fromModel} → ${toModel} (Opus weekly limit)`,
+    variant: 'warning',
+    duration: 6000,
+  })
 }

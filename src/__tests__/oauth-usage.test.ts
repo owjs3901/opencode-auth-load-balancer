@@ -251,8 +251,8 @@ describe('anthropic usage', () => {
   })
 
   test('parseUsageHeaders: falls back to zero resetAt when seconds-times-1000 overflows', () => {
-    // Regression lock symmetric with applyCooldown's `1e308` retry-after test
-    // (plugin.test.ts:363). `Number('1e308') = 1e308` is finite, but
+    // Regression lock symmetric with the `1e308` retry-after cooldown-overflow
+    // test in plugin.test.ts. `Number('1e308') = 1e308` is finite, but
     // `1e308 * 1000` exceeds Number.MAX_VALUE (~1.798e308) and collapses to
     // +Infinity. Pre-fix the inner `window()` helper committed `Infinity` to
     // pool.usage.{hourly,weekly}.resetAt, which then silently broke
@@ -320,7 +320,8 @@ describe('anthropic usage', () => {
   test('fetchUsage falls back to zero resetAt when endpoint resets_at is non-finite (JSON Infinity)', async () => {
     // Regression lock symmetric with the OpenAI endpoint reset_at overflow test
     // below (~line 490), the Anthropic parseUsageHeaders overflow test (~line
-    // 200), and the applyCooldown 1e308 retry-after test (plugin.test.ts:363).
+    // 200), and the `1e308` retry-after cooldown-overflow test in
+    // plugin.test.ts.
     // `JSON.parse('1e500')` yields Infinity in V8/Bun; pre-fix the number
     // branch of parseResetAt short-circuited the ms-vs-seconds heuristic
     // (`Infinity > 1e12` is true) and committed Infinity to

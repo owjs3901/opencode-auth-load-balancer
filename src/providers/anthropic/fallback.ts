@@ -39,6 +39,9 @@ const OPUS_RESET_FALLBACK_MS = 60 * 60 * 1000
  */
 const OPUS_RESET_MAX_MS = 8 * 24 * 60 * 60 * 1000
 
+/** Hoisted so the proactive per-attempt path avoids re-creating the RegExp object per call. */
+const OPUS_MODEL_RE = /opus/i
+
 /**
  * One-slot memo keyed by the raw env value (same pattern as `resolveBaseUrl` in
  * transform.ts): the fallback model is a constant string for a session's life,
@@ -79,7 +82,11 @@ export function downgradeModel(body: string): ModelFallback | null {
   // Only downgrade Opus (the only tier with a fallback target), and never
   // rewrite a body already on the fallback model (Sonnet-tier 429s have no
   // cheaper first-party target — they fall through to normal account cooldown).
-  if (typeof from !== 'string' || !/opus/i.test(from) || from === fallback) {
+  if (
+    typeof from !== 'string' ||
+    !OPUS_MODEL_RE.test(from) ||
+    from === fallback
+  ) {
     return null
   }
   parsed.model = fallback

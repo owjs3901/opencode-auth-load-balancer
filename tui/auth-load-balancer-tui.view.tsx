@@ -114,10 +114,11 @@ function toPoolShape(parsed: unknown): PoolShape {
   // (store.ts): a hand-edited `accounts: [null, …]` (or a primitive element)
   // otherwise throws inside the BottomBar/SidebarPanel memos (`x.id` on null)
   // every poll until the file is repaired by hand — the server only heals it
-  // on its next write. Only the IDENTITY fields are irreparable: store.ts:126
-  // drops rows with a non-string `id` OR `providerID` (they cannot be
-  // guessed), so drop exactly those here too. A non-string `label` is
-  // REPARABLE — store.ts:156 heals it to `''` and KEEPS the row — so healing
+  // on its next write. Only the IDENTITY fields are irreparable:
+  // `normalizeAccounts` (src/pool/store.ts) drops rows with a non-string `id`
+  // OR `providerID` (they cannot be guessed), so drop exactly those here too.
+  // A non-string `label` is REPARABLE — `normalizeAccounts`' label heal sets
+  // it to `''` and KEEPS the row — so healing
   // (not dropping) below keeps the bar/sidebar consistent with the server
   // dashboards AND keeps `mutatePoolFile` (which re-serializes this shape)
   // from permanently deleting an account the server would have healed. The
@@ -133,7 +134,8 @@ function toPoolShape(parsed: unknown): PoolShape {
     : undefined
   if (pool.accounts) {
     for (const row of pool.accounts) {
-      // Mirror store.ts:156 — an empty label renders blank but never throws.
+      // Mirror `normalizeAccounts`' label heal — an empty label renders
+      // blank but never throws.
       if (typeof (row as { label?: unknown }).label !== 'string') row.label = ''
     }
   }

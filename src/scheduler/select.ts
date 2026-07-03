@@ -44,6 +44,13 @@ function weeklyUtil(account: PoolAccount): number {
 }
 
 /**
+ * Shared "no exclusions" default for `selectAccount` / `selectForSession` —
+ * a defaulted `new Set()` would re-allocate on every defaulted call. The
+ * `ReadonlySet` type statically prevents mutating the shared instance.
+ */
+const NO_EXCLUSIONS: ReadonlySet<string> = new Set()
+
+/**
  * Pick the best account for a provider by weekly urgency.
  *
  * 1. Restrict to the provider's non-disabled accounts, minus `exclude` (already
@@ -60,7 +67,7 @@ export function selectAccount(
   providerID: string,
   now: number,
   cfg: SchedulerConfig = DEFAULT_CONFIG,
-  exclude: ReadonlySet<string> = new Set(),
+  exclude: ReadonlySet<string> = NO_EXCLUSIONS,
 ): Selection | null {
   // Single pass over `accounts` on this per-request hot path — no intermediate
   // filtered arrays, no per-call scoring closure. Both bests use a strict
@@ -172,7 +179,7 @@ export function selectForSession(
   sessionKey: string | null,
   now: number,
   cfg: SchedulerConfig = DEFAULT_CONFIG,
-  exclude: ReadonlySet<string> = new Set(),
+  exclude: ReadonlySet<string> = NO_EXCLUSIONS,
   requestBytes: number | (() => number) = 0,
 ): Selection | null {
   const pinned = sessionKey

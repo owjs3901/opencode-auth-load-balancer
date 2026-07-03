@@ -186,7 +186,7 @@ export function displayWidth(s: string): number {
     const cp = ch.codePointAt(0) ?? 0
     const wide =
       (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
-      (cp >= 0x2e80 && cp <= 0xa4cf) || // CJK Radicals .. Yi (covers CJK, Kana, Hangul syllables start)
+      (cp >= 0x2e80 && cp <= 0xa4cf) || // CJK Radicals .. Yi (covers CJK ideographs, Kana, Hangul Compatibility Jamo)
       (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul Syllables
       (cp >= 0xf900 && cp <= 0xfaff) || // CJK Compatibility Ideographs
       (cp >= 0xff00 && cp <= 0xff60) || // Fullwidth forms

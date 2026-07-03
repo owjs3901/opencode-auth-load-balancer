@@ -37,8 +37,8 @@ interface AccountStatus {
   weeklyResetAt: number
   available: boolean
   cooldownUntil: number
-  /** epoch ms until the Opus model-tier cap resets (0 = not exhausted). */
-  opusCooldownUntil: number
+  /** tier name → epoch ms until that model tier's cap resets (empty = none). */
+  modelCooldownsUntil: Record<string, number>
   disabledReason: string | null
   /** The account that most recently served a request for this provider. */
   current: boolean
@@ -85,7 +85,7 @@ function toStatus(
     weeklyResetAt: weekly && !weeklyExpired ? weekly.resetAt : 0,
     available,
     cooldownUntil: account.cooldownUntil,
-    opusCooldownUntil: account.opusCooldownUntil ?? 0,
+    modelCooldownsUntil: account.modelCooldownsUntil ?? {},
     disabledReason: account.disabledReason,
     current,
     rank,
@@ -177,11 +177,16 @@ function stateOf(a: AccountStatus, now: number): string {
   if (a.cooldownUntil > now) return `cooldown ${relTime(a.cooldownUntil, now)}`
   if (!a.available) return 'exhausted'
   const base = a.current ? 'in use' : 'ready'
-  // An Opus-tier limit does NOT sideline the account (it still serves non-Opus
-  // traffic and auto-downgrades Opus to the fallback) — so it annotates the
-  // usable state rather than replacing it, showing when Opus recovers.
-  if (a.opusCooldownUntil > now)
-    return `${base} · opus ${relTime(a.opusCooldownUntil, now)}`
+  // A model-tier limit does NOT sideline the account (it still serves every
+  // other model; tier requests steer to accounts with headroom or downgrade)
+  // — so each active tier annotates the usable state rather than replacing
+  // it, showing when that tier recovers. Sorted by tier name (raw `< / >`,
+  // no locale) so the rendered bytes are deterministic.
+  const tiers = Object.entries(a.modelCooldownsUntil)
+    .filter(([, until]) => until > now)
+    .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
+    .map(([tier, until]) => `${tier} ${relTime(until, now)}`)
+  if (tiers.length > 0) return `${base} · ${tiers.join(' · ')}`
   return base
 }
 

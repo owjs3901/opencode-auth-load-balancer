@@ -155,18 +155,44 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
       row.usage.weekly = normalizeWindow(row.usage.weekly)
     }
     if (!Number.isFinite(row.cooldownUntil)) row.cooldownUntil = 0
-    // Mirror the `cooldownUntil` heal for the Opus model-tier cooldown. Unlike
-    // the fields above it is OPTIONAL (absent on legacy files / OpenAI rows), so
-    // leave `undefined` compact — but heal a hand-edited non-finite value
-    // (`"opusCooldownUntil": "soon"`, or `1e999` → Infinity via JSON.parse):
-    // both `stateOf`'s `> now` and `planProactiveFallback`'s gate would
-    // otherwise treat Infinity as "Opus exhausted forever", silently downgrading
-    // every Opus request to the fallback model until the file is repaired.
-    if (
-      row.opusCooldownUntil !== undefined &&
-      !Number.isFinite(row.opusCooldownUntil)
-    ) {
-      row.opusCooldownUntil = 0
+    // Mirror the `cooldownUntil` heal for the per-tier model cooldown map.
+    // Unlike the fields above it is OPTIONAL (absent on legacy files / OpenAI
+    // rows), so leave `undefined` compact — but heal hand-edited garbage: a
+    // non-object map is dropped wholesale, and a non-finite or non-positive
+    // entry (`"opus": "soon"`, or `1e999` → Infinity via JSON.parse) is
+    // deleted. Both `stateOf`'s `> now` and the fetch loop's proactive
+    // tier-skip would otherwise treat Infinity as "tier exhausted forever",
+    // silently steering every request for that tier off/around this account
+    // until the file is repaired.
+    if (row.modelCooldownsUntil !== undefined) {
+      if (!isPlainObject(row.modelCooldownsUntil)) {
+        delete row.modelCooldownsUntil
+      } else {
+        const map = row.modelCooldownsUntil
+        for (const tier of Object.keys(map)) {
+          const until = map[tier]
+          if (
+            typeof until !== 'number' ||
+            !Number.isFinite(until) ||
+            until <= 0
+          )
+            delete map[tier]
+        }
+        if (Object.keys(map).length === 0) delete row.modelCooldownsUntil
+      }
+    }
+    // LEGACY fold: pre-tier-map files stored an Opus-only `opusCooldownUntil`.
+    // Fold a finite positive value into `modelCooldownsUntil.opus` (max-merged
+    // so a newer map entry is never regressed) and delete the legacy field —
+    // `mutatePool` writes the normalized pool back, so the file migrates on
+    // the next bookkeeping write and is never written in the old shape again.
+    if (row.opusCooldownUntil !== undefined) {
+      const legacy = row.opusCooldownUntil
+      if (Number.isFinite(legacy) && legacy > 0) {
+        const map = (row.modelCooldownsUntil ??= {})
+        map.opus = Math.max(map.opus ?? 0, legacy)
+      }
+      delete row.opusCooldownUntil
     }
     // A hand-edited non-number `expires` ("tomorrow") makes `needsRefresh`'s
     // `expires - skew <= now` compare NaN → false FOREVER: the long-expired

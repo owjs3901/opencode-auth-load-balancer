@@ -76,7 +76,9 @@ interface PoolAccount {
   label: string
   usage?: { weekly?: UsageWindow | null; hourly?: UsageWindow | null } | null
   cooldownUntil?: number
-  /** epoch ms until the Opus model-tier cap resets (Opus auto-downgrades to the fallback until then). */
+  /** tier name → epoch ms until that model tier's cap resets (tier requests steer around the account until then). */
+  modelCooldownsUntil?: Record<string, number> | null
+  /** LEGACY pre-tier-map field (folded into `modelCooldownsUntil.opus` for display until the server migrates the file). */
   opusCooldownUntil?: number
   disabledReason?: string | null
 }
@@ -279,13 +281,41 @@ function until(resetAt: number | undefined, now: number): string {
 function winPct(w: UsageWindow | null | undefined, now: number): string {
   return pct(displayUtil(toScoreWindow(w), now))
 }
-function stateOf(sa: ScoreAccount, opusResetAt: number, now: number): string {
+/**
+ * The account's active model-tier cooldowns as display pairs, read from the
+ * RAW pool file: entries must be finiteness-guarded like every other raw read
+ * here (a hand-edited `1e999` → Infinity would render "opus" forever), and
+ * the LEGACY `opusCooldownUntil` field is folded in (max-merged) until the
+ * server migrates the file. Sorted by tier name (raw `< / >`, no locale) so
+ * the bar can never disagree with the CLI/tool dashboard's ordering.
+ */
+function tierResets(a: PoolAccount, now: number): [string, number][] {
+  const raw = a.modelCooldownsUntil
+  const merged: Record<string, number> = {}
+  if (isPlainRecordValue(raw)) {
+    for (const [tier, resetAt] of Object.entries(
+      raw as Record<string, unknown>,
+    )) {
+      if (isFiniteNumber(resetAt) && resetAt > now) merged[tier] = resetAt
+    }
+  }
+  if (isFiniteNumber(a.opusCooldownUntil) && a.opusCooldownUntil > now) {
+    merged.opus = Math.max(merged.opus ?? 0, a.opusCooldownUntil)
+  }
+  return Object.entries(merged).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
+}
+function stateOf(
+  sa: ScoreAccount,
+  tiers: [string, number][],
+  now: number,
+): string {
   if (sa.disabledReason) return 're-login'
   if (sa.cooldownUntil > now) return 'cooldown'
   if (isExhausted(sa, cfg, now)) return 'full'
-  // An Opus-tier limit keeps the account usable (non-Opus traffic + auto-
-  // downgrade), so it annotates rather than sidelines — mirrors src/status.ts.
-  if (opusResetAt > now) return `opus ${until(opusResetAt, now)}`
+  // A model-tier limit keeps the account usable (other models + downgrade),
+  // so it annotates rather than sidelines — mirrors src/status.ts.
+  if (tiers.length > 0)
+    return tiers.map(([tier, at]) => `${tier} ${until(at, now)}`).join(' · ')
   return ''
 }
 
@@ -412,14 +442,10 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           wkReset: until(a.usage?.weekly?.resetAt, now),
           h: pct(displayUtil(sa.usage.hourly, now)),
           hReset: until(a.usage?.hourly?.resetAt, now),
-          // Finiteness-guarded like the other RAW reads above: a hand-edited
-          // `1e999` opusCooldownUntil (Infinity via JSON.parse) would otherwise
-          // render "opus" forever until the server heals the file.
-          state: stateOf(
-            sa,
-            isFiniteNumber(a.opusCooldownUntil) ? a.opusCooldownUntil : 0,
-            now,
-          ),
+          // Raw reads are finiteness-guarded inside tierResets: a hand-edited
+          // `1e999` entry (Infinity via JSON.parse) would otherwise render its
+          // tier annotation forever until the server heals the file.
+          state: stateOf(sa, tierResets(a, now), now),
         }
       })
       return { provider: PROVIDER_NAMES[providerID] ?? providerID, rows }

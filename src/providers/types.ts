@@ -61,12 +61,15 @@ export interface ModelFallback {
 
 /**
  * Reactive-fallback plan returned from a rejected (429) response whose headers
- * indicate a MODEL-TIER cap (not an account-wide limit). `fallback` is the
- * downgraded body to retry on the SAME account; `resetAt` (epoch ms) is when the
- * tier recovers — persisted as `PoolAccount.opusCooldownUntil` so subsequent
- * turns downgrade PROACTIVELY without paying another rejected round-trip.
+ * indicate a MODEL-TIER cap (not an account-wide limit). `tier` names the
+ * limited tier (e.g. "opus", "fable") and `resetAt` (epoch ms) is when it
+ * recovers — persisted as `PoolAccount.modelCooldownsUntil[tier]` so subsequent
+ * requests for that tier avoid the account without paying a rejected
+ * round-trip. `fallback` is the downgraded body the fetch loop adopts once the
+ * WHOLE pool proves limited for the tier.
  */
 export interface ReactiveModelFallback {
+  tier: string
   resetAt: number
   fallback: ModelFallback
 }
@@ -117,29 +120,39 @@ export interface ProviderAdapter {
   /** Classify an HTTP status for rotation decisions. */
   classifyError(status: number): ErrorClass
 
-  // --- model-tier fallback (optional; Anthropic Opus→Sonnet) ---------------
+  // --- model-tier fallback (optional; Anthropic Opus/Fable→Sonnet) ---------
   /**
-   * PROACTIVE downgrade (pre-send): when this account's model-tier cap is
-   * known-exhausted (`account.opusCooldownUntil > now`) and `body` requests that
-   * tier's model, return a body with the model rewritten to the fallback so the
-   * request never pays a rejected round-trip. null = send `body` unchanged.
-   * Absent on providers without a model-tier fallback (OpenAI) — the fetch loop
-   * treats an absent hook as "no downgrade".
+   * The model TIER `body` asks for (the `modelCooldownsUntil` key the fetch
+   * loop consults BEFORE sending, to steer the request onto an account with
+   * tier headroom), or null when the body has no recognizable tier. Absent on
+   * providers without per-tier caps (OpenAI) — the fetch loop treats an absent
+   * hook as "no tier logic".
    */
-  planProactiveFallback?(
+  requestModelTier?(body: string): string | null
+  /**
+   * Pure body downgrade: rewrite `body`'s model ONE RUNG DOWN the fallback
+   * ladder — the best model of the next family below, chosen from `models`
+   * (the provider's catalog, e.g. opencode's configured model list) — or null
+   * when disabled / not downgradable. The fetch loop adopts it when EVERY
+   * candidate account is limited for the current body's tier — so the
+   * downgraded request can then reuse any of them, preferably the session's
+   * pinned account (keeping its prompt cache). Each call descends at least
+   * one family, so repeated adoption terminates.
+   */
+  planModelFallback?(
     body: string,
-    account: PoolAccount,
-    now: number,
+    models: readonly string[],
   ): ModelFallback | null
   /**
-   * REACTIVE downgrade (post-429): when a rejected response's headers indicate a
-   * MODEL-TIER cap (not account-wide) that `body`'s model can fall back from,
-   * return the downgraded body to retry on the SAME account plus the tier
-   * `resetAt` to persist. null = treat the 429 as a normal account rotation.
+   * REACTIVE classification (post-429): when a rejected response's headers
+   * indicate a MODEL-TIER cap (not account-wide) that `body`'s model can fall
+   * down the ladder from, return the tier + its `resetAt` to persist and the
+   * downgraded body. null = treat the 429 as a normal account rotation.
    */
   planReactiveFallback?(
     res: Response,
     body: string,
     now: number,
+    models: readonly string[],
   ): ReactiveModelFallback | null
 }

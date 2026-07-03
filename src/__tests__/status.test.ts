@@ -194,16 +194,17 @@ describe('renderStatus', () => {
     expect(renderStatus([], NOW)).toContain('no accounts registered')
   })
 
-  test('an Opus-tier limit annotates the usable state with an opus countdown (never "cooldown")', () => {
-    // The account stays AVAILABLE (Opus auto-downgrades to the fallback; non-Opus
-    // traffic is unaffected), so its state is the usable base ("in use"/"ready")
-    // annotated with when Opus recovers — NOT a whole-account "cooldown" (the bug
-    // that showed every account as cooled down when only Opus was exhausted).
+  test('a model-tier limit annotates the usable state with a tier countdown (never "cooldown")', () => {
+    // The account stays AVAILABLE (tier requests steer to other accounts or
+    // downgrade; every other model is unaffected), so its state is the usable
+    // base ("in use"/"ready") annotated with when the tier recovers — NOT a
+    // whole-account "cooldown" (the bug that showed every account as cooled
+    // down when only one model tier was exhausted).
     const p = pool(
       [
         {
           ...acc({ id: 'op', weekly: win(0.3, 20 * HOUR) }),
-          opusCooldownUntil: NOW + 4 * HOUR,
+          modelCooldownsUntil: { opus: NOW + 4 * HOUR },
         },
       ],
       { anthropic: 'op' },
@@ -211,10 +212,29 @@ describe('renderStatus', () => {
     const status = buildStatus(p, NOW)
     const row = status[0]!.accounts.find((a) => a.id === 'op')!
     expect(row.available).toBe(true)
-    expect(row.opusCooldownUntil).toBe(NOW + 4 * HOUR)
+    expect(row.modelCooldownsUntil.opus).toBe(NOW + 4 * HOUR)
     const out = renderStatus(status, NOW)
     expect(out).toContain('in use · opus 4h0m')
     expect(out).not.toContain('cooldown')
+  })
+
+  test('multiple exhausted tiers render sorted by tier name; elapsed entries are dropped', () => {
+    const p = pool(
+      [
+        {
+          ...acc({ id: 'mt', weekly: win(0.3, 20 * HOUR) }),
+          modelCooldownsUntil: {
+            opus: NOW + 4 * HOUR,
+            fable: NOW + 2 * HOUR,
+            haiku: NOW - 1, // already recovered — must not render
+          },
+        },
+      ],
+      { anthropic: 'mt' },
+    )
+    const out = renderStatus(buildStatus(p, NOW), NOW)
+    expect(out).toContain('in use · fable 2h0m · opus 4h0m')
+    expect(out).not.toContain('haiku')
   })
 })
 

@@ -1101,15 +1101,16 @@ describe('load-balanced fetch — edge paths', () => {
   })
 })
 
-describe('Opus model-tier fallback', () => {
+describe('model-tier fallback (Opus/Fable → Sonnet)', () => {
   const OPUS = 'claude-opus-4-7'
+  const FABLE = 'claude-fable-5'
   const SONNET = 'claude-sonnet-4-6' // the built-in default fallback
   const DAY = 24 * 60 * 60 * 1000
 
-  function opusPost(): { method: 'POST'; body: string } {
+  function modelPost(model: string): { method: 'POST'; body: string } {
     return {
       method: 'POST',
-      body: JSON.stringify({ model: OPUS, messages: [] }),
+      body: JSON.stringify({ model, messages: [] }),
     }
   }
   function spyClient() {
@@ -1124,18 +1125,18 @@ describe('Opus model-tier fallback', () => {
     }
     return { client, toasts }
   }
-  function opusLimited(now: number, withReset = true): Response {
+  function tierLimited(claim: string, now: number, withReset = true): Response {
     const headers: Record<string, string> = {
-      'anthropic-ratelimit-unified-representative-claim': 'seven_day_opus',
+      'anthropic-ratelimit-unified-representative-claim': claim,
     }
     if (withReset)
       headers['anthropic-ratelimit-unified-reset'] = String(
         Math.floor((now + 3 * DAY) / 1000),
       )
-    return new Response('opus limited', { status: 429, headers })
+    return new Response('tier limited', { status: 429, headers })
   }
 
-  test('an Opus-tier 429 downgrades the model and retries the SAME account, without cooling it down', async () => {
+  test('a tier 429 on the ONLY account downgrades the model and retries the same account, without cooling it down', async () => {
     const now = Date.now()
     await mutatePool((pool) => {
       pool.accounts.push(account({ id: 'OPUS_A', access: 'tokA' }))
@@ -1152,7 +1153,9 @@ describe('Opus model-tier fallback', () => {
           'authorization',
         ),
       )
-      return n === 1 ? opusLimited(now) : new Response('ok', { status: 200 })
+      return n === 1
+        ? tierLimited('seven_day_opus', now)
+        : new Response('ok', { status: 200 })
     }
     const { client, toasts } = spyClient()
     const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
@@ -1161,24 +1164,69 @@ describe('Opus model-tier fallback', () => {
     })
     const res = await opts.fetch(
       'https://api.anthropic.com/v1/messages',
-      opusPost(),
+      modelPost(OPUS),
     )
     expect(res.status).toBe(200)
-    expect(n).toBe(2) // Opus 429, then the downgraded retry
-    // Same account both attempts; model rewritten Opus → Sonnet on the retry.
+    expect(n).toBe(2) // Opus-tier 429, then the downgraded retry
+    // Same account both attempts (no other candidate); model rewritten
+    // Opus → Sonnet on the retry once the whole pool proved tier-limited.
     expect(auths).toEqual(['Bearer tokA', 'Bearer tokA'])
     expect(models).toEqual([OPUS, SONNET])
     const a = (await readPool()).accounts.find((x) => x.id === 'OPUS_A')
     expect(a?.cooldownUntil).toBe(0) // NOT sidelined account-wide
-    expect(a?.opusCooldownUntil ?? 0).toBeGreaterThan(now) // Opus tier persisted
+    expect(a?.modelCooldownsUntil?.opus ?? 0).toBeGreaterThan(now) // tier persisted
     // The downgrade is announced, not silent.
     expect(toasts.some((m) => m.includes(OPUS) && m.includes(SONNET))).toBe(
       true,
     )
   })
 
-  test("an Opus-tier 429's usage headers land in the pool via the recordOpusCooldown write", async () => {
-    // The Opus-429 branch is the one Anthropic response outcome that used to
+  test('a tier 429 with another candidate available rotates and serves the ORIGINAL model (no downgrade, no account cooldown)', async () => {
+    // THE headline scenario: fable-5's own weekly cap is exhausted on A while
+    // A's aggregate 5h/7d windows still have headroom. A must NOT enter an
+    // account-wide cooldown (that used to block every model on A for 5 min),
+    // and the request must keep its requested model by rotating to B.
+    const now = Date.now()
+    await seedAB(now)
+    const models: string[] = []
+    const auths: (string | null)[] = []
+    let n = 0
+    respond = (_url, init) => {
+      n += 1
+      models.push((JSON.parse(String(init?.body)) as { model: string }).model)
+      auths.push(
+        new Headers(init?.headers as HeadersInit | undefined).get(
+          'authorization',
+        ),
+      )
+      return n === 1
+        ? tierLimited('seven_day_fable', now)
+        : new Response('ok', { status: 200 })
+    }
+    const { client, toasts } = spyClient()
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+    const res = await opts.fetch(
+      'https://api.anthropic.com/v1/messages',
+      modelPost(FABLE),
+    )
+    expect(res.status).toBe(200)
+    expect(n).toBe(2)
+    expect(models).toEqual([FABLE, FABLE]) // B was asked for the ORIGINAL model
+    expect(auths).toEqual(['Bearer tokA', 'Bearer tokB'])
+    const pool = await readPool()
+    const a = pool.accounts.find((x) => x.id === 'A')
+    expect(a?.cooldownUntil).toBe(0) // A stays usable for every other model
+    expect(a?.modelCooldownsUntil?.fable ?? 0).toBeGreaterThan(now)
+    expect(pool.lastSelected.anthropic).toBe('B')
+    // No downgrade happened, so no fallback toast.
+    expect(toasts.some((m) => m.includes(SONNET))).toBe(false)
+  })
+
+  test("a tier 429's usage headers land in the pool via the recordModelCooldown write", async () => {
+    // The tier-429 branch is the one Anthropic response outcome that used to
     // DISCARD its usage headers (rotation folds them into recordRotation,
     // success into recordSuccess). Lock that the fresh 5h/7d numbers from the
     // 429 are persisted with the tier cooldown — the downgraded retry here
@@ -1210,23 +1258,26 @@ describe('Opus model-tier fallback', () => {
       return new Response('ok', { status: 200 })
     }
     const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', opusPost())
+    const res = await lb(
+      'https://api.anthropic.com/v1/messages',
+      modelPost(OPUS),
+    )
     expect(res.status).toBe(200)
-    expect(n).toBe(2) // Opus 429, then the downgraded retry
+    expect(n).toBe(2) // tier 429, then the downgraded retry
     const a = (await readPool()).accounts.find((x) => x.id === 'OPUS_U')
-    expect(a?.opusCooldownUntil ?? 0).toBeGreaterThan(now)
+    expect(a?.modelCooldownsUntil?.opus ?? 0).toBeGreaterThan(now)
     expect(a?.usage.weekly?.utilization).toBe(0.66) // from the 429's headers
     expect(a?.usage.hourly?.utilization).toBe(0.25)
   })
 
-  test('a persisted Opus cooldown downgrades the model PROACTIVELY (no rejected round-trip)', async () => {
+  test('a persisted tier cooldown skips the account up front and downgrades only when the whole pool is limited', async () => {
     const now = Date.now()
     await mutatePool((pool) => {
       pool.accounts.push(
         account({
           id: 'OPUS_P',
           access: 'tokP',
-          opusCooldownUntil: now + DAY,
+          modelCooldownsUntil: { opus: now + DAY },
         }),
       )
     })
@@ -1244,37 +1295,259 @@ describe('Opus model-tier fallback', () => {
     })
     const res = await opts.fetch(
       'https://api.anthropic.com/v1/messages',
-      opusPost(),
+      modelPost(OPUS),
     )
     expect(res.status).toBe(200)
-    expect(n).toBe(1) // downgraded up front — no 429 round-trip
+    expect(n).toBe(1) // skipped, pool proved limited, downgraded — no 429 round-trip
     expect(models).toEqual([SONNET])
     expect(toasts.some((m) => m.includes(SONNET))).toBe(true)
   })
 
-  test('a fallback-side 429 (the downgraded retry also fails) cools the account down and rotates', async () => {
+  test('a persisted tier cooldown steers the tier request onto the OTHER account (original model preserved)', async () => {
     const now = Date.now()
     await seedAB(now)
-    let n = 0
-    respond = () => {
-      n += 1
-      if (n === 1) return opusLimited(now) // A: Opus-tier 429 → downgrade
-      if (n === 2) return new Response('still limited', { status: 429 }) // downgraded retry also 429s
-      return new Response('ok', { status: 200 }) // rotate to B
+    await mutatePool((pool) => {
+      const a = pool.accounts.find((x) => x.id === 'A')
+      if (a) a.modelCooldownsUntil = { fable: now + DAY }
+    })
+    const models: string[] = []
+    const auths: (string | null)[] = []
+    respond = (_url, init) => {
+      models.push((JSON.parse(String(init?.body)) as { model: string }).model)
+      auths.push(
+        new Headers(init?.headers as HeadersInit | undefined).get(
+          'authorization',
+        ),
+      )
+      return new Response('ok', { status: 200 })
     }
     const lb = createLoadBalancedFetch(anthropicAdapter)
-    const res = await lb('https://api.anthropic.com/v1/messages', opusPost())
+    const res = await lb(
+      'https://api.anthropic.com/v1/messages',
+      modelPost(FABLE),
+    )
     expect(res.status).toBe(200)
-    expect(n).toBe(3) // A opus-429, A downgraded-429, then B 200
-    const a = (await readPool()).accounts.find((x) => x.id === 'A')
-    // The second 429 was NOT an Opus-tier fallback (fallbackInfo already set),
-    // so it cooled A down account-wide and rotated — legacy behavior resumes.
-    expect(a?.cooldownUntil).toBeGreaterThan(now)
-    expect(a?.opusCooldownUntil ?? 0).toBeGreaterThan(now) // opus reset still recorded
-    expect((await readPool()).lastSelected.anthropic).toBe('B')
+    // A (the scheduler's first pick) was skipped WITHOUT an upload; B served
+    // the original model.
+    expect(models).toEqual([FABLE])
+    expect(auths).toEqual(['Bearer tokB'])
+    expect(
+      (await readPool()).accounts.find((x) => x.id === 'A')?.cooldownUntil,
+    ).toBe(0)
   })
 
-  test('with the fallback DISABLED (empty env) an Opus-tier 429 cools the whole account down', async () => {
+  test('a 429 on the already-downgraded body falls through to a normal account cooldown (no downgrade spin)', async () => {
+    process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '0' // fail fast — no cooldown wait
+    try {
+      const now = Date.now()
+      await mutatePool((pool) => {
+        pool.accounts.push(account({ id: 'ONLY', access: 'tokO' }))
+      })
+      const models: string[] = []
+      let n = 0
+      respond = (_url, init) => {
+        n += 1
+        models.push((JSON.parse(String(init?.body)) as { model: string }).model)
+        return n === 1
+          ? tierLimited('seven_day_opus', now)
+          : new Response('still limited', { status: 429 })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      await expect(
+        lb('https://api.anthropic.com/v1/messages', modelPost(OPUS)),
+      ).rejects.toThrow('returned 429')
+      expect(n).toBe(2) // opus 429 → downgraded retry 429 → hard fail, no spin
+      expect(models).toEqual([OPUS, SONNET])
+      const a = (await readPool()).accounts.find((x) => x.id === 'ONLY')
+      expect(a?.cooldownUntil).toBeGreaterThan(now) // fallback-side 429 = real cooldown
+      expect(a?.modelCooldownsUntil?.opus ?? 0).toBeGreaterThan(now)
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
+    }
+  })
+
+  test('a mid-rotation account 429 still ends on the downgraded pinned pool (tier 429 on A, plain 429 on B, Sonnet served by A)', async () => {
+    const now = Date.now()
+    await seedAB(now)
+    const models: string[] = []
+    const auths: (string | null)[] = []
+    let n = 0
+    respond = (_url, init) => {
+      n += 1
+      models.push((JSON.parse(String(init?.body)) as { model: string }).model)
+      auths.push(
+        new Headers(init?.headers as HeadersInit | undefined).get(
+          'authorization',
+        ),
+      )
+      if (n === 1) return tierLimited('seven_day_opus', now) // A: tier 429
+      if (n === 2) return new Response('limited', { status: 429 }) // B: plain 429
+      return new Response('ok', { status: 200 }) // A again, downgraded
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb(
+      'https://api.anthropic.com/v1/messages',
+      modelPost(OPUS),
+    )
+    expect(res.status).toBe(200)
+    expect(n).toBe(3)
+    // B was probed with the ORIGINAL model; only after every candidate proved
+    // unusable for it did the request downgrade — back on tier-limited A,
+    // which never entered an account-wide cooldown.
+    expect(models).toEqual([OPUS, OPUS, SONNET])
+    expect(auths).toEqual(['Bearer tokA', 'Bearer tokB', 'Bearer tokA'])
+    const pool = await readPool()
+    const a = pool.accounts.find((x) => x.id === 'A')
+    const b = pool.accounts.find((x) => x.id === 'B')
+    expect(a?.cooldownUntil).toBe(0)
+    expect(a?.modelCooldownsUntil?.opus ?? 0).toBeGreaterThan(now)
+    expect(b?.cooldownUntil).toBeGreaterThan(now) // B's plain 429 = real cooldown
+    expect(pool.lastSelected.anthropic).toBe('A')
+  })
+
+  test('the fallback LADDER picks the best next-family model from the provider catalog (fable → opus-4-9)', async () => {
+    // THE requested behavior: a capped fable-5 must land on the newest Opus
+    // the catalog actually has (4-9 over 4-8) — not on a fixed Sonnet.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'LAD', access: 'tokL' }))
+    })
+    const models: string[] = []
+    let n = 0
+    respond = (_url, init) => {
+      n += 1
+      models.push((JSON.parse(String(init?.body)) as { model: string }).model)
+      return n === 1
+        ? tierLimited('seven_day_fable', now)
+        : new Response('ok', { status: 200 })
+    }
+    const cost = { input: 1, output: 1, cache: { read: 1, write: 1 } }
+    const { client, toasts } = spyClient()
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {
+        'claude-fable-5': { cost },
+        'claude-opus-4-8': { cost },
+        'claude-opus-4-9': { cost },
+        'claude-sonnet-4-6': { cost },
+      },
+    })
+    const res = await opts.fetch(
+      'https://api.anthropic.com/v1/messages',
+      modelPost(FABLE),
+    )
+    expect(res.status).toBe(200)
+    expect(models).toEqual([FABLE, 'claude-opus-4-9'])
+    expect(
+      toasts.some((m) => m.includes(FABLE) && m.includes('claude-opus-4-9')),
+    ).toBe(true)
+  })
+
+  test('chained descent: fable AND opus tiers capped → fable → opus-4-9 → sonnet, no account cooldown, toast reports fable → sonnet', async () => {
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'CHAIN', access: 'tokC' }))
+    })
+    const catalog = [
+      'claude-fable-5',
+      'claude-opus-4-8',
+      'claude-opus-4-9',
+      'claude-sonnet-4-6',
+    ]
+    const models: string[] = []
+    let n = 0
+    respond = (_url, init) => {
+      n += 1
+      models.push((JSON.parse(String(init?.body)) as { model: string }).model)
+      if (n === 1) return tierLimited('seven_day_fable', now)
+      if (n === 2) return tierLimited('seven_day_opus', now)
+      return new Response('ok', { status: 200 })
+    }
+    const toasts: string[] = []
+    const lb = createLoadBalancedFetch(
+      anthropicAdapter,
+      {
+        onModelFallback: (_p, _a, fromModel, toModel) => {
+          toasts.push(`${fromModel} -> ${toModel}`)
+        },
+      },
+      catalog,
+    )
+    const res = await lb(
+      'https://api.anthropic.com/v1/messages',
+      modelPost(FABLE),
+    )
+    expect(res.status).toBe(200)
+    expect(models).toEqual([FABLE, 'claude-opus-4-9', SONNET])
+    const a = (await readPool()).accounts.find((x) => x.id === 'CHAIN')
+    expect(a?.cooldownUntil).toBe(0) // never sidelined account-wide
+    expect(a?.modelCooldownsUntil?.fable ?? 0).toBeGreaterThan(now)
+    expect(a?.modelCooldownsUntil?.opus ?? 0).toBeGreaterThan(now)
+    // The chained toast reports what the user asked for → what served.
+    expect(toasts).toEqual([`${FABLE} -> ${SONNET}`])
+  })
+
+  test('persisted cooldowns on BOTH tiers skip two rungs up front (fable body → sonnet, single upload)', async () => {
+    const now = Date.now()
+    const DAY_MS = 24 * 60 * 60 * 1000
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({
+          id: 'TWO',
+          access: 'tokT',
+          modelCooldownsUntil: { fable: now + DAY_MS, opus: now + DAY_MS },
+        }),
+      )
+    })
+    const catalog = ['claude-fable-5', 'claude-opus-4-9', 'claude-sonnet-4-6']
+    const models: string[] = []
+    respond = (_url, init) => {
+      models.push((JSON.parse(String(init?.body)) as { model: string }).model)
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter, {}, catalog)
+    const res = await lb(
+      'https://api.anthropic.com/v1/messages',
+      modelPost(FABLE),
+    )
+    expect(res.status).toBe(200)
+    expect(models).toEqual([SONNET]) // both rungs skipped without an upload
+  })
+
+  test('with the fallback DISABLED (empty env) a persisted tier cooldown does NOT skip — the request is sent as-is', async () => {
+    // The skip exists to steer toward a downgrade; with the downgrade off the
+    // documented opt-out semantics apply (send, and let a real 429 cool the
+    // account). A stale map entry must not shadow-ban the account.
+    process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL = ''
+    try {
+      const now = Date.now()
+      await mutatePool((pool) => {
+        pool.accounts.push(
+          account({
+            id: 'DIS',
+            access: 'tokD',
+            modelCooldownsUntil: { opus: now + DAY },
+          }),
+        )
+      })
+      const models: string[] = []
+      respond = (_url, init) => {
+        models.push((JSON.parse(String(init?.body)) as { model: string }).model)
+        return new Response('ok', { status: 200 })
+      }
+      const lb = createLoadBalancedFetch(anthropicAdapter)
+      const res = await lb(
+        'https://api.anthropic.com/v1/messages',
+        modelPost(OPUS),
+      )
+      expect(res.status).toBe(200)
+      expect(models).toEqual([OPUS]) // original model, no skip, no downgrade
+    } finally {
+      delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL
+    }
+  })
+
+  test('with the fallback DISABLED (empty env) a tier 429 cools the whole account down', async () => {
     process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL = ''
     try {
       const now = Date.now()
@@ -1282,15 +1555,20 @@ describe('Opus model-tier fallback', () => {
       let n = 0
       respond = () => {
         n += 1
-        return n === 1 ? opusLimited(now) : new Response('ok', { status: 200 })
+        return n === 1
+          ? tierLimited('seven_day_opus', now)
+          : new Response('ok', { status: 200 })
       }
       const lb = createLoadBalancedFetch(anthropicAdapter)
-      const res = await lb('https://api.anthropic.com/v1/messages', opusPost())
+      const res = await lb(
+        'https://api.anthropic.com/v1/messages',
+        modelPost(OPUS),
+      )
       expect(res.status).toBe(200)
-      expect(n).toBe(2) // no inline downgrade — A cooled, rotated to B
+      expect(n).toBe(2) // no downgrade — A cooled account-wide, rotated to B
       const a = (await readPool()).accounts.find((x) => x.id === 'A')
       expect(a?.cooldownUntil).toBeGreaterThan(now)
-      expect(a?.opusCooldownUntil ?? 0).toBe(0) // no Opus persistence when disabled
+      expect(a?.modelCooldownsUntil).toBeUndefined() // no tier persistence when disabled
     } finally {
       delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL
     }

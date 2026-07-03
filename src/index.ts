@@ -70,20 +70,27 @@ function buildAuthHook(
         .catch(ignore)
       return {
         apiKey: '',
-        fetch: createLoadBalancedFetch(adapter, {
-          onUse: (providerID, account) => {
-            void notifyOnSwitch(client, providerID, account)
+        fetch: createLoadBalancedFetch(
+          adapter,
+          {
+            onUse: (providerID, account) => {
+              void notifyOnSwitch(client, providerID, account)
+            },
+            onModelFallback: (providerID, account, fromModel, toModel) => {
+              void notifyModelFallback(
+                client,
+                providerID,
+                account,
+                fromModel,
+                toModel,
+              )
+            },
           },
-          onModelFallback: (providerID, account, fromModel, toModel) => {
-            void notifyModelFallback(
-              client,
-              providerID,
-              account,
-              fromModel,
-              toModel,
-            )
-          },
-        }),
+          // The provider's configured model ids — the fallback ladder picks a
+          // tier-capped request's downgrade target from models that actually
+          // exist here (e.g. a capped fable-5 lands on the newest Opus).
+          Object.keys(provider.models),
+        ),
       }
     },
     methods: [

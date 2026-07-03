@@ -1,7 +1,11 @@
 import type { PoolAccount } from '../../types'
 import { classifyHttpStatus, type ProviderAdapter } from '../types'
 import { PROVIDER_ID } from './constants'
-import { planProactiveFallback, planReactiveFallback } from './fallback'
+import {
+  downgradeModel,
+  planReactiveFallback,
+  requestModelTier,
+} from './fallback'
 import {
   authorize as oauthAuthorize,
   exchange as oauthExchange,
@@ -42,8 +46,9 @@ export const anthropicAdapter: ProviderAdapter = {
 
   classifyError: classifyHttpStatus,
 
-  // Opus-tier fallback (Opus → Sonnet). OpenAI leaves these unset — the fetch
-  // loop treats an absent hook as "no downgrade".
-  planProactiveFallback,
+  // Model-tier fallback (Opus/Fable → Sonnet). OpenAI leaves these unset —
+  // the fetch loop treats absent hooks as "no tier logic".
+  requestModelTier,
+  planModelFallback: downgradeModel,
   planReactiveFallback,
 }

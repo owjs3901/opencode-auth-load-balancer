@@ -58,14 +58,15 @@ const lastFallbackToasted = new Map<string, string>()
 
 /**
  * Toast (once per account + source-model + exhaustion window) when a request's
- * model was auto-downgraded to a fallback because the account's Opus weekly cap
+ * model was auto-downgraded to a fallback because its MODEL TIER's weekly cap
  * is exhausted — so the downgrade is visible, not silent. The de-dupe value is
- * scoped to the tier's exhaustion window (`opusCooldownUntil`): turns within
- * one window toast once, but after the Opus cap RESETS and later re-exhausts (a
- * NEW window, hence a new cooldown timestamp) the downgrade toasts again —
- * otherwise every window after the first in a process's lifetime would be
- * silent. A source-model change re-toasts within a window too. Best-effort: a
- * failed toast never affects the request.
+ * scoped to the latest tier exhaustion window (the max entry of
+ * `modelCooldownsUntil`): turns within one window toast once, but after the
+ * tier cap RESETS and later re-exhausts (a NEW window, hence a new cooldown
+ * timestamp) the downgrade toasts again — otherwise every window after the
+ * first in a process's lifetime would be silent. A source-model change
+ * re-toasts within a window too. Best-effort: a failed toast never affects
+ * the request.
  */
 export async function notifyModelFallback(
   client: ToastClient,
@@ -75,12 +76,19 @@ export async function notifyModelFallback(
   toModel: string,
 ): Promise<void> {
   const key = `${providerID}:${account.id}`
-  const window = `${fromModel}@${account.opusCooldownUntil ?? 0}`
+  let latestWindow = 0
+  const tiers = account.modelCooldownsUntil
+  if (tiers) {
+    for (const until of Object.values(tiers)) {
+      if (until > latestWindow) latestWindow = until
+    }
+  }
+  const window = `${fromModel}@${latestWindow}`
   if (lastFallbackToasted.get(key) === window) return
   lastFallbackToasted.set(key, window)
   await postToast(client, {
     title: `${providerName(providerID)} model fallback`,
-    message: `▶ ${account.label}  ·  ${fromModel} → ${toModel} (Opus weekly limit)`,
+    message: `▶ ${account.label}  ·  ${fromModel} → ${toModel} (model-tier weekly limit)`,
     variant: 'warning',
     duration: 6000,
   })

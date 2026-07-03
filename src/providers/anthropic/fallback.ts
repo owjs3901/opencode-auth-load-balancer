@@ -1,77 +1,233 @@
-import type { PoolAccount } from '../../types'
 import { secondsToMs } from '../../util'
 import type { ModelFallback, ReactiveModelFallback } from '../types'
 import {
+  DEFAULT_FAMILY_ORDER,
   DEFAULT_OPUS_FALLBACK_MODEL,
+  MODEL_TIER_CLAIM_RE,
   REPRESENTATIVE_CLAIM_HEADER,
-  SEVEN_DAY_OPUS_CLAIM,
   UNIFIED_RESET_HEADER,
 } from './constants'
 
 /**
- * Opus model-tier fallback for Claude Max accounts.
+ * Model-tier fallback for Claude Max accounts.
  *
- * Max subscriptions have a SEPARATE weekly cap for Opus. When it is exhausted,
- * `/v1/messages` with an Opus model returns HTTP 429 carrying
- * `anthropic-ratelimit-unified-representative-claim: seven_day_opus` — even
- * though the account's aggregate 5h/7d windows (all the load balancer tracked)
- * still have headroom and NON-Opus models work fine. The old behavior cooled the
- * WHOLE account down 5 min and rotated, cascading every account into cooldown.
+ * Max subscriptions have SEPARATE weekly caps per premium model tier (Fable,
+ * Opus, …). When one is exhausted, `/v1/messages` with that tier's model
+ * returns HTTP 429 carrying a tier-scoped
+ * `anthropic-ratelimit-unified-representative-claim` (e.g. `seven_day_opus`,
+ * `seven_day_fable`) — even though the account's aggregate 5h/7d windows (all
+ * the load balancer tracked) still have headroom and every OTHER model works
+ * fine. The old behavior cooled the WHOLE account down 5 min and rotated,
+ * cascading every account into cooldown and blocking non-limited models too.
  *
- * Instead this module downgrades the request's `model` (Opus → the configured
- * fallback, default Sonnet) on the SAME account so the user keeps working, and
- * the fetch loop persists `PoolAccount.opusCooldownUntil` so later turns
- * downgrade PROACTIVELY (no wasted rejected round-trip). Verified against Claude
- * Code's `errors.ts` (headers, not the JSON body, are the authoritative signal).
+ * Instead this module classifies the tier from the claim header and rewrites
+ * the request's `model` one rung DOWN the fallback ladder: the family order
+ * (`DEFAULT_FAMILY_ORDER`, env-overridable) is walked strictly below the
+ * limited model's family, and the highest-versioned model of the first family
+ * present in the provider's catalog wins (a capped `claude-fable-5` becomes
+ * `claude-opus-4-9` when the catalog has it, `claude-opus-4-8` otherwise).
+ * Each rewrite descends at least one family, so a request can chain
+ * fable → opus → sonnet as tiers prove capped, and always terminates. The
+ * fetch loop persists each tier reset in
+ * `PoolAccount.modelCooldownsUntil[tier]` so later requests for that tier
+ * PREFER an account with tier headroom (skip, not cooldown) and only
+ * downgrade when the whole pool is tier-limited. Verified against Claude
+ * Code's `errors.ts` (headers, not the JSON body, are the authoritative
+ * signal).
  */
 
 /**
- * When a rejected response omits a usable `unified-reset`, cool Opus down only
- * briefly so the account re-probes soon rather than downgrading for a full week
- * on a missing header. A real Opus weekly reset arrives on the next 429.
+ * When a rejected response omits a usable `unified-reset`, cool the tier down
+ * only briefly so the account re-probes soon rather than downgrading for a
+ * full week on a missing header. A real tier weekly reset arrives on the next
+ * 429.
  */
-const OPUS_RESET_FALLBACK_MS = 60 * 60 * 1000
+const TIER_RESET_FALLBACK_MS = 60 * 60 * 1000
 /**
- * The Opus weekly window is ≤ 7 days; anything past this bound is a broken
- * server/proxy clock. Reject it (fall through to the brief default) exactly like
- * `fetch.ts`'s `RETRY_AFTER_MAX_MS` guard, so a bogus far-future reset can't pin
- * every Opus request onto the fallback model for years.
+ * A tier weekly window is ≤ 7 days; anything past this bound is a broken
+ * server/proxy clock. Reject it (fall through to the brief default) exactly
+ * like `fetch.ts`'s `RETRY_AFTER_MAX_MS` guard, so a bogus far-future reset
+ * can't pin every request for that tier onto the fallback model for years.
  */
-const OPUS_RESET_MAX_MS = 8 * 24 * 60 * 60 * 1000
+const TIER_RESET_MAX_MS = 8 * 24 * 60 * 60 * 1000
 
-/** Hoisted so the proactive per-attempt path avoids re-creating the RegExp object per call. */
-const OPUS_MODEL_RE = /opus/i
+/** Matches a purely alphabetic model-id segment (`opus`, `fable`, `sonnet`). */
+const ALPHA_SEGMENT_RE = /^[a-z]+$/
+/** Matches a purely numeric model-id segment (`4`, `9`, `20250929`). */
+const DIGIT_SEGMENT_RE = /^\d+$/
 
 /**
- * One-slot memo keyed by the raw env value (same pattern as `resolveBaseUrl` in
- * transform.ts): the fallback model is a constant string for a session's life,
- * yet `downgradeModel` would otherwise re-read + re-branch `process.env` on
- * every proactive/reactive attempt.
- *
- * Semantics: env UNSET → the built-in default (feature ON); env EMPTY (after
- * trim) → `null` (feature DISABLED, revert to account-wide cooldown); otherwise
- * the trimmed id.
+ * The model FAMILY of a first-party model id — the tier name its per-model cap
+ * is keyed by: `claude-opus-4-7` → "opus", `claude-fable-5` → "fable",
+ * `claude-3-5-sonnet-latest` → "sonnet". The first alphabetic dash-segment
+ * after the vendor prefix; null when no such segment exists (unknown /
+ * non-first-party ids never participate in tier logic).
  */
-let cachedModel: { raw: string | undefined; model: string | null } | null = null
-export function resolveFallbackModel(): string | null {
-  const raw = process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL
-  if (cachedModel && cachedModel.raw === raw) return cachedModel.model
-  const model =
-    raw === undefined ? DEFAULT_OPUS_FALLBACK_MODEL : raw.trim() || null
-  cachedModel = { raw, model }
-  return model
+export function modelFamily(model: string): string | null {
+  for (const segment of model.toLowerCase().split('-')) {
+    if (segment !== 'claude' && ALPHA_SEGMENT_RE.test(segment)) return segment
+  }
+  return null
 }
 
 /**
- * Rewrite an Opus request body's `model` to the configured fallback. Returns the
- * rewritten body (+ the from/to ids for the toast) or null when: the feature is
- * disabled, the body is not JSON, `model` is absent/non-string, the model is not
- * an Opus model, or it already equals the fallback. Callers gate on a cheap
- * condition (stored `opusCooldownUntil` or a response header) BEFORE this parse.
+ * The tier a request body asks for (the `modelCooldownsUntil` key to consult
+ * before sending), or null when the body is not JSON / has no string model /
+ * the model has no recognizable family.
  */
-export function downgradeModel(body: string): ModelFallback | null {
-  const fallback = resolveFallbackModel()
-  if (!fallback) return null
+export function requestModelTier(body: string): string | null {
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(body) as Record<string, unknown>
+  } catch {
+    return null
+  }
+  const model = parsed.model
+  return typeof model === 'string' ? modelFamily(model) : null
+}
+
+/**
+ * All numeric dash-segments of a model id, in order — its comparable version
+ * vector. Works for both id styles: `claude-opus-4-9` → [4,9] and
+ * `claude-3-5-sonnet-latest` → [3,5] (non-numeric segments like `latest` are
+ * ignored), and dated snapshots simply extend the vector
+ * (`claude-sonnet-4-5-20250929` → [4,5,20250929]).
+ */
+function versionVector(model: string): number[] {
+  const out: number[] = []
+  for (const segment of model.split('-')) {
+    if (DIGIT_SEGMENT_RE.test(segment)) out.push(Number(segment))
+  }
+  return out
+}
+
+/**
+ * Element-wise version comparison (> 0 = `a` newer). A missing element
+ * compares as -1, so `4-6` beats `4-5-20250929` on the second element and a
+ * dated snapshot beats its own undated alias (more specific wins a tie).
+ */
+function compareVersions(a: number[], b: number[]): number {
+  const len = Math.max(a.length, b.length)
+  for (let i = 0; i < len; i++) {
+    const d = (a[i] ?? -1) - (b[i] ?? -1)
+    if (d !== 0) return d
+  }
+  return 0
+}
+
+/** The highest-versioned catalog model of `family`, or null when it has none. */
+function bestOfFamily(
+  models: readonly string[],
+  family: string,
+): string | null {
+  let best: string | null = null
+  let bestVersion: number[] = []
+  for (const model of models) {
+    if (modelFamily(model) !== family) continue
+    const version = versionVector(model)
+    if (best === null || compareVersions(version, bestVersion) > 0) {
+      best = model
+      bestVersion = version
+    }
+  }
+  return best
+}
+
+/**
+ * One-slot memo for the family order, keyed by the raw env value (same
+ * pattern as `resolveFallbackSetting` below). Env semantics: unset/blank →
+ * `DEFAULT_FAMILY_ORDER`; otherwise a comma-separated best→worst list
+ * (entries trimmed + lowercased, empties dropped).
+ */
+let cachedOrder: { raw: string | undefined; order: readonly string[] } | null =
+  null
+export function resolveFamilyOrder(): readonly string[] {
+  const raw = process.env.OPENCODE_AUTH_LB_ANTHROPIC_FAMILY_ORDER
+  if (cachedOrder && cachedOrder.raw === raw) return cachedOrder.order
+  const parsed = (raw ?? '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0)
+  const order = parsed.length > 0 ? parsed : DEFAULT_FAMILY_ORDER
+  cachedOrder = { raw, order }
+  return order
+}
+
+/**
+ * How the downgrade target is chosen:
+ *  - `ladder` (env unset): walk the family order through the catalog.
+ *  - `pinned` (env = a model id): always that model, bypassing the ladder.
+ *  - `disabled` (env = empty/blank): no downgrade — account-wide cooldown.
+ */
+type FallbackSetting =
+  { kind: 'ladder' } | { kind: 'pinned'; model: string } | { kind: 'disabled' }
+
+/**
+ * One-slot memo keyed by the raw env value (same pattern as `resolveBaseUrl`
+ * in transform.ts): the setting is a constant for a session's life, yet
+ * `downgradeModel` would otherwise re-read + re-branch `process.env` on every
+ * skip/reactive attempt.
+ */
+let cachedSetting: {
+  raw: string | undefined
+  setting: FallbackSetting
+} | null = null
+export function resolveFallbackSetting(): FallbackSetting {
+  const raw = process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL
+  if (cachedSetting && cachedSetting.raw === raw) return cachedSetting.setting
+  const trimmed = raw?.trim()
+  const setting: FallbackSetting =
+    raw === undefined
+      ? { kind: 'ladder' }
+      : trimmed
+        ? { kind: 'pinned', model: trimmed }
+        : { kind: 'disabled' }
+  cachedSetting = { raw, setting }
+  return setting
+}
+
+/**
+ * The ladder pick for a capped `from` model: the best catalog model of the
+ * first family strictly BELOW `from`'s in the configured order. A family not
+ * in the order at all (a future top tier — historically new premium tiers
+ * appear at the top) starts the walk from the order's first entry. Null when
+ * no lower family has a catalog model (the caller falls back to the static
+ * last-resort default).
+ */
+export function resolveLadderTarget(
+  from: string,
+  models: readonly string[],
+): string | null {
+  const order = resolveFamilyOrder()
+  const fromFamily = modelFamily(from)
+  // indexOf -1 (unknown family) + 1 = 0 — the walk covers the whole order.
+  const start = order.indexOf(fromFamily ?? '') + 1
+  for (let i = start; i < order.length; i++) {
+    const family = order[i]
+    if (family === undefined) continue
+    const best = bestOfFamily(models, family)
+    if (best !== null) return best
+  }
+  return null
+}
+
+/**
+ * Rewrite a request body's `model` one rung down the fallback ladder (or to
+ * the pinned override). Returns the rewritten body (+ the from/to ids for the
+ * toast) or null when: the feature is disabled, the body is not JSON, `model`
+ * is absent/non-string/family-less, or the chosen target lands in the SAME
+ * family (a same-tier rewrite cannot escape that tier's cap — e.g. a
+ * Sonnet-tier 429 with no lower catalog family has no cheaper first-party
+ * target, so it falls through to the normal account cooldown). Callers gate
+ * on a cheap condition (a stored tier cooldown or a response header) BEFORE
+ * this parse.
+ */
+export function downgradeModel(
+  body: string,
+  models: readonly string[],
+): ModelFallback | null {
+  const setting = resolveFallbackSetting()
+  if (setting.kind === 'disabled') return null
   let parsed: Record<string, unknown>
   try {
     parsed = JSON.parse(body) as Record<string, unknown>
@@ -79,56 +235,42 @@ export function downgradeModel(body: string): ModelFallback | null {
     return null
   }
   const from = parsed.model
-  // Only downgrade Opus (the only tier with a fallback target), and never
-  // rewrite a body already on the fallback model (Sonnet-tier 429s have no
-  // cheaper first-party target — they fall through to normal account cooldown).
-  if (
-    typeof from !== 'string' ||
-    !OPUS_MODEL_RE.test(from) ||
-    from === fallback
-  ) {
-    return null
-  }
-  parsed.model = fallback
-  return { body: JSON.stringify(parsed), fromModel: from, toModel: fallback }
+  if (typeof from !== 'string') return null
+  const fromFamily = modelFamily(from)
+  if (fromFamily === null) return null
+  const target =
+    setting.kind === 'pinned'
+      ? setting.model
+      : (resolveLadderTarget(from, models) ?? DEFAULT_OPUS_FALLBACK_MODEL)
+  if (modelFamily(target) === fromFamily) return null
+  parsed.model = target
+  return { body: JSON.stringify(parsed), fromModel: from, toModel: target }
 }
 
-/**
- * PROACTIVE: downgrade up front when this account's Opus tier is known-exhausted
- * (`opusCooldownUntil > now`). The cheap numeric gate runs before the JSON parse
- * in `downgradeModel`, so the steady-state (non-exhausted) path pays nothing.
- */
-export function planProactiveFallback(
-  body: string,
-  account: PoolAccount,
-  now: number,
-): ModelFallback | null {
-  if ((account.opusCooldownUntil ?? 0) <= now) return null
-  return downgradeModel(body)
-}
-
-/** Decode the Opus tier reset (unix seconds header → epoch ms), clamped/defaulted. */
-function parseOpusReset(res: Response, now: number): number {
+/** Decode the tier reset (unix seconds header → epoch ms), clamped/defaulted. */
+function parseTierReset(res: Response, now: number): number {
   const ms = secondsToMs(Number(res.headers.get(UNIFIED_RESET_HEADER)))
-  if (ms > now && ms - now <= OPUS_RESET_MAX_MS) return ms
-  return now + OPUS_RESET_FALLBACK_MS
+  if (ms > now && ms - now <= TIER_RESET_MAX_MS) return ms
+  return now + TIER_RESET_FALLBACK_MS
 }
 
 /**
- * REACTIVE: on a rejected response, when the binding limit is the Opus weekly cap
- * (`representative-claim: seven_day_opus`) and the sent body's model can fall
- * back, return the downgraded body to retry on the SAME account plus the tier
- * reset to persist. The header claim is checked BEFORE the body parse.
+ * REACTIVE: on a rejected response, when the binding limit is a MODEL-TIER cap
+ * (`representative-claim: seven_day_<tier>` / `five_hour_<tier>`) and the sent
+ * body's model can fall down the ladder, return the tier to persist, the tier
+ * reset, and the downgraded body (adopted only once the whole pool proves
+ * tier-limited). The header claim is checked BEFORE the body parse.
  */
 export function planReactiveFallback(
   res: Response,
   body: string,
   now: number,
+  models: readonly string[],
 ): ReactiveModelFallback | null {
-  if (res.headers.get(REPRESENTATIVE_CLAIM_HEADER) !== SEVEN_DAY_OPUS_CLAIM) {
-    return null
-  }
-  const fallback = downgradeModel(body)
+  const claim = res.headers.get(REPRESENTATIVE_CLAIM_HEADER)
+  const tier = claim ? MODEL_TIER_CLAIM_RE.exec(claim)?.[1] : undefined
+  if (!tier) return null
+  const fallback = downgradeModel(body, models)
   if (!fallback) return null
-  return { resetAt: parseOpusReset(res, now), fallback }
+  return { tier, resetAt: parseTierReset(res, now), fallback }
 }

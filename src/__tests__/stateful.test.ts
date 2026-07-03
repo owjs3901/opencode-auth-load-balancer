@@ -333,9 +333,11 @@ describe('pool store', () => {
     >
     edited.expires = 'INF_EXPIRES'
     edited.cooldownUntil = 'INF_COOLDOWN'
-    // `"opusCooldownUntil": 1e999` (Infinity) would otherwise downgrade EVERY
-    // Opus request to the fallback model forever + render "opus" in the
-    // dashboards — same soft-fail family as cooldownUntil.
+    // `"modelCooldownsUntil": { "opus": 1e999 }` (Infinity) would otherwise
+    // steer EVERY Opus request off this account forever + render "opus" in
+    // the dashboards — same soft-fail family as cooldownUntil. A legacy
+    // `"opusCooldownUntil": 1e999` must be dropped by the fold, not migrated.
+    edited.modelCooldownsUntil = { opus: 'INF_TIER' }
     edited.opusCooldownUntil = 'INF_OPUS'
     edited.usage = {
       capturedAt: 'INF_CAPTURED',
@@ -350,6 +352,7 @@ describe('pool store', () => {
     })
       .replaceAll('"INF_EXPIRES"', '1e999')
       .replaceAll('"INF_COOLDOWN"', '1e999')
+      .replaceAll('"INF_TIER"', '1e999')
       .replaceAll('"INF_OPUS"', '1e999')
       .replaceAll('"INF_CAPTURED"', '1e999')
       .replaceAll('"INF_RESET"', '1e999')
@@ -360,13 +363,89 @@ describe('pool store', () => {
     expect(row?.expires).toBe(0)
     expect(row && needsRefresh(row, Date.now())).toBe(true) // repairing refresh
     expect(row?.cooldownUntil).toBe(0) // no permanent sideline
-    expect(row?.opusCooldownUntil).toBe(0) // no permanent Opus downgrade
+    // Both the Infinity map entry AND the Infinity legacy field are dropped
+    // (the emptied map is removed for compactness); nothing "tier-exhausted
+    // forever" survives.
+    expect(row?.modelCooldownsUntil).toBeUndefined()
+    expect(row?.opusCooldownUntil).toBeUndefined() // legacy field never survives a read
     expect(row?.usage.capturedAt).toBe(0) // seeding stays eligible
     expect(row?.usage.hourly).toBeNull() // non-finite utilization → unusable
     expect(row?.usage.weekly).toEqual({ utilization: 0.5, resetAt: 0 })
     const rendered = renderStatus(buildStatus(pool, Date.now()))
     expect(rendered).not.toContain('Infinity')
     expect(rendered).not.toContain('NaN')
+  })
+
+  test('readPool migrates a LEGACY opusCooldownUntil into modelCooldownsUntil.opus (max-merged, legacy key dropped)', async () => {
+    const until = Date.now() + 3 * 24 * 60 * 60 * 1000
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          // Legacy-only row: folds into a fresh map.
+          { ...account(), id: 'legacy', opusCooldownUntil: until },
+          // Both present: the NEWER map entry must win the max-merge.
+          {
+            ...account(),
+            id: 'both',
+            opusCooldownUntil: until - 1000,
+            modelCooldownsUntil: { opus: until, fable: until + 1000 },
+          },
+          // The old normalizer WROTE `opusCooldownUntil: 0` — a zero legacy
+          // value must not materialize a map.
+          { ...account(), id: 'zero', opusCooldownUntil: 0 },
+        ],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const pool = await readPool()
+    const legacy = pool.accounts.find((a) => a.id === 'legacy')
+    expect(legacy?.modelCooldownsUntil).toEqual({ opus: until })
+    expect(legacy?.opusCooldownUntil).toBeUndefined()
+    const both = pool.accounts.find((a) => a.id === 'both')
+    expect(both?.modelCooldownsUntil).toEqual({
+      opus: until,
+      fable: until + 1000,
+    })
+    expect(both?.opusCooldownUntil).toBeUndefined()
+    const zero = pool.accounts.find((a) => a.id === 'zero')
+    expect(zero?.modelCooldownsUntil).toBeUndefined()
+    expect(zero?.opusCooldownUntil).toBeUndefined()
+  })
+
+  test('readPool heals a hand-edited modelCooldownsUntil: non-object dropped, bad entries deleted', async () => {
+    const until = Date.now() + 60 * 60 * 1000
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          { ...account(), id: 'not-obj', modelCooldownsUntil: 'soon' },
+          { ...account(), id: 'arr', modelCooldownsUntil: [until] },
+          {
+            ...account(),
+            id: 'mixed',
+            modelCooldownsUntil: { opus: until, fable: 'soon', haiku: -5 },
+          },
+        ],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const pool = await readPool()
+    expect(
+      pool.accounts.find((a) => a.id === 'not-obj')?.modelCooldownsUntil,
+    ).toBeUndefined()
+    // Arrays are rejected like account/usage arrays above: grafted named keys
+    // would serialize back to `[]` and never self-heal.
+    expect(
+      pool.accounts.find((a) => a.id === 'arr')?.modelCooldownsUntil,
+    ).toBeUndefined()
+    expect(
+      pool.accounts.find((a) => a.id === 'mixed')?.modelCooldownsUntil,
+    ).toEqual({ opus: until })
   })
 
   test('readPool heals hand-edited primitive/array sessions and lastSelected to {}', async () => {

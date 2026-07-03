@@ -27,21 +27,47 @@ export const OAUTH_SCOPES = [
 export const TOOL_PREFIX = 'mcp_'
 
 /**
- * Default target when auto-downgrading an Opus request whose account has hit its
- * Opus-specific weekly cap (429 with `anthropic-ratelimit-unified-representative-
- * claim: seven_day_opus`). Overridable via
- * `OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`; set that env to an empty
- * string to DISABLE the downgrade (revert to cooling the whole account down).
- * The current first-party Sonnet default id.
+ * LAST-RESORT downgrade target when a MODEL-TIER weekly cap is exhausted and
+ * the fallback LADDER cannot produce a candidate (the provider's model catalog
+ * is empty or has no model in a lower family). The normal path walks
+ * `DEFAULT_FAMILY_ORDER` through the catalog instead — see
+ * `resolveLadderTarget` in fallback.ts. Also the historic name of the
+ * override env (`OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`): set it to
+ * a model id to PIN the downgrade target (bypassing the ladder), or to an
+ * empty string to DISABLE downgrading (revert to cooling the whole account
+ * down).
  */
 export const DEFAULT_OPUS_FALLBACK_MODEL = 'claude-sonnet-4-6'
+
+/**
+ * Model FAMILIES best → worst: the fallback ladder for a tier-capped request
+ * walks this order strictly BELOW the limited model's family and picks the
+ * highest-versioned catalog model of the first family that has one (e.g. a
+ * capped `claude-fable-5` prefers `claude-opus-4-9` over `claude-opus-4-8`;
+ * if the whole Opus tier is capped too, the next pass lands on Sonnet). A
+ * family NOT in this list (a future top tier) is treated as ABOVE the first
+ * entry — new premium tiers historically appear at the top. Overridable via
+ * `OPENCODE_AUTH_LB_ANTHROPIC_FAMILY_ORDER` (comma-separated, best first) so
+ * future models need a config tweak, not a code change.
+ */
+export const DEFAULT_FAMILY_ORDER: readonly string[] = [
+  'fable',
+  'opus',
+  'sonnet',
+  'haiku',
+]
 
 /** 429 header naming which rate-limit window is the binding constraint. */
 export const REPRESENTATIVE_CLAIM_HEADER =
   'anthropic-ratelimit-unified-representative-claim'
 
-/** `representative-claim` value meaning the Opus-specific weekly cap is exhausted. */
-export const SEVEN_DAY_OPUS_CLAIM = 'seven_day_opus'
+/**
+ * `representative-claim` values that name a MODEL-TIER window (a per-model
+ * weekly/5h cap, e.g. `seven_day_opus`, `seven_day_fable`) rather than an
+ * account-wide one (bare `five_hour` / `seven_day`). The capture group is the
+ * tier name — the key of `PoolAccount.modelCooldownsUntil`.
+ */
+export const MODEL_TIER_CLAIM_RE = /^(?:seven_day|five_hour)_(.+)$/
 
 /** 429 header with the unix-seconds reset time of the binding window. */
 export const UNIFIED_RESET_HEADER = 'anthropic-ratelimit-unified-reset'

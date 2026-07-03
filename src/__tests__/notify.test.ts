@@ -114,7 +114,9 @@ describe('notifyModelFallback', () => {
     const a = testAccount({
       id: 'fb1',
       label: 'fb1',
-      opusCooldownUntil: windowEnd,
+      // Two active tiers: the de-dupe key uses the LATEST window (the max
+      // entry), exercising both comparison outcomes of the max scan.
+      modelCooldownsUntil: { fable: windowEnd - 1000, opus: windowEnd },
     })
     await notifyModelFallback(
       client,
@@ -149,31 +151,31 @@ describe('notifyModelFallback', () => {
     expect(calls[1]?.message).toContain('claude-opus-4-1')
   })
 
-  test('re-toasts when the Opus tier re-exhausts in a NEW window (fresh opusCooldownUntil)', async () => {
+  test('re-toasts when the tier re-exhausts in a NEW window (fresh modelCooldownsUntil entry)', async () => {
     // The README promises the downgrade is "never silent". A de-dupe keyed on
     // fromModel alone silenced every exhaustion window after the first in a
-    // process's lifetime: cap exhausts -> toast; cap RESETS and Opus serves for
-    // days; cap exhausts again -> silent. The de-dupe value is scoped to the
-    // exhaustion window (`fromModel@opusCooldownUntil`), so a new window must
-    // toast again while turns WITHIN one window stay deduped.
+    // process's lifetime: cap exhausts -> toast; cap RESETS and the tier serves
+    // for days; cap exhausts again -> silent. The de-dupe value is scoped to
+    // the exhaustion window (`fromModel@<latest tier window>`), so a new
+    // window must toast again while turns WITHIN one window stay deduped.
     const { client, calls } = spyClient()
     const DAY = 24 * 60 * 60 * 1000
     const firstWindow = Date.now() + 3 * DAY
     const first = testAccount({
       id: 'fbw',
       label: 'fbw',
-      opusCooldownUntil: firstWindow,
+      modelCooldownsUntil: { opus: firstWindow },
     })
     await notifyModelFallback(client, 'p1', first, 'opus', 'sonnet')
     await notifyModelFallback(client, 'p1', first, 'opus', 'sonnet') // same window -> deduped
     expect(calls).toHaveLength(1)
 
-    // The Opus cap reset, served for days, then re-exhausted: same account id,
+    // The tier cap reset, served for days, then re-exhausted: same account id,
     // NEW cooldown window -> the downgrade must be announced again.
     const second = testAccount({
       id: 'fbw',
       label: 'fbw',
-      opusCooldownUntil: firstWindow + 7 * DAY,
+      modelCooldownsUntil: { opus: firstWindow + 7 * DAY },
     })
     await notifyModelFallback(client, 'p1', second, 'opus', 'sonnet')
     expect(calls).toHaveLength(2)

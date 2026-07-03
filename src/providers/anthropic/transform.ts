@@ -276,7 +276,14 @@ function prependClaudeCodeIdentity(system: unknown): SystemBlock[] {
 
   if (isPlainObject(system)) {
     const type = typeof system.type === 'string' ? system.type : 'text'
-    const text = typeof system.text === 'string' ? system.text : ''
+    // Non-string `.text` (missing field, or a foreign/malformed content-block
+    // shape) is stringified rather than discarded — symmetric with the array
+    // branch's `String(item)` fallback below, so an unexpected shape loses no
+    // data outright, it just degrades to a lossy-but-present representation.
+    const text =
+      typeof system.text === 'string'
+        ? system.text
+        : String(system.text ?? system)
     const block: SystemBlock = {
       ...system,
       type,

@@ -66,7 +66,12 @@ const DIGIT_SEGMENT_RE = /^\d+$/
  * non-first-party ids never participate in tier logic).
  */
 export function modelFamily(model: string): string | null {
-  for (const segment of model.toLowerCase().split('-')) {
+  const lower = model.toLowerCase()
+  // Match the doc's contract explicitly: non-first-party ids (no `claude`
+  // prefix) never participate in tier logic, rather than relying on the
+  // segment scan below happening to find no alphabetic segment.
+  if (!lower.startsWith('claude')) return null
+  for (const segment of lower.split('-')) {
     if (segment !== 'claude' && ALPHA_SEGMENT_RE.test(segment)) return segment
   }
   return null

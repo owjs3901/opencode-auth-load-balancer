@@ -152,6 +152,16 @@ describe('rewriteRequestBody', () => {
     expect(out.system[1].text).toBe('hi')
   })
 
+  test('coerces a bare non-text record system via String() instead of dropping it', () => {
+    const out = JSON.parse(
+      rewriteRequestBody(
+        JSON.stringify({ system: { type: 'image', source: {} } }),
+      ),
+    )
+    expect(out.system[0].text).toBe(CLAUDE_CODE_IDENTITY)
+    expect(out.system[1].text).toBe('[object Object]')
+  })
+
   test('does not double-prepend when a record system IS the identity', () => {
     const out = JSON.parse(
       rewriteRequestBody(

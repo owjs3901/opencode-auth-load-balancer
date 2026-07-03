@@ -56,6 +56,11 @@ describe('modelFamily', () => {
     expect(modelFamily('claude-3-5')).toBeNull()
     expect(modelFamily('claude')).toBeNull()
   })
+
+  test('non-first-party ids never participate in tier logic', () => {
+    expect(modelFamily('gpt-4-turbo')).toBeNull()
+    expect(modelFamily('gemini-1-5-pro')).toBeNull()
+  })
 })
 
 describe('requestModelTier', () => {

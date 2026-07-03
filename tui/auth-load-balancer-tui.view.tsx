@@ -68,10 +68,10 @@ function usePool() {
 interface Chip {
   name: string
   label: string
-  wk: string
-  wkReset: string
-  h: string
-  hReset: string
+  weeklyPct: string
+  weeklyReset: string
+  hourlyPct: string
+  hourlyReset: string
 }
 
 /** Always-visible bottom bar (app_bottom): the in-use account per provider. */
@@ -95,10 +95,10 @@ function BottomBar(props: { api: TuiPluginApi }) {
       out.push({
         name: PROVIDER_NAMES[providerID] ?? providerID,
         label: a.label,
-        wk: winPct(a.usage?.weekly, now),
-        wkReset: until(a.usage?.weekly?.resetAt, now),
-        h: winPct(a.usage?.hourly, now),
-        hReset: until(a.usage?.hourly?.resetAt, now),
+        weeklyPct: winPct(a.usage?.weekly, now),
+        weeklyReset: until(a.usage?.weekly?.resetAt, now),
+        hourlyPct: winPct(a.usage?.hourly, now),
+        hourlyReset: until(a.usage?.hourly?.resetAt, now),
       })
     }
     return out
@@ -112,7 +112,7 @@ function BottomBar(props: { api: TuiPluginApi }) {
             <span style={{ fg: color().primary }}>
               {a.name} {a.label}
             </span>
-            {`  wk ${a.wk} (${a.wkReset}) · 5h ${a.h} (${a.hReset})`}
+            {`  wk ${a.weeklyPct} (${a.weeklyReset}) · 5h ${a.hourlyPct} (${a.hourlyReset})`}
           </text>
         )}
       </For>
@@ -126,10 +126,10 @@ interface Row {
   current: boolean
   score: number | null
   rank: number | null
-  wk: string
-  wkReset: string
-  h: string
-  hReset: string
+  weeklyPct: string
+  weeklyReset: string
+  hourlyPct: string
+  hourlyReset: string
   state: string
 }
 interface Group {
@@ -179,10 +179,10 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           // `until()` deliberately stays on the RAW resetAt: a malformed
           // window with a reset but no utilization normalizes to null in `sa`,
           // yet the countdown should still render.
-          wk: pct(displayUtil(sa.usage.weekly, now)),
-          wkReset: until(a.usage?.weekly?.resetAt, now),
-          h: pct(displayUtil(sa.usage.hourly, now)),
-          hReset: until(a.usage?.hourly?.resetAt, now),
+          weeklyPct: pct(displayUtil(sa.usage.weekly, now)),
+          weeklyReset: until(a.usage?.weekly?.resetAt, now),
+          hourlyPct: pct(displayUtil(sa.usage.hourly, now)),
+          hourlyReset: until(a.usage?.hourly?.resetAt, now),
           // Raw reads are finiteness-guarded inside tierResets: a hand-edited
           // `1e999` entry (Infinity via JSON.parse) would otherwise render its
           // tier annotation forever until the server heals the file.
@@ -282,7 +282,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
                       </Show>
                     </text>
                     <text fg={color().textMuted}>
-                      {`      wk ${r.wk} (${r.wkReset}) · 5h ${r.h} (${r.hReset})`}
+                      {`      wk ${r.weeklyPct} (${r.weeklyReset}) · 5h ${r.hourlyPct} (${r.hourlyReset})`}
                     </text>
                   </box>
                 )}

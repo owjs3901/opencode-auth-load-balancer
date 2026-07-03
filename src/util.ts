@@ -122,6 +122,31 @@ export function setBounded<K, V>(
 }
 
 /**
+ * A single-slot memo keyed by a raw value compared with `===`. Returns a
+ * closure that recomputes only when the key changes since the last call —
+ * the "cache the value derived from a raw env/token string, keyed by that
+ * string" pattern previously hand-rolled five separate times across the
+ * Anthropic/OpenAI provider modules (`mergeBetaHeaders`/`resolveBaseUrl` in
+ * `providers/anthropic/transform.ts`, `resolveFamilyOrder`/
+ * `resolveFallbackSetting` in `providers/anthropic/fallback.ts`,
+ * `resolveAccountId` in `providers/openai/jwt.ts`). Each caller keeps any
+ * fast-path early return (e.g. "no raw value at all") BEFORE calling into
+ * this memo — the memo only covers the "check cache, else compute and
+ * reseat" part. NOTE: `src/scheduler/score-core.ts` deliberately does NOT use
+ * this — that file is byte-copied into `tui/auth-load-balancer-scoring.ts`
+ * and must stay dependency-free.
+ */
+export function memoOne<K, V>(compute: (key: K) => V): (key: K) => V {
+  let cache: { key: K; value: V } | null = null
+  return (key: K): V => {
+    if (cache && cache.key === key) return cache.value
+    const value = compute(key)
+    cache = { key, value }
+    return value
+  }
+}
+
+/**
  * Convert epoch-seconds → epoch-ms while rejecting non-finite/zero/negative inputs
  * AND the `Number.MAX_VALUE`-overflow case: `1e308` is finite but `1e308 * 1000`
  * collapses to +Infinity, which would silently commit Infinity to

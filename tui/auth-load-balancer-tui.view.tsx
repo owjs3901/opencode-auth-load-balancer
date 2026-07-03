@@ -26,11 +26,11 @@ import {
   compareRanked,
   displayUtil,
   isAvailable,
-  loadScoreConfig,
   scoreAccount,
   utilOf,
 } from './auth-load-balancer-scoring'
 import {
+  cfg,
   deleteFromPool,
   pct,
   type PoolShape,
@@ -50,8 +50,9 @@ const PROVIDER_NAMES: Record<string, string> = {
 const POLL_MS = 3000
 
 // Scoring knobs read from env exactly like the server — single-sourced in the shared
-// ./auth-load-balancer-scoring module (a byte copy of src/scheduler/score-core.ts).
-const cfg = loadScoreConfig()
+// ./auth-load-balancer-scoring module (a byte copy of src/scheduler/score-core.ts),
+// shared with auth-load-balancer-tui.logic.ts (imported above as `cfg`) so it is
+// computed exactly once.
 
 function usePool() {
   const [pool, setPool] = createSignal<PoolShape>(readPool())

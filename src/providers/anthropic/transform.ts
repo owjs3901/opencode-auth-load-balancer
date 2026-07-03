@@ -1,4 +1,4 @@
-import { ignore, isPlainObject, setBounded } from '../../util'
+import { ignore, isPlainObject, memoOne, setBounded } from '../../util'
 import { type FetchInput, urlFromInput } from '../types'
 import { buildBillingHeaderValue } from './cch'
 import {
@@ -46,24 +46,23 @@ const REQUIRED_BETAS_HEADER = REQUIRED_BETAS.join(',')
 
 /**
  * One-slot memo keyed by the raw incoming `anthropic-beta` value (same pattern
- * as `cachedBase` in `resolveBaseUrl` below): the client's beta header is
+ * as `computeBaseUrl` in `resolveBaseUrl` below): the client's beta header is
  * effectively a constant string for the life of an opencode session, yet the
  * merge chain would otherwise re-run per attempt of every Anthropic request.
  */
-let cachedBetas: { raw: string; merged: string } | null = null
+const computeMergedBetas = memoOne((raw: string): string => {
+  const incoming = raw
+    .split(',')
+    .map((b) => b.trim())
+    .filter(Boolean)
+  return [...new Set([...REQUIRED_BETAS, ...incoming])].join(',')
+})
 
 /** Merge incoming beta headers with the required OAuth betas, deduplicating. */
 export function mergeBetaHeaders(headers: Headers): string {
   const raw = headers.get('anthropic-beta')
   if (!raw) return REQUIRED_BETAS_HEADER
-  if (cachedBetas?.raw === raw) return cachedBetas.merged
-  const incoming = raw
-    .split(',')
-    .map((b) => b.trim())
-    .filter(Boolean)
-  const merged = [...new Set([...REQUIRED_BETAS, ...incoming])].join(',')
-  cachedBetas = { raw, merged }
-  return merged
+  return computeMergedBetas(raw)
 }
 
 /** Set OAuth auth + Claude Code headers; remove x-api-key (we use Bearer). */
@@ -160,10 +159,7 @@ export function stripToolPrefix(text: string, alreadyScanned = 0): string {
  * `baseUrl.protocol` / `baseUrl.host` (never mutates), so sharing one cached
  * `URL` instance across calls is safe.
  */
-let cachedBase: { raw: string | undefined; url: URL | null } | null = null
-function resolveBaseUrl(): URL | null {
-  const raw = process.env.ANTHROPIC_BASE_URL?.trim()
-  if (cachedBase && cachedBase.raw === raw) return cachedBase.url
+const computeBaseUrl = memoOne((raw: string | undefined): URL | null => {
   let url: URL | null = null
   if (raw) {
     try {
@@ -179,8 +175,10 @@ function resolveBaseUrl(): URL | null {
       /* invalid URL → cached as null */
     }
   }
-  cachedBase = { raw, url }
   return url
+})
+function resolveBaseUrl(): URL | null {
+  return computeBaseUrl(process.env.ANTHROPIC_BASE_URL?.trim())
 }
 
 /** Add ?beta=true for /v1/messages, and honor ANTHROPIC_BASE_URL overrides. */

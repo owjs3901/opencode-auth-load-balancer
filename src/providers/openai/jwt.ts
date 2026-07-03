@@ -1,4 +1,5 @@
 import type { PoolAccount } from '../../types'
+import { memoOne } from '../../util'
 
 /**
  * Decode a JWT payload WITHOUT signature verification. We only read first-party
@@ -48,14 +49,17 @@ export function extractAccountId(idToken: string): string | undefined {
 }
 
 /**
- * One-slot memo keyed by the raw access token (same pattern as `cachedBetas` /
- * `cachedBase` in `anthropic/transform.ts`): for a pool row bootstrapped with
- * `accountId: null`, `resolveAccountId` runs per attempt of every Codex request
- * (via `applyAuth`) yet the decode is fully determined by the `access` string,
- * which is constant between token refreshes. A rotated token misses the memo
- * and re-decodes, so it self-invalidates. Stored `accountId` never touches it.
+ * One-slot memo keyed by the raw access token (same pattern as
+ * `computeMergedBetas` / `computeBaseUrl` in `anthropic/transform.ts`): for a
+ * pool row bootstrapped with `accountId: null`, `resolveAccountId` runs per
+ * attempt of every Codex request (via `applyAuth`) yet the decode is fully
+ * determined by the `access` string, which is constant between token
+ * refreshes. A rotated token misses the memo and re-decodes, so it
+ * self-invalidates. Stored `accountId` never touches it.
  */
-let cachedDecode: { access: string; id: string | undefined } | null = null
+const computeDecodedAccountId = memoOne((access: string): string | undefined =>
+  extractAccountId(access),
+)
 
 /** Stored ChatGPT account id, or one decoded from the access-token JWT. */
 export function resolveAccountId(account: PoolAccount): string | undefined {
@@ -64,8 +68,5 @@ export function resolveAccountId(account: PoolAccount): string | undefined {
   // every consumer treats `''` as "no id" — so let it fall through to the JWT
   // decode below and self-heal exactly like a `null` row.
   if (account.accountId) return account.accountId
-  if (cachedDecode?.access === account.access) return cachedDecode.id
-  const id = extractAccountId(account.access)
-  cachedDecode = { access: account.access, id }
-  return id
+  return computeDecodedAccountId(account.access)
 }

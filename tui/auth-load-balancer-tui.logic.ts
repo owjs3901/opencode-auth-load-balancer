@@ -23,8 +23,11 @@ import {
 
 // Scoring knobs read from env exactly like the server — single-sourced in the shared
 // ./auth-load-balancer-scoring module (a byte copy of src/scheduler/score-core.ts).
-// Used by `stateOf` below (`isExhausted(sa, cfg, now)`).
-const cfg = loadScoreConfig()
+// Used by `stateOf` below (`isExhausted(sa, cfg, now)`) and re-exported so
+// `auth-load-balancer-tui.view.tsx` (which already imports several other
+// symbols from this module) shares the same computed value instead of
+// calling `loadScoreConfig()` again for an identical result.
+export const cfg = loadScoreConfig()
 
 export function poolFile(): string {
   const override = process.env.OPENCODE_AUTH_LB_DIR?.trim()

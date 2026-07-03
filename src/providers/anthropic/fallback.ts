@@ -1,4 +1,4 @@
-import { secondsToMs } from '../../util'
+import { memoOne, secondsToMs } from '../../util'
 import { MAX_QUOTA_RESET_BOUND_MS } from '../http-timeouts'
 import type { ModelFallback, ReactiveModelFallback } from '../types'
 import {
@@ -141,18 +141,17 @@ function bestOfFamily(
  * `DEFAULT_FAMILY_ORDER`; otherwise a comma-separated best→worst list
  * (entries trimmed + lowercased, empties dropped).
  */
-let cachedOrder: { raw: string | undefined; order: readonly string[] } | null =
-  null
+const computeFamilyOrder = memoOne(
+  (raw: string | undefined): readonly string[] => {
+    const parsed = (raw ?? '')
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0)
+    return parsed.length > 0 ? parsed : DEFAULT_FAMILY_ORDER
+  },
+)
 export function resolveFamilyOrder(): readonly string[] {
-  const raw = process.env.OPENCODE_AUTH_LB_ANTHROPIC_FAMILY_ORDER
-  if (cachedOrder && cachedOrder.raw === raw) return cachedOrder.order
-  const parsed = (raw ?? '')
-    .split(',')
-    .map((entry) => entry.trim().toLowerCase())
-    .filter((entry) => entry.length > 0)
-  const order = parsed.length > 0 ? parsed : DEFAULT_FAMILY_ORDER
-  cachedOrder = { raw, order }
-  return order
+  return computeFamilyOrder(process.env.OPENCODE_AUTH_LB_ANTHROPIC_FAMILY_ORDER)
 }
 
 /**
@@ -170,22 +169,20 @@ type FallbackSetting =
  * `downgradeModel` would otherwise re-read + re-branch `process.env` on every
  * skip/reactive attempt.
  */
-let cachedSetting: {
-  raw: string | undefined
-  setting: FallbackSetting
-} | null = null
-export function resolveFallbackSetting(): FallbackSetting {
-  const raw = process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL
-  if (cachedSetting && cachedSetting.raw === raw) return cachedSetting.setting
-  const trimmed = raw?.trim()
-  const setting: FallbackSetting =
-    raw === undefined
+const computeFallbackSetting = memoOne(
+  (raw: string | undefined): FallbackSetting => {
+    const trimmed = raw?.trim()
+    return raw === undefined
       ? { kind: 'ladder' }
       : trimmed
         ? { kind: 'pinned', model: trimmed }
         : { kind: 'disabled' }
-  cachedSetting = { raw, setting }
-  return setting
+  },
+)
+export function resolveFallbackSetting(): FallbackSetting {
+  return computeFallbackSetting(
+    process.env.OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL,
+  )
 }
 
 /**

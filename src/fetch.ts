@@ -8,6 +8,7 @@ import {
 } from './pool/store'
 import { PROVIDER_ID as ANTHROPIC_PROVIDER_ID } from './providers/anthropic/constants'
 import { mergeHeaders } from './providers/headers'
+import { MAX_QUOTA_RESET_BOUND_MS } from './providers/http-timeouts'
 import type {
   FetchInput,
   ModelFallback,
@@ -101,7 +102,8 @@ function applyUsagePartial(
 // (≤ 7 days). Anything past this bound is a broken server/proxy and is treated
 // exactly like the +Infinity overflow case: fall through to the `fallbackMs`
 // default (which self-heals) instead of sidelining the account for years.
-const RETRY_AFTER_MAX_MS = 8 * 24 * 60 * 60 * 1000
+// Single-sourced with `fallback.ts`'s `TIER_RESET_MAX_MS` — same invariant.
+const RETRY_AFTER_MAX_MS = MAX_QUOTA_RESET_BOUND_MS
 
 /**
  * Compute the absolute cooldown target (epoch ms) for a rejected response.

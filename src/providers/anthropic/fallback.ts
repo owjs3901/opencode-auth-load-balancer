@@ -1,4 +1,5 @@
 import { secondsToMs } from '../../util'
+import { MAX_QUOTA_RESET_BOUND_MS } from '../http-timeouts'
 import type { ModelFallback, ReactiveModelFallback } from '../types'
 import {
   DEFAULT_FAMILY_ORDER,
@@ -48,8 +49,9 @@ const TIER_RESET_FALLBACK_MS = 60 * 60 * 1000
  * server/proxy clock. Reject it (fall through to the brief default) exactly
  * like `fetch.ts`'s `RETRY_AFTER_MAX_MS` guard, so a bogus far-future reset
  * can't pin every request for that tier onto the fallback model for years.
+ * Single-sourced with that guard via `MAX_QUOTA_RESET_BOUND_MS`.
  */
-const TIER_RESET_MAX_MS = 8 * 24 * 60 * 60 * 1000
+const TIER_RESET_MAX_MS = MAX_QUOTA_RESET_BOUND_MS
 
 /** Matches a purely alphabetic model-id segment (`opus`, `fable`, `sonnet`). */
 const ALPHA_SEGMENT_RE = /^[a-z]+$/

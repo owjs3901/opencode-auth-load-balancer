@@ -22,3 +22,14 @@ export const OAUTH_HTTP_TIMEOUT_MS = 30_000
  * Symmetric with `OAUTH_HTTP_TIMEOUT_MS` (30 s).
  */
 export const USAGE_HTTP_TIMEOUT_MS = 30_000
+
+/**
+ * Upper bound for any quota-reset-related duration derived from a response
+ * header (a `Retry-After` cooldown in `fetch.ts`, a tier `unified-reset` in
+ * `providers/anthropic/fallback.ts`). Both encode the same invariant: a real
+ * quota window is at most weekly (≤ 7 days), so anything past this bound is a
+ * broken server/proxy clock and must be rejected — falling through to the
+ * caller's short self-healing default — instead of sidelining an account (or
+ * downgrading a model tier) for years on a bogus far-future value.
+ */
+export const MAX_QUOTA_RESET_BOUND_MS = 8 * 24 * 60 * 60 * 1000

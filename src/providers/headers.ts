@@ -24,7 +24,13 @@ export function mergeHeaders(input: FetchInput, init?: RequestInit): Headers {
       if (key !== undefined && value !== undefined) headers.set(key, value)
     }
   } else {
-    for (const [key, value] of Object.entries(initHeaders)) {
+    // Object.keys, not Object.entries: entries allocates one 2-element tuple
+    // per header (~10+ per request) on top of the outer array for data a
+    // keyed read gets free (same rationale as the session prune in fetch.ts).
+    // Under noUncheckedIndexedAccess the keyed read is `string | undefined`;
+    // the existing undefined guard narrows it with identical semantics.
+    for (const key of Object.keys(initHeaders)) {
+      const value = initHeaders[key]
       if (value !== undefined) headers.set(key, String(value))
     }
   }

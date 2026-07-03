@@ -115,9 +115,14 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
   // the all-valid read must not allocate a copy. Heals mutate rows in place,
   // so returning the original array unchanged is behaviorally identical;
   // materialize a copy only when the FIRST row is actually dropped (all
-  // earlier rows were kept, so `rows.slice(0, i)` is exact).
+  // earlier rows were kept, so `rows.slice(0, i)` is exact). Index loop, not
+  // `rows.entries()`: entries allocates a fresh [i, row] tuple per row on
+  // every read for data a keyed read gets free (same rationale as the
+  // Object.keys prune in fetch.ts); `isPlainObject` absorbs the
+  // noUncheckedIndexedAccess `undefined` widening on the drop path.
   let accounts: PoolAccount[] | null = null
-  for (const [i, row] of rows.entries()) {
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
     // Arrays must be rejected alongside null/primitive rows: a healed array
     // row NEVER self-heals (JSON.stringify of an array with grafted named
     // properties serializes back to `[]`), becoming a permanent phantom

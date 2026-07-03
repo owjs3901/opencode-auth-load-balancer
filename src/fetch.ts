@@ -483,9 +483,15 @@ export function createLoadBalancedFetch(
     // below consults. Recomputed on every downgrade; OpenAI leaves
     // `requestModelTier` unset, so this stays null there and the tier
     // machinery is provably unreachable.
+    // Read from `bodyStr` (pre-transform), not `currentBody` (post-transform),
+    // for this INITIAL read: Anthropic's `transformBody` never touches the
+    // `model` field (only `system`/`tools`/`messages`), so both strings parse
+    // to the same `.model` — but `currentBody` is provably larger (identity
+    // block + billing header + tool-name prefixing appended), so parsing
+    // `bodyStr` here does the identical lookup on fewer bytes.
     let currentTier =
-      typeof currentBody === 'string'
-        ? (adapter.requestModelTier?.(currentBody) ?? null)
+      typeof bodyStr === 'string'
+        ? (adapter.requestModelTier?.(bodyStr) ?? null)
         : null
     // Lazily-computed downgrade plan for `currentBody` (null = disabled via
     // env, non-JSON body, or no lower family to fall to). Memoized per RUNG —

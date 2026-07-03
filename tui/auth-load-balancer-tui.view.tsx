@@ -43,6 +43,9 @@ import {
   winPct,
 } from './auth-load-balancer-tui.logic'
 
+// NOTE: ships its OWN copy of `src/status.ts`'s `PROVIDER_NAMES` by design —
+// the TUI runtime cannot import `src/` (see `auth-load-balancer-tui.logic.ts`'s
+// `isPlainRecordValue`/`isFiniteNumber` NOTEs for the same trust boundary).
 const PROVIDER_NAMES: Record<string, string> = {
   anthropic: 'Claude',
   openai: 'Codex',

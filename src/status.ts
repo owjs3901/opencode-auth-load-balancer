@@ -161,6 +161,41 @@ export function pct(u: number | null | undefined): string {
   return typeof u === 'number' ? `${Math.round(u * 100)}%` : '-'
 }
 
+/**
+ * Approximate on-screen terminal width of a string, treating common East-Asian
+ * "wide" characters (Hangul, CJK Unified Ideographs + Extension blocks,
+ * Hiragana/Katakana, fullwidth forms) as 2 columns and everything else as 1.
+ * Account labels are user-editable free-form text (rename tool / TUI / a
+ * hand-edited pool file), and this project's own stated locale is `ko-KR` —
+ * a CJK/Hangul label is plausible, and `.length` (UTF-16 code units) undercounts
+ * each such character by one column, breaking `renderStatus`'s table alignment.
+ * Not a full Unicode-grapheme-cluster/emoji-aware implementation — a pragmatic,
+ * dependency-free improvement over the previous zero handling for the common
+ * CJK case. Degenerates to `.length` for pure-ASCII input.
+ */
+export function displayWidth(s: string): number {
+  let width = 0
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0
+    const wide =
+      (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+      (cp >= 0x2e80 && cp <= 0xa4cf) || // CJK Radicals .. Yi (covers CJK, Kana, Hangul syllables start)
+      (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul Syllables
+      (cp >= 0xf900 && cp <= 0xfaff) || // CJK Compatibility Ideographs
+      (cp >= 0xff00 && cp <= 0xff60) || // Fullwidth forms
+      (cp >= 0xffe0 && cp <= 0xffe6) || // Fullwidth signs
+      (cp >= 0x20000 && cp <= 0x3fffd) // CJK Extension B+ / Compatibility Supplement
+    width += wide ? 2 : 1
+  }
+  return width
+}
+
+/** Pad `s` on the right with spaces up to `width` display columns (CJK-aware). */
+function padDisplayEnd(s: string, width: number): string {
+  const pad = width - displayWidth(s)
+  return pad > 0 ? s + ' '.repeat(pad) : s
+}
+
 function relTime(at: number, now: number): string {
   if (at <= now) return '-'
   // Floor at 1: a sub-30s future time would otherwise round to "0m", which
@@ -210,14 +245,20 @@ export function renderStatus(
     // Labels are user-editable (rename tool/TUI or the pool file directly), so
     // pad the label column to the provider's longest label. `max(16, …)` keeps
     // the classic layout — and the rendered bytes — unchanged for short labels.
-    const width = p.accounts.reduce((w, a) => Math.max(w, a.label.length), 16)
+    // Use display-width (not `.length`/UTF-16 code units) so a CJK/fullwidth
+    // label (plausible — this project's own stated locale is `ko-KR`) doesn't
+    // shear the weekly/5h/resets/state columns out of alignment.
+    const width = p.accounts.reduce(
+      (w, a) => Math.max(w, displayWidth(a.label)),
+      16,
+    )
     lines.push(
       `  #  ${'account'.padEnd(width + 3)}weekly   5h   resets   state`,
     )
     for (const a of p.accounts) {
       const mark = a.current ? '▶' : ' '
       lines.push(
-        `  ${String(a.rank).padEnd(2)} ${mark} ${a.label.padEnd(width)} ${pct(a.weeklyUtil).padStart(5)} ${pct(a.hourlyUtil).padStart(5)} ${relTime(a.weeklyResetAt, now).padStart(7)}  ${stateOf(a, now)}`,
+        `  ${String(a.rank).padEnd(2)} ${mark} ${padDisplayEnd(a.label, width)} ${pct(a.weeklyUtil).padStart(5)} ${pct(a.hourlyUtil).padStart(5)} ${relTime(a.weeklyResetAt, now).padStart(7)}  ${stateOf(a, now)}`,
       )
     }
     lines.push('')

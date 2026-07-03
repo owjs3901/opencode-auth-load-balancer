@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-status-'))
 
 import { mutatePool } from '../pool/store'
-import { buildStatus, readStatus, renderStatus } from '../status'
+import { buildStatus, displayWidth, readStatus, renderStatus } from '../status'
 import type { PoolAccount, PoolFile, UsageWindow } from '../types'
 import { testAccount } from './fixtures/account'
 
@@ -192,6 +192,49 @@ describe('renderStatus', () => {
 
   test('reports when no accounts are registered', () => {
     expect(renderStatus([], NOW)).toContain('no accounts registered')
+  })
+
+  test('keeps columns aligned (in terminal display width) for a CJK/Hangul label', () => {
+    // A CJK/Hangul label renders each such character as ~2 terminal columns;
+    // `.length` (UTF-16 code units) would undercount it and shear the
+    // weekly/5h/resets/state columns out of alignment with the ASCII row.
+    // Compare by DISPLAY column (not raw string index — a code-unit slice
+    // would itself misalign once the label field's code-unit count and
+    // display-column count diverge, which is exactly the bug being fixed).
+    function columnSlice(row: string, startCol: number, len: number): string {
+      let col = 0
+      let i = 0
+      while (i < row.length && col < startCol) {
+        col += displayWidth(row[i]!)
+        i += 1
+      }
+      return row.slice(i, i + len)
+    }
+    const wide = '클로드계정' // 5 Hangul syllables -> 10 display columns
+    const p = pool(
+      [
+        acc({ id: 'short', weekly: win(0.2, 30 * HOUR) }),
+        { ...acc({ id: 'long', weekly: win(0.6, 3 * HOUR) }), label: wide },
+      ],
+      { anthropic: 'short' },
+    )
+    const lines = renderStatus(buildStatus(p, NOW), NOW).split('\n')
+    const header = lines[1]!
+    const rows = lines.slice(2)
+    expect(rows).toHaveLength(2)
+    const weeklyStartCol = header.indexOf('weekly') // header is pure ASCII: index === display column
+    expect(weeklyStartCol).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(columnSlice(row, weeklyStartCol, 5)).toMatch(/^\s*\d+%$/)
+    }
+  })
+
+  test('displayWidth: ASCII degenerates to .length; CJK/Hangul/fullwidth count as 2 columns', () => {
+    expect(displayWidth('')).toBe(0)
+    expect(displayWidth('claude-work')).toBe('claude-work'.length)
+    expect(displayWidth('클로드')).toBe(6) // 3 Hangul syllables x 2
+    expect(displayWidth('日本語')).toBe(6) // 3 CJK ideographs x 2
+    expect(displayWidth('claude-클로드')).toBe(13) // mixed: 7 ASCII (1 each) + 3 Hangul (2 each)
   })
 
   test('a model-tier limit annotates the usable state with a tier countdown (never "cooldown")', () => {

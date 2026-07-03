@@ -165,6 +165,15 @@ export interface FsOps {
 }
 const realFsOps: FsOps = { readFileSync, writeFileSync, renameSync, unlinkSync }
 
+// Mirrors src/pool/store.ts's `RENAME_RETRIES`/`RENAME_RETRY_MS`: a concurrent
+// process (the server's own `mutatePool`) can briefly hold the target open
+// (Windows EPERM) during exactly the race window documented in the README's
+// "TUI pool writes" limitation. The server retries that race 5x; this synchronous
+// counterpart (everything here is `*Sync`) now does the same via `Bun.sleepSync`
+// instead of silently dropping the user's Rename/Delete click on the first transient failure.
+const RENAME_RETRIES = 5
+const RENAME_RETRY_MS = 20
+
 /** Read-modify-write the pool file atomically (temp + rename — never a direct overwrite). */
 export function mutatePoolFile(
   fn: (pool: PoolShape) => void,
@@ -180,7 +189,21 @@ export function mutatePoolFile(
     const payload = JSON.stringify(pool, null, 2)
     tmp = `${path}.${process.pid}.${Date.now()}.tmp`
     ops.writeFileSync(tmp, payload, { mode: 0o600 })
-    ops.renameSync(tmp, path)
+    let lastError: unknown
+    let renamed = false
+    for (let attempt = 0; attempt < RENAME_RETRIES; attempt++) {
+      try {
+        ops.renameSync(tmp, path)
+        renamed = true
+        break
+      } catch (error) {
+        lastError = error
+        // Separate ATTEMPTS only; after the final failure there is nothing
+        // left to wait for.
+        if (attempt < RENAME_RETRIES - 1) Bun.sleepSync(RENAME_RETRY_MS)
+      }
+    }
+    if (!renamed) throw lastError
     tmp = undefined
   } catch {
     // Atomic temp+rename failed (e.g. the server briefly holds the file on

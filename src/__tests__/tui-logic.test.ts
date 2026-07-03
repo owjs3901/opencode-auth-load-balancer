@@ -327,6 +327,50 @@ describe('mutatePoolFile', () => {
     expect(unlinked).toBe(true)
   })
 
+  test('a transient rename failure (EPERM-like) is retried and eventually succeeds', () => {
+    // Mirrors src/pool/store.ts's writeJsonAtomic retry: a concurrent process
+    // (the server's own mutatePool) can briefly hold the target open on
+    // Windows. renameSync throws twice then succeeds on the 3rd attempt.
+    let renameCalls = 0
+    let unlinked = false
+    const path = scratchPath('mutate-rename-transient')
+    const ops: FsOps = {
+      readFileSync: () => '{}',
+      writeFileSync: () => {},
+      renameSync: () => {
+        renameCalls += 1
+        if (renameCalls < 3) throw new Error('EPERM')
+      },
+      unlinkSync: () => {
+        unlinked = true
+      },
+    }
+    expect(() => mutatePoolFile(() => {}, path, ops)).not.toThrow()
+    expect(renameCalls).toBe(3)
+    expect(unlinked).toBe(false) // succeeded before cleanup was ever needed
+  })
+
+  test('a persistently failing rename retries up to 5x then falls through to cleanup', () => {
+    let renameCalls = 0
+    let unlinked = false
+    const ops: FsOps = {
+      readFileSync: () => '{}',
+      writeFileSync: () => {},
+      renameSync: () => {
+        renameCalls += 1
+        throw new Error('EPERM')
+      },
+      unlinkSync: () => {
+        unlinked = true
+      },
+    }
+    expect(() =>
+      mutatePoolFile(() => {}, scratchPath('mutate-rename-persistent'), ops),
+    ).not.toThrow()
+    expect(renameCalls).toBe(5)
+    expect(unlinked).toBe(true)
+  })
+
   test('cleanup unlink failure is swallowed too (best-effort, never throws)', () => {
     const ops: FsOps = {
       readFileSync: () => '{}',

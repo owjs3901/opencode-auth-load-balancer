@@ -1,5 +1,5 @@
 import type { PoolAccount } from '../../types'
-import { memoOne } from '../../util'
+import { setBounded } from '../../util'
 
 /**
  * Decode a JWT payload WITHOUT signature verification. We only read first-party
@@ -49,17 +49,29 @@ export function extractAccountId(idToken: string): string | undefined {
 }
 
 /**
- * One-slot memo keyed by the raw access token (same pattern as
- * `computeMergedBetas` / `computeBaseUrl` in `anthropic/transform.ts`): for a
- * pool row bootstrapped with `accountId: null`, `resolveAccountId` runs per
- * attempt of every Codex request (via `applyAuth`) yet the decode is fully
- * determined by the `access` string, which is constant between token
- * refreshes. A rotated token misses the memo and re-decodes, so it
- * self-invalidates. Stored `accountId` never touches it.
+ * Bounded `Map` cache (cap 32, clear-on-full via `setBounded` — same pattern
+ * as `cachedHeader` in `providers/anthropic/cch.ts`) keyed by the raw access
+ * token: for a pool row bootstrapped with `accountId: null`, `resolveAccountId`
+ * runs per attempt of every Codex request (via `applyAuth`) yet the decode is
+ * fully determined by the `access` string, which is constant between token
+ * refreshes. A ONE-SLOT memo (the prior shape) thrashes here because this
+ * plugin load-balances MULTIPLE OpenAI accounts through one process:
+ * `usage-refresh.ts`'s `Promise.all` polls every stale account concurrently,
+ * so two accountId-less accounts' access tokens interleave within the same
+ * tick and would evict each other's single slot before either could be
+ * reused — the exact class of bug already fixed for `cachedHeader`. A `Map`
+ * keeps each account's decode independently cached. Stored `accountId` never
+ * touches it (see `resolveAccountId` below).
  */
-const computeDecodedAccountId = memoOne((access: string): string | undefined =>
-  extractAccountId(access),
-)
+const ACCOUNT_ID_CACHE_MAX = 32
+const decodedAccountIdCache = new Map<string, string | undefined>()
+function computeDecodedAccountId(access: string): string | undefined {
+  if (decodedAccountIdCache.has(access))
+    return decodedAccountIdCache.get(access)
+  const value = extractAccountId(access)
+  setBounded(decodedAccountIdCache, access, value, ACCOUNT_ID_CACHE_MAX)
+  return value
+}
 
 /** Stored ChatGPT account id, or one decoded from the access-token JWT. */
 export function resolveAccountId(account: PoolAccount): string | undefined {

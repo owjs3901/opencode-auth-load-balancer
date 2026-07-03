@@ -76,6 +76,23 @@ describe('applyAuth', () => {
     applyAuth(h3, { ...account, access: jwt({ chatgpt_account_id: 'm2' }) })
     expect(h3.get('chatgpt-account-id')).toBe('m2')
   })
+  test('keeps BOTH accounts cached under A,B,A interleaving (bounded Map, not a one-slot memo)', () => {
+    // usage-refresh.ts polls every stale account concurrently via Promise.all,
+    // so two accountId-less accounts' access tokens interleave within the same
+    // tick. A one-slot memo would let B evict A's cached decode before A is
+    // looked up again; the bounded Map must keep both entries live.
+    const accA = { ...acct(null), access: jwt({ chatgpt_account_id: 'accA' }) }
+    const accB = { ...acct(null), access: jwt({ chatgpt_account_id: 'accB' }) }
+    const hA1 = new Headers()
+    applyAuth(hA1, accA)
+    const hB = new Headers()
+    applyAuth(hB, accB)
+    const hA2 = new Headers()
+    applyAuth(hA2, accA)
+    expect(hA1.get('chatgpt-account-id')).toBe('accA')
+    expect(hB.get('chatgpt-account-id')).toBe('accB')
+    expect(hA2.get('chatgpt-account-id')).toBe('accA')
+  })
 })
 
 describe('rewriteUrl', () => {

@@ -42,10 +42,10 @@ export function computeCCH(messageText: string): string {
 
 /** Compute the 3-char version suffix from the sampled message characters. */
 export function computeVersionSuffix(
-  messageText: string,
+  text: string,
   version: string = CLAUDE_CODE_VERSION,
 ): string {
-  const chars = CCH_POSITIONS.map((index) => messageText[index] || '0').join('')
+  const chars = CCH_POSITIONS.map((index) => text[index] || '0').join('')
   return createHash('sha256')
     .update(`${CCH_SALT}${chars}${version}`)
     .digest('hex')

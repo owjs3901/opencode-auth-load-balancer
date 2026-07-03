@@ -43,9 +43,12 @@ export function toTokenSet(
 
 /**
  * Parse and validate an OAuth token-endpoint 200 body. Returns null when the
- * body is not JSON or is missing `access_token`/`expires_in` — otherwise a
- * SyntaxError escapes into the login flow, or a missing `expires_in` poisons
- * the pool with `expires: NaN` (which `needsRefresh` never treats as stale).
+ * body is not JSON, `access_token` is missing/empty, or `expires_in` is
+ * missing — otherwise a SyntaxError escapes into the login flow, an
+ * empty-string `access_token` writes `access: ''` onto the pool row (silently
+ * bricking auth until the next self-healing refresh), or a missing
+ * `expires_in` poisons the pool with `expires: NaN` (which `needsRefresh`
+ * never treats as stale).
  * `expires_in` must be FINITE, not just a number: `JSON.parse('1e999')`
  * legally yields `Infinity`, which would poison the pool with
  * `expires: Infinity` — the same never-stale soft-brick as NaN.
@@ -70,6 +73,7 @@ export async function readTokenResponse<
   if (
     !json ||
     typeof json.access_token !== 'string' ||
+    json.access_token === '' ||
     !Number.isFinite(json.expires_in) ||
     json.expires_in <= 0 ||
     !Number.isFinite(json.expires_in * 1000)

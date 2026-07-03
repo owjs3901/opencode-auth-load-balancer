@@ -134,6 +134,23 @@ describe('anthropic oauth', () => {
     ).toBeNull()
   })
 
+  test('exchange rejects an empty-string access_token (never commits access: "")', async () => {
+    // A malformed-but-200 body (schema drift, a proxy bug, a provider quirk)
+    // carrying `access_token: ''` must be rejected at the same trust boundary
+    // as every other missing/empty required field here — matching the rest
+    // of the codebase's falsy/empty-string checks at this boundary
+    // (`refresh_token || previousRefresh`, `resolveAccountId`'s
+    // `if (account.accountId)`). Pre-fix this passed validation and wrote
+    // `access: ''` onto the pool row.
+    respond = () =>
+      new Response(JSON.stringify({ access_token: '', expires_in: 3600 }), {
+        status: 200,
+      })
+    expect(
+      await aExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
+    ).toBeNull()
+  })
+
   test('refresh returns rotated tokens and throws on non-ok', async () => {
     respond = () =>
       new Response(
@@ -178,6 +195,17 @@ describe('anthropic oauth', () => {
     await expect(aRefresh('r1')).rejects.toThrow('malformed')
     respond = () =>
       new Response(JSON.stringify({ access_token: 'a2' }), { status: 200 })
+    await expect(aRefresh('r1')).rejects.toThrow('malformed')
+  })
+
+  test('refresh throws (never commits access: "") on an empty-string access_token', async () => {
+    // Refresh-side sibling of the exchange empty-access_token test above:
+    // the same malformed body must throw the status-prefixed "malformed"
+    // error instead of committing `access: ''` via commitRefresh.
+    respond = () =>
+      new Response(JSON.stringify({ access_token: '', expires_in: 3600 }), {
+        status: 200,
+      })
     await expect(aRefresh('r1')).rejects.toThrow('malformed')
   })
 

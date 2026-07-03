@@ -51,9 +51,9 @@ export function clamp01(n: number): number {
 /**
  * Type guard: a real, finite number (rejects NaN/±Infinity AND non-numbers).
  * Shared by both providers' `endpointWindow` malformed-window checks, where
- * the `v is number` narrowing also handles optional fields. NOTE: the TUI
- * view ships its OWN `isFiniteNumber` copy by design — the TUI runtime
- * cannot import `src/`.
+ * the `v is number` narrowing also handles optional fields. NOTE:
+ * `tui/auth-load-balancer-tui.logic.ts` ships its OWN `isFiniteNumber` copy
+ * by design — the TUI runtime cannot import `src/`.
  */
 export function isFiniteNumber(v: unknown): v is number {
   return Number.isFinite(v)
@@ -65,8 +65,9 @@ export function isFiniteNumber(v: unknown): v is number {
  * shapes: the user-editable pool file's `lastSelected` / `sessions`
  * containers and session rows (`pool/store.ts`), and the incoming `system`
  * prompt blocks in the Anthropic request transform
- * (`providers/anthropic/transform.ts`). NOTE: the TUI view ships its OWN
- * `isPlainRecordValue` copy by design — the TUI runtime cannot import `src/`.
+ * (`providers/anthropic/transform.ts`). NOTE:
+ * `tui/auth-load-balancer-tui.logic.ts` ships its OWN `isPlainRecordValue`
+ * copy by design — the TUI runtime cannot import `src/`.
  */
 export function isPlainObject(
   value: unknown,

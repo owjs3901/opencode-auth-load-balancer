@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { setBounded } from '../../util'
 import { CCH_POSITIONS, CCH_SALT, CLAUDE_CODE_VERSION } from './constants'
 
 interface Message {
@@ -53,15 +54,23 @@ export function computeVersionSuffix(
 }
 
 /**
- * One-slot memo (same pattern as `cachedDecode` in openai/jwt.ts): the header
- * is fully determined by the FIRST user message's text — constant across every
- * turn of a conversation — and the entrypoint, yet each request would
- * otherwise re-run two SHA-256 hashes (one over the full message text, which
- * can be pasted-file-sized). The keying string compare is O(n) but ~10× cheaper
- * per byte than hashing, and hits on every follow-up turn.
+ * Bounded memo (same eviction helper as `sanitizeCache` in
+ * `providers/anthropic/transform.ts`): the header is fully determined by the
+ * FIRST user message's text — constant across every turn of a conversation —
+ * and the entrypoint, yet each request would otherwise re-run two SHA-256
+ * hashes (one over the full message text, which can be pasted-file-sized). A
+ * `Map` (not a one-slot memo) because this plugin load-balances MULTIPLE
+ * concurrent sessions/accounts through one process — an orchestrator session
+ * plus parallel subagent sessions all issue requests through the same
+ * process, each with a different first-user-message text. A one-slot cache
+ * would thrash to ~0% hit rate under that interleaving; the `\u0000`-joined
+ * key keeps `entrypoint` and `text` from colliding across the boundary. Tiny
+ * cap with clear-on-full keeps worst-case memory bounded (mirrors
+ * `sanitizeCache`'s cap of 8 and `notify.ts`'s `lastFallbackToasted` cap of
+ * 256).
  */
-let cachedHeader: { text: string; entrypoint: string; value: string } | null =
-  null
+const CACHED_HEADER_MAX = 32
+const cachedHeader = new Map<string, string>()
 
 /**
  * Build the complete billing header string for insertion into system[0], or
@@ -88,12 +97,9 @@ export function buildBillingHeaderValue(
   if (!userMsg) return null
 
   const text = messageText(userMsg)
-  if (
-    cachedHeader &&
-    cachedHeader.text === text &&
-    cachedHeader.entrypoint === entrypoint
-  )
-    return cachedHeader.value
+  const key = `${entrypoint}\u0000${text}`
+  const hit = cachedHeader.get(key)
+  if (hit !== undefined) return hit
   const suffix = computeVersionSuffix(text)
   const cch = computeCCH(text)
   const value =
@@ -101,6 +107,6 @@ export function buildBillingHeaderValue(
     `cc_version=${CLAUDE_CODE_VERSION}.${suffix}; ` +
     `cc_entrypoint=${entrypoint}; ` +
     `cch=${cch};`
-  cachedHeader = { text, entrypoint, value }
+  setBounded(cachedHeader, key, value, CACHED_HEADER_MAX)
   return value
 }

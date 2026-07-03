@@ -154,7 +154,7 @@ export async function readStatus(
  * Render a utilization as `"45%"` (or `"-"` for null/undefined). Shared with
  * `notify.ts` so the dashboard, the `auth_lb_status` tool, and the switch
  * toast cannot silently disagree on the same account's percentage rounding.
- * The TUI view at `tui/auth-load-balancer-tui.view.tsx` keeps its own copy
+ * `tui/auth-load-balancer-tui.logic.ts` keeps its own copy
  * (the TUI runtime cannot import `src/`).
  */
 export function pct(u: number | null | undefined): string {

@@ -124,26 +124,27 @@ Codex — in use: chatgpt-plus
 
 ### Persistent bottom status bar (TUI)
 
-A SolidJS TUI plugin renders a persistent bottom status bar (opencode's always-visible `app_bottom` slot) showing both the in-use account(s) per provider (polled from the pool, e.g. `Claude anthropic-1 58% · 5h 12%`) **and** the current session usage — tokens, % of the model context window, and `$` cost — computed the same way opencode's own footer does. It is **three files**:
+A SolidJS TUI plugin renders a persistent bottom status bar (opencode's always-visible `app_bottom` slot) showing both the in-use account(s) per provider (polled from the pool, e.g. `Claude anthropic-1 58% · 5h 12%`) **and** the current session usage — tokens, % of the model context window, and `$` cost — computed the same way opencode's own footer does. It is **four files**:
 
 | File | Role |
 |------|------|
 | [`tui/auth-load-balancer-tui.ts`](tui/auth-load-balancer-tui.ts) | Plugin **entry** (no JSX). Registered in `tui.json` (below). Inside `tui()` it **lazily** imports the view. |
 | [`tui/auth-load-balancer-tui.view.tsx`](tui/auth-load-balancer-tui.view.tsx) | The SolidJS **view** (JSX). Compiled by opencode's TUI runtime Solid transform, whose loader matches `*.{tsx,jsx}`. |
+| [`tui/auth-load-balancer-tui.logic.ts`](tui/auth-load-balancer-tui.logic.ts) | Pure, non-JSX pool-file logic (read/normalize the pool file, the sidebar's rename/delete mutations, and the `pct`/`until`/`winPct`/`tierResets`/`stateOf` display-formatting helpers) split out of the view so it's directly unit-testable, imported unchanged by `.view.tsx`. |
 | [`tui/auth-load-balancer-scoring.ts`](tui/auth-load-balancer-scoring.ts) | A byte-identical copy of [`src/scheduler/score-core.ts`](src/scheduler/score-core.ts) (kept in sync by `bun run build` + a test) so the dashboard ranks accounts with the **exact same** scorer as the server — never a drifting re-implementation. |
 
-Install the three files into a directory the **server does not scan** (anything other than `plugin/` / `plugins/`) and register the entry in `tui.json`:
+Install the four files into a directory the **server does not scan** (anything other than `plugin/` / `plugins/`) and register the entry in `tui.json`:
 
 ```bash
 # macOS / Linux
 mkdir -p ~/.config/opencode/tui-plugins
-cp tui/auth-load-balancer-tui.ts tui/auth-load-balancer-tui.view.tsx tui/auth-load-balancer-scoring.ts ~/.config/opencode/tui-plugins/
+cp tui/auth-load-balancer-tui.ts tui/auth-load-balancer-tui.view.tsx tui/auth-load-balancer-tui.logic.ts tui/auth-load-balancer-scoring.ts ~/.config/opencode/tui-plugins/
 ```
 
 ```powershell
 # Windows
 New-Item -ItemType Directory -Force -Path $env:USERPROFILE\.config\opencode\tui-plugins | Out-Null
-Copy-Item tui\auth-load-balancer-tui.ts,tui\auth-load-balancer-tui.view.tsx,tui\auth-load-balancer-scoring.ts $env:USERPROFILE\.config\opencode\tui-plugins\
+Copy-Item tui\auth-load-balancer-tui.ts,tui\auth-load-balancer-tui.view.tsx,tui\auth-load-balancer-tui.logic.ts,tui\auth-load-balancer-scoring.ts $env:USERPROFILE\.config\opencode\tui-plugins\
 ```
 
 Then register the entry in `~/.config/opencode/tui.json` (this is how opencode loads TUI plugins) and restart:
@@ -156,7 +157,7 @@ Then register the entry in `~/.config/opencode/tui.json` (this is how opencode l
 }
 ```
 
-> **Why this shape (it matters):** TUI plugins load from the `plugin` array in `tui.json`, **not** from the server's plugins-dir glob. The server *separately* globs `{plugin,plugins}/*.{ts,js}` and loads every match as a **server** plugin — so a TUI entry dropped in `plugins/` is also loaded by the server, rejected (`must default export … server()`), and logs an error on **every** launch (and a stray scoring `.ts` there would be mis-loaded as a plugin and break provider resolution). Keeping the three files OUTSIDE `plugins/` and registering only via `tui.json` avoids that. The split into a `.ts` **entry** that **lazily imports** a `.tsx` **view** is still required because opencode's runtime SolidJS JSX transform (`@opentui/solid`) only matches `*.{tsx,jsx}` — a `.ts` cannot itself contain JSX, and the lazy import keeps the server plugin worker (which never runs `tui()`) from evaluating the SolidJS module graph. Verified against opencode / `@opencode-ai/plugin` **v1.17.9** + `@opentui/solid` 0.3.4. The `.tsx` view **is** typechecked (`tsconfig.tui.json`) and linted here — its JSX deps (`solid-js` + `@opentui/*`) are installed as devDependencies pinned to those versions — so type/import/prop breaks are caught in CI; only its runtime rendering still needs a live opencode TUI to verify. The toast + `auth_lb_status` tool + `bun run status` CLI cover the same information regardless.
+> **Why this shape (it matters):** TUI plugins load from the `plugin` array in `tui.json`, **not** from the server's plugins-dir glob. The server *separately* globs `{plugin,plugins}/*.{ts,js}` and loads every match as a **server** plugin — so a TUI entry dropped in `plugins/` is also loaded by the server, rejected (`must default export … server()`), and logs an error on **every** launch (and a stray scoring `.ts` there would be mis-loaded as a plugin and break provider resolution). Keeping the four files OUTSIDE `plugins/` and registering only via `tui.json` avoids that. The split into a `.ts` **entry** that **lazily imports** a `.tsx` **view** is still required because opencode's runtime SolidJS JSX transform (`@opentui/solid`) only matches `*.{tsx,jsx}` — a `.ts` cannot itself contain JSX, and the lazy import keeps the server plugin worker (which never runs `tui()`) from evaluating the SolidJS module graph. Verified against opencode / `@opencode-ai/plugin` **v1.17.9** + `@opentui/solid` 0.3.4. The `.tsx` view **is** typechecked (`tsconfig.tui.json`) and linted here — its JSX deps (`solid-js` + `@opentui/*`) are installed as devDependencies pinned to those versions — so type/import/prop breaks are caught in CI; only its runtime rendering still needs a live opencode TUI to verify. The toast + `auth_lb_status` tool + `bun run status` CLI cover the same information regardless. (`auth-load-balancer-tui.logic.ts` has no JSX and no TUI-runtime dependency, so it is directly unit-tested rather than only typechecked.)
 
 ---
 
@@ -252,6 +253,7 @@ src/
 tui/
   auth-load-balancer-tui.ts       # TUI plugin ENTRY (registered in tui.json; no JSX)
   auth-load-balancer-tui.view.tsx # SolidJS view (lazily imported; app_bottom + sidebar slots)
+  auth-load-balancer-tui.logic.ts # pure pool-file logic + display helpers (unit-tested)
   auth-load-balancer-scoring.ts   # byte copy of src/scheduler/score-core.ts (shared scorer)
 ```
 
@@ -274,7 +276,7 @@ The pool is its own JSON file (opencode's native auth store holds only one crede
 
 ## Limitations
 
-- **Bottom status bar** ([`tui/auth-load-balancer-tui.ts`](tui/auth-load-balancer-tui.ts) + [`.view.tsx`](tui/auth-load-balancer-tui.view.tsx) + [`auth-load-balancer-scoring.ts`](tui/auth-load-balancer-scoring.ts)) is a SolidJS TUI artifact compiled by opencode (its JSX deps — `solid-js` + `@opentui/*` — are installed as devDependencies, so the `.tsx` view **is** typechecked via `tsconfig.tui.json` and linted, though not render-tested here since that needs a live opencode TUI; its scorer is a byte-identical copy of the unit-tested [`src/scheduler/score-core.ts`](src/scheduler/score-core.ts), enforced by a sync test). It is written against opencode 1.17.9 internals (the `app_bottom` slot + the `subagent-footer` usage computation, verified against source); confirm it renders in your opencode build. The toast/tool/CLI cover the account info regardless.
+- **Bottom status bar** ([`tui/auth-load-balancer-tui.ts`](tui/auth-load-balancer-tui.ts) + [`.view.tsx`](tui/auth-load-balancer-tui.view.tsx) + [`.logic.ts`](tui/auth-load-balancer-tui.logic.ts) + [`auth-load-balancer-scoring.ts`](tui/auth-load-balancer-scoring.ts)) is a SolidJS TUI artifact compiled by opencode (its JSX deps — `solid-js` + `@opentui/*` — are installed as devDependencies, so the `.tsx` view **is** typechecked via `tsconfig.tui.json` and linted, though not render-tested here since that needs a live opencode TUI; its scorer is a byte-identical copy of the unit-tested [`src/scheduler/score-core.ts`](src/scheduler/score-core.ts), enforced by a sync test). It is written against opencode 1.17.9 internals (the `app_bottom` slot + the `subagent-footer` usage computation, verified against source); confirm it renders in your opencode build. The toast/tool/CLI cover the account info regardless.
 - **OpenAI/Codex** assumes the Responses API; chat-completions → responses conversion is out of scope.
 - **Cross-process refresh**: per-process singleflight protects token rotation within one opencode instance. Running two opencode instances at once could still race the single-use refresh token.
 - **TUI pool writes**: the TUI sidebar's Rename / Delete actions write the pool file atomically (temp + rename) but WITHOUT the cross-process file lock the server uses around its own read-modify-write — so a server usage / cooldown / session / `tokenGen` update committed between the TUI's `readFileSync` and `renameSync` can be silently overwritten. Impact is bounded: the next request re-records usage from response headers, so the window is one cycle of staleness on the affected account; correctness recovers on its own.

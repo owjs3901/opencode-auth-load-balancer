@@ -538,6 +538,22 @@ describe('cch billing header', () => {
       'cc_entrypoint=other',
     )
   })
+  test('buildBillingHeaderValue keeps two different conversations cached simultaneously', () => {
+    // Regression guard for the single-slot memo that used to thrash under
+    // concurrent sessions: interleave calls for two DISTINCT (text,
+    // entrypoint) pairs and confirm each still returns its own correct,
+    // stable header on a later call — a single-slot cache would have evicted
+    // conversation A's entry the moment conversation B's call ran.
+    const msgsA = [{ role: 'user', content: 'concurrent-sentinel-A' }]
+    const msgsB = [{ role: 'user', content: 'concurrent-sentinel-B' }]
+    const firstA = buildBillingHeaderValue(msgsA, 'e')
+    const firstB = buildBillingHeaderValue(msgsB, 'e')
+    expect(firstA).toContain(`cch=${computeCCH('concurrent-sentinel-A')};`)
+    expect(firstB).toContain(`cch=${computeCCH('concurrent-sentinel-B')};`)
+    // A's repeat call after B interleaved must still hit its own cached value.
+    expect(buildBillingHeaderValue(msgsA, 'e')).toBe(firstA!)
+    expect(buildBillingHeaderValue(msgsB, 'e')).toBe(firstB!)
+  })
   test('buildBillingHeaderValue embeds version, entrypoint, and cch', () => {
     const v = buildBillingHeaderValue(
       [{ role: 'user', content: 'hi' }],

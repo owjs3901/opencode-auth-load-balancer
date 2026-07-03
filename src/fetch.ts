@@ -523,12 +523,27 @@ export function createLoadBalancedFetch(
             waitableCooldownIds,
           )
           if (resumeAt !== null && resumeAt <= waitDeadline) {
-            // Fresh Date.now(), NOT the loop-start `now`: that was captured
-            // before the serialized pool read and the selection scan (plus a
-            // whole round of attempts), so sleeping `resumeAt - now` would
-            // overshoot the cooldown by that elapsed I/O time. Negative
-            // durations clamp to an immediate wake inside sleepAbortable.
-            await sleepAbortable(resumeAt - Date.now(), signal)
+            // Sleep until the soonest cooldown has GENUINELY elapsed. Fresh
+            // Date.now() (NOT the loop-start `now`, captured before the
+            // serialized pool read + selection scan + a whole round of
+            // attempts) so `resumeAt - now` doesn't overshoot by that elapsed
+            // I/O time. LOOP because `setTimeout` can fire a few ms EARLY under
+            // CPU load: a single `sleepAbortable(resumeAt - now)` may then wake
+            // with `Date.now() < resumeAt`, leaving the account we waited for
+            // still `cooldownUntil > now`. selectForSession would then see NO
+            // available account and fall through to selectAccount's DEGRADED
+            // fallback — resuming on a DIFFERENT still-cooling account (the
+            // lowest-weekly-util one) and silently defeating the wait. Re-
+            // sleeping the remaining delta guarantees that account is actually
+            // past its cooldown before we retry. An already-expired cooldown
+            // makes the first delta <= 0, so the body is skipped (immediate
+            // wake, as before); a client abort still interrupts the sleep and
+            // propagates its reason untouched.
+            let remaining = resumeAt - Date.now()
+            while (remaining > 0) {
+              await sleepAbortable(remaining, signal)
+              remaining = resumeAt - Date.now()
+            }
             tried.clear()
             waitableCooldownIds.clear()
             continue

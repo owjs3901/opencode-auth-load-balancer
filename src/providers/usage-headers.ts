@@ -1,5 +1,5 @@
 import type { UsageSnapshot, UsageWindow } from '../types'
-import { clamp01, secondsToMs } from '../util'
+import { clamp01, isFiniteNumber, secondsToMs } from '../util'
 
 /**
  * Header names + scale for one provider's hourly/weekly rate-limit header pair.
@@ -78,4 +78,39 @@ export function parseWindowPairHeaders(
   if (hourly) out.hourly = hourly
   if (weekly) out.weekly = weekly
   return hourly || weekly ? out : null
+}
+
+/**
+ * Build a single `UsageWindow` from ONE raw usage-endpoint window, sharing the
+ * three-step contract both providers' endpoint parsers need — only reached
+ * AFTER the caller's own shape guard confirmed the response body is
+ * recognizably the usage-endpoint shape (a genuinely broken/foreign body
+ * never reaches here; the caller discards the whole poll instead):
+ *
+ *   - `w` absent (null/undefined): the server is deliberately reporting NO
+ *     usage recorded in that window (e.g. right after an out-of-band quota
+ *     reset wipes the record, or an idle account past the window) — a TRUE
+ *     0%, not "unknown". Synthesize a zero window (`resetAt` 0 = no reset
+ *     scheduled yet) so dashboards render "0%" instead of "-" ("-" stays
+ *     reserved for never-polled accounts). Scoring is unaffected either way:
+ *     `utilOf`/`weeklyUrgency` already read a missing window as 0.
+ *   - `w` present but its utilization field is missing/non-finite: unusable —
+ *     return `null` (NOT 0%) so the scheduler never treats a malformed
+ *     response as "full headroom" and ranks the account first.
+ *   - otherwise: `clamp01(util / divisor)` plus the provider's own reset
+ *     parser (`resetOf`) — the one piece that genuinely differs between
+ *     providers (Anthropic's ISO/epoch-seconds/epoch-ms heuristic vs OpenAI's
+ *     plain-seconds `secondsToMs`), so it stays a caller-supplied callback
+ *     rather than something this helper tries to unify too.
+ */
+export function endpointWindowFrom<W>(
+  w: W | null | undefined,
+  utilOf: (w: W) => unknown,
+  divisor: number,
+  resetOf: (w: W) => number,
+): UsageWindow | null {
+  if (!w) return { utilization: 0, resetAt: 0 }
+  const util = utilOf(w)
+  if (!isFiniteNumber(util)) return null
+  return { utilization: clamp01(util / divisor), resetAt: resetOf(w) }
 }

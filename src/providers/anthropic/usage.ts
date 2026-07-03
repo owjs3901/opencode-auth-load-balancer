@@ -1,6 +1,7 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
-import { clamp01, isFiniteNumber } from '../../util'
+import { isImplausiblyFarFuture } from '../../util'
 import {
+  endpointWindowFrom,
   parseWindowPairHeaders,
   type WindowPairHeaderSpec,
 } from '../usage-headers'
@@ -56,6 +57,18 @@ interface UsageEndpointResponse {
 const msFromLoose = (n: number): number =>
   n <= 0 ? 0 : n > 1e12 ? n : n * 1000
 
+/**
+ * Reject a resolved epoch-ms candidate that is implausibly far in the future
+ * (see `isImplausiblyFarFuture`, util.ts) before it becomes `resetAt` — a
+ * broken server/proxy clock (or JSON `1e500`-style overflow already handled
+ * by the finite guards below) must not permanently near-zero-rank an
+ * otherwise-healthy account in `weeklyUrgency`. Applied to every branch's
+ * result (number, numeric-string, ISO-date) so none of the three decode
+ * paths can smuggle a far-future value past the bound.
+ */
+const boundedReset = (ms: number): number =>
+  isImplausiblyFarFuture(ms) ? 0 : ms
+
 /** Decode resets_at which Anthropic has shipped as ISO string, epoch seconds, or epoch ms. */
 function parseResetAt(value: string | number | null | undefined): number {
   // Defensive nullish guard. The endpoint contract documents `string | number`,
@@ -80,39 +93,34 @@ function parseResetAt(value: string | number | null | undefined): number {
     // pool.usage.{hourly,weekly}.resetAt — silently breaking isWindowExpired,
     // weeklyUrgency (drainable / Infinity = 0 urgency), and relTime rendering.
     if (!Number.isFinite(value)) return 0
-    return msFromLoose(value)
+    return boundedReset(msFromLoose(value))
   }
   const asNum = Number(value)
   if (Number.isFinite(asNum) && value.trim() !== '') {
-    return msFromLoose(asNum)
+    return boundedReset(msFromLoose(asNum))
   }
   const parsed = Date.parse(value)
-  return Number.isFinite(parsed) ? parsed : 0
+  return Number.isFinite(parsed) ? boundedReset(parsed) : 0
 }
 
+/**
+ * Only reached AFTER fetchUsage's shape guard confirmed the body carries at
+ * least one window key — genuinely broken bodies (no window key at all) never
+ * get here (the shape guard discards the whole poll and keeps the
+ * last-known snapshot). The absent/malformed/clamp+reset contract itself
+ * lives in the shared `endpointWindowFrom` (usage-headers.ts) — only the
+ * field names (`utilization`/`resets_at`) and Anthropic's reset parser
+ * (`parseResetAt`) are specific to this provider.
+ */
 function endpointWindow(
   w: UsageEndpointWindow | null | undefined,
 ): UsageWindow | null {
-  // Only reached AFTER fetchUsage's shape guard confirmed the body carries at
-  // least one window key — so a null/absent window here is the server
-  // deliberately reporting NO usage recorded in that window (e.g. right after
-  // Anthropic's out-of-band promotional weekly reset wipes the weekly record,
-  // or an account idle past the window). That is a true 0%, not "unknown":
-  // synthesize a zero window (resetAt 0 = no reset scheduled yet) so dashboards
-  // render "0%" instead of "-" ("-" stays reserved for never-polled accounts).
-  // Genuinely broken bodies (no window key at all) never get here — the shape
-  // guard discards the whole poll and keeps the last-known snapshot. Scoring is
-  // unaffected: utilOf/weeklyUrgency already read a missing window as 0.
-  if (!w) return { utilization: 0, resetAt: 0 }
-  // Symmetric with parseUsageHeaders() and the OpenAI endpoint helper: a window
-  // that is PRESENT but malformed (missing / non-finite utilization) is unusable
-  // — return null (NOT 0%) so the scheduler does not treat a malformed response
-  // as "full headroom" and rank the account first.
-  if (!isFiniteNumber(w.utilization)) return null
-  return {
-    utilization: clamp01(w.utilization / 100), // endpoint is a percent
-    resetAt: parseResetAt(w.resets_at),
-  }
+  return endpointWindowFrom(
+    w,
+    (win) => win.utilization,
+    100, // endpoint is a percent
+    (win) => parseResetAt(win.resets_at),
+  )
 }
 
 /**

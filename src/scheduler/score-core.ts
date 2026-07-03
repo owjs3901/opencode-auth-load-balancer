@@ -63,8 +63,15 @@ export interface ScoreAccount {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
-/** Weekly windows repeat on FIXED per-account anchors every 7 days (see usage-merge.ts). */
-const WEEK_MS = 7 * DAY_MS
+/**
+ * Weekly windows repeat on FIXED per-account anchors every 7 days (see
+ * usage-merge.ts). Exported so `usage-merge.ts` (an ordinary `src/` file with
+ * no dependency-free constraint) can import this single source instead of
+ * computing the same 604800000ms constant independently — `score-core.ts`
+ * itself still imports nothing, so the TUI's byte-identical copy stays
+ * dependency-free.
+ */
+export const WEEK_MS = 7 * DAY_MS
 const HOUR_MS = 60 * 60 * 1000
 /** The ~5h short rolling window (Anthropic 5h ≈ Codex primary). */
 const HOURLY_WINDOW_MS = 5 * HOUR_MS

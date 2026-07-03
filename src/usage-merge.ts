@@ -1,6 +1,5 @@
+import { WEEK_MS } from './scheduler/score-core'
 import type { UsageWindow } from './types'
-
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
  * Roll a FIXED weekly reset anchor forward to its next occurrence strictly after

@@ -352,33 +352,42 @@ describe('anthropic usage', () => {
   })
 
   test('fetchUsage maps percent and decodes ISO + epoch-seconds resets', async () => {
+    // Reset values must sit within the far-future broken-clock bound
+    // (isImplausiblyFarFuture, util.ts — real quota windows are ≤ 7 days), so
+    // these are computed relative to the real current time rather than a
+    // fixed calendar date (mirrors the SEC() helper above).
+    const isoReset = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+    const secReset = Math.floor(Date.now() / 1000) + 2 * 24 * 60 * 60
     respond = () =>
       new Response(
         JSON.stringify({
-          five_hour: { utilization: 35, resets_at: '2030-01-01T00:00:00Z' },
-          seven_day: { utilization: 14, resets_at: 1900000000 },
+          five_hour: { utilization: 35, resets_at: isoReset },
+          seven_day: { utilization: 14, resets_at: secReset },
         }),
         { status: 200 },
       )
     const u = await aFetchUsage(acct('anthropic', null), 0)
     expect(u?.hourly?.utilization).toBeCloseTo(0.35, 5)
     expect(u?.weekly?.utilization).toBeCloseTo(0.14, 5)
-    expect(u?.hourly?.resetAt).toBe(Date.parse('2030-01-01T00:00:00Z'))
-    expect(u?.weekly?.resetAt).toBe(1900000000 * 1000)
+    expect(u?.hourly?.resetAt).toBe(Date.parse(isoReset))
+    expect(u?.weekly?.resetAt).toBe(secReset * 1000)
   })
 
   test('fetchUsage decodes epoch-ms, numeric-string, invalid-string, and null window', async () => {
+    // Same real-time-relative constraint as the test above.
+    const msReset = Date.now() + 3 * 24 * 60 * 60 * 1000
+    const secReset = Math.floor(Date.now() / 1000) + 4 * 24 * 60 * 60
     respond = () =>
       new Response(
         JSON.stringify({
-          five_hour: { utilization: 10, resets_at: 1900000000000 },
-          seven_day: { utilization: 20, resets_at: '1900000000' },
+          five_hour: { utilization: 10, resets_at: msReset },
+          seven_day: { utilization: 20, resets_at: String(secReset) },
         }),
         { status: 200 },
       )
     let u = await aFetchUsage(acct('anthropic', null), 0)
-    expect(u?.hourly?.resetAt).toBe(1900000000000)
-    expect(u?.weekly?.resetAt).toBe(1900000000 * 1000)
+    expect(u?.hourly?.resetAt).toBe(msReset)
+    expect(u?.weekly?.resetAt).toBe(secReset * 1000)
 
     respond = () =>
       new Response(
@@ -424,6 +433,31 @@ describe('anthropic usage', () => {
     expect(u?.weekly?.resetAt).toBe(0)
     expect(Number.isFinite(u?.hourly?.resetAt ?? Infinity)).toBe(true)
     expect(Number.isFinite(u?.weekly?.resetAt ?? Infinity)).toBe(true)
+  })
+
+  test('fetchUsage rejects a finite-but-implausibly-far-future resets_at (broken server/proxy clock)', async () => {
+    // Regression lock for the gap `isImplausiblyFarFuture` (util.ts) closes:
+    // a malformed `resets_at` that is FINITE (unlike the `1e500`/Infinity case
+    // above) but absurdly far in the future — e.g. a corrupted proxy emitting
+    // `99999999999` seconds (≈ year 5138) or a garbage ISO year — must not
+    // become the account's weekly resetAt, which would permanently
+    // near-zero-rank an otherwise-healthy account in weeklyUrgency (days² in
+    // the denominator) and print a nonsensical multi-thousand-day countdown.
+    // Covers all three decode branches: epoch-seconds (number), epoch-seconds
+    // (numeric string via the sibling window), and ISO date string.
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          five_hour: { utilization: 10, resets_at: 99999999999 },
+          seven_day: { utilization: 20, resets_at: '9999-12-31T00:00:00Z' },
+        }),
+        { status: 200 },
+      )
+    const u = await aFetchUsage(acct('anthropic', null), 0)
+    expect(u?.hourly?.resetAt).toBe(0)
+    expect(u?.weekly?.resetAt).toBe(0)
+    expect(u?.hourly?.utilization).toBeCloseTo(0.1, 5)
+    expect(u?.weekly?.utilization).toBeCloseTo(0.2, 5)
   })
 
   test('fetchUsage maps negative endpoint resets_at (number and numeric string) to zero', async () => {

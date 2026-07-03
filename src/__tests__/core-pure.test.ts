@@ -7,7 +7,7 @@ import { mergeHeaders } from '../providers/headers'
 import { DEFAULT_CONFIG, loadConfig } from '../scheduler/config'
 import { deriveSessionKey, SESSION_HEADER } from '../session'
 import { preserveWeeklyAnchor, rollWeeklyAnchorForward } from '../usage-merge'
-import { sleepAbortable } from '../util'
+import { secondsToMs, sleepAbortable } from '../util'
 
 const WEEK = 7 * 24 * 60 * 60 * 1000
 
@@ -69,6 +69,41 @@ describe('preserveWeeklyAnchor (anchor survives resets_at-less merges)', () => {
     expect(
       preserveWeeklyAnchor(incoming, { utilization: 0.5, resetAt: 0 }, now),
     ).toBe(incoming)
+  })
+})
+
+describe('secondsToMs (epoch-seconds -> epoch-ms, bounded against broken-clock resets)', () => {
+  const nowSec = Math.floor(Date.now() / 1000)
+  test('non-finite / zero / negative inputs -> 0 (no usable reset)', () => {
+    expect(secondsToMs(0)).toBe(0)
+    expect(secondsToMs(-5)).toBe(0)
+    expect(secondsToMs(Number.NaN)).toBe(0)
+    expect(secondsToMs(Number.POSITIVE_INFINITY)).toBe(0)
+  })
+  test('the *1000 overflow case -> 0', () => {
+    expect(secondsToMs(1e308)).toBe(0)
+  })
+  test('a realistic near-future reset (a few hours/days out) passes through as-is', () => {
+    expect(secondsToMs(nowSec + 3600)).toBe((nowSec + 3600) * 1000)
+    expect(secondsToMs(nowSec + 86400)).toBe((nowSec + 86400) * 1000)
+  })
+  test('an absolute epoch-seconds value in the PAST always passes (expired, not broken)', () => {
+    // 604800 (7 days since epoch, i.e. 1970-01-08) is hugely in the past relative to
+    // any real `now` -- an elapsed reset is simply "expired" (isWindowExpired), never
+    // a broken-clock symptom, so it is never rejected by the future-bound.
+    expect(secondsToMs(604800)).toBe(604800000)
+  })
+  test('a finite-but-implausibly-far-future reset -> 0 (broken server/proxy clock)', () => {
+    // Regression lock for the gap that let a malformed
+    // `anthropic-ratelimit-unified-7d-reset` / `x-codex-secondary-reset-at` header
+    // (e.g. `99999999999` seconds ≈ year 5138) permanently near-zero-rank an
+    // otherwise-healthy account in weeklyUrgency (days² in the denominator).
+    expect(secondsToMs(99999999999)).toBe(0)
+    // Just past the 8-day bound from the real current time.
+    expect(secondsToMs(nowSec + 9 * 24 * 60 * 60)).toBe(0)
+    // Just inside the 8-day bound stays valid.
+    const withinBoundSec = nowSec + 7 * 24 * 60 * 60
+    expect(secondsToMs(withinBoundSec)).toBe(withinBoundSec * 1000)
   })
 })
 

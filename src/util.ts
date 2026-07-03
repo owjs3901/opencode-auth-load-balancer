@@ -152,20 +152,56 @@ export function memoOne<K, V>(compute: (key: K) => V): (key: K) => V {
 }
 
 /**
- * Convert epoch-seconds → epoch-ms while rejecting non-finite/zero/negative inputs
- * AND the `Number.MAX_VALUE`-overflow case: `1e308` is finite but `1e308 * 1000`
- * collapses to +Infinity, which would silently commit Infinity to
- * `pool.usage.{hourly,weekly}.resetAt` — breaking `isWindowExpired` (never
- * expires), `weeklyUrgency` (drainable / Infinity = 0 urgency, account sidelined
- * forever), and `relTime` rendering ('InfinitydNaNh' in the TUI / CLI). Returns
- * 0 to signal "no usable reset". Mirrors `cooldownUntilFrom`'s retry-after guard
- * in `fetch.ts` (cooldown's `until = now + delta` shape differs, so it is NOT
- * folded in here). Used by both provider header parsers and the OpenAI endpoint
- * helper. Anthropic's `parseResetAt` ms-vs-seconds heuristic (`value > 1e12`)
- * intentionally stays separate — different semantics.
+ * Upper bound (ms) on how far past the current wall clock a parsed reset
+ * timestamp may plausibly sit. A real quota window resets at most weekly, so
+ * anything further out is a broken server/proxy clock, not a real reset.
+ * Mirrors `RETRY_AFTER_MAX_MS` (fetch.ts) and `TIER_RESET_MAX_MS`
+ * (providers/anthropic/fallback.ts), both single-sourced from
+ * `MAX_QUOTA_RESET_BOUND_MS` (providers/http-timeouts.ts) — that constant is
+ * duplicated here (not imported) so util.ts stays dependency-free of
+ * `providers/` (same precedent as `WEEK_MS` in score-core.ts).
+ */
+const MAX_RESET_FUTURE_MS = 8 * 24 * 60 * 60 * 1000
+
+/**
+ * True when `candidateMs` (an absolute epoch-ms reset timestamp) sits further
+ * in the future than `MAX_RESET_FUTURE_MS` past the real wall clock — used to
+ * reject a FINITE-but-absurd reset (e.g. a corrupted proxy emitting
+ * `99999999999` seconds ≈ year 5138) that would otherwise silently become the
+ * account's `resetAt`, permanently near-zero-ranking it in `weeklyUrgency`
+ * (days² in the denominator) and printing a nonsensical "115200d" countdown.
+ * Shared by `secondsToMs` (below) and Anthropic's `parseResetAt`
+ * (providers/anthropic/usage.ts), which cannot delegate to `secondsToMs`
+ * itself (different seconds-vs-ms-vs-ISO-string semantics) but needs the
+ * exact same "how far in the future is too far" guard. Reads the REAL wall
+ * clock (not an injected `now`) because every caller parses a response/
+ * endpoint payload at essentially the moment it arrives — there is no
+ * meaningful test-injectable `now` to thread through the provider
+ * `parseUsageHeaders`/endpoint-parsing call chain the way `cooldownUntilFrom`
+ * (fetch.ts) threads an already-captured `now`. A value in the PAST always
+ * passes (returns false) — an elapsed reset is simply "expired", handled
+ * elsewhere (`isWindowExpired`), not a broken-clock symptom.
+ */
+export function isImplausiblyFarFuture(candidateMs: number): boolean {
+  return candidateMs - Date.now() > MAX_RESET_FUTURE_MS
+}
+
+/**
+ * Convert epoch-seconds → epoch-ms while rejecting non-finite/zero/negative inputs,
+ * the `Number.MAX_VALUE`-overflow case (`1e308` is finite but `1e308 * 1000`
+ * collapses to +Infinity), AND a finite-but-implausibly-far-future reset (see
+ * `isImplausiblyFarFuture`) — any of which would silently commit a corrupt value to
+ * `pool.usage.{hourly,weekly}.resetAt`, breaking `isWindowExpired`, `weeklyUrgency`,
+ * and `relTime` rendering. Returns 0 to signal "no usable reset". Mirrors
+ * `cooldownUntilFrom`'s retry-after guard in `fetch.ts` (cooldown's
+ * `until = now + delta` shape differs, so it is NOT folded in here). Used by both
+ * provider header parsers and the OpenAI endpoint helper. Anthropic's `parseResetAt`
+ * ms-vs-seconds heuristic (`value > 1e12`) intentionally stays separate — different
+ * semantics.
  */
 export function secondsToMs(resetSec: number): number {
   if (!Number.isFinite(resetSec) || resetSec <= 0) return 0
   const ms = resetSec * 1000
-  return Number.isFinite(ms) ? ms : 0
+  if (!Number.isFinite(ms)) return 0
+  return isImplausiblyFarFuture(ms) ? 0 : ms
 }

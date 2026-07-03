@@ -171,6 +171,38 @@ describe('anthropic oauth', () => {
     ).toBeNull()
   })
 
+  test('exchange and refresh accept an explicit refresh_token: null as absent', async () => {
+    // Some statically-typed token endpoints serialize an omitted
+    // Option<String> refresh_token as JSON `null` rather than omitting the
+    // key entirely. Pre-fix, readTokenResponse's guard only special-cased
+    // `undefined`, so a `null` was rejected as "malformed" even though
+    // toTokenSet's `json.refresh_token || previousRefresh` falls back
+    // identically for `null` and `undefined` (both falsy) — exchange would
+    // wrongly report `{ type: 'failed' }` and refresh would throw
+    // "malformed token response body" on an otherwise-valid 200 response.
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          access_token: 'a',
+          refresh_token: null,
+          expires_in: 3600,
+        }),
+        { status: 200 },
+      )
+    const exchanged = await aExchange(
+      'https://cb?code=C&state=S',
+      'v',
+      'cb',
+      'S',
+    )
+    expect(exchanged?.access).toBe('a')
+    expect(exchanged?.refresh).toBe('') // no previous token at exchange time
+
+    const refreshed = await aRefresh('r1')
+    expect(refreshed.access).toBe('a')
+    expect(refreshed.refresh).toBe('r1') // falls back to the sent token
+  })
+
   test('refresh returns rotated tokens and throws on non-ok', async () => {
     respond = () =>
       new Response(

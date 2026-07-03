@@ -471,8 +471,13 @@ export function createLoadBalancedFetch(
     // tried, selectForSession returns null and the round ends), and `waitDeadline`
     // bounds the whole request across wait-and-retry rounds.
     for (;;) {
-      const now = Date.now()
       const pool = await readPool()
+      // Capture `now` AFTER the pool read: readPool queues behind the
+      // in-process pool mutex (and, transitively, in-flight writers holding
+      // the cross-process file lock), so a pre-read stamp could predate that
+      // wait and make selection treat an already-expired cooldown/window as
+      // still live. Same class as the fresh-Date.now() notes below.
+      const now = Date.now()
 
       // Cold-start / staleness seeding (throttled, fire-and-forget — no added
       // latency). Passes THIS iteration's pool snapshot so the seeding path
@@ -588,6 +593,16 @@ export function createLoadBalancedFetch(
           // halving post-response lock cycles during a rate-limit storm.
           const cls = adapter.classifyError(res.status)
           if (cls === 'account' || cls === 'auth') {
+            // Release the rejected response's body stream — and its HTTP
+            // connection — BEFORE any pool write below (`recordOpusCooldown` /
+            // `recordRotation`): rate-limit storms are exactly when the pool
+            // lock is most contended (worst case a 30 s POOL_WRITE_LOCK
+            // timeout), and neither the fallback retry nor the rotation should
+            // wait behind a socket pinned to a dead response. Everything in
+            // this branch (`planReactiveFallback`, `parseUsageHeaders`,
+            // retry-after) reads only `res.headers`, which stay readable after
+            // a body cancel.
+            await res.body?.cancel().catch(ignore)
             // Opus model-tier fallback: a 429 whose BINDING limit is the Opus
             // weekly cap (`representative-claim: seven_day_opus`) is NOT the
             // account's fault — the account still serves non-Opus traffic. So
@@ -612,11 +627,9 @@ export function createLoadBalancedFetch(
                 reactiveNow,
               )
               if (plan) {
-                await res.body?.cancel().catch(ignore)
                 // Fold the 429's usage headers into the SAME pool write as the
-                // tier cooldown (headers stay readable after the body cancel) —
-                // otherwise a failing downgraded retry would leave the scheduler
-                // on the stale pre-request snapshot.
+                // tier cooldown — otherwise a failing downgraded retry would
+                // leave the scheduler on the stale pre-request snapshot.
                 await recordOpusCooldown(
                   account.id,
                   plan.resetAt,
@@ -641,14 +654,6 @@ export function createLoadBalancedFetch(
             }
 
             const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
-            // Release the rejected response's body stream — and its HTTP
-            // connection — BEFORE the `recordRotation` pool write below: rate-
-            // limit storms are exactly when the pool lock is most contended
-            // (worst case a 30 s POOL_WRITE_LOCK timeout), and the immediate
-            // retry should not wait behind a socket pinned to a dead response.
-            // `recordRotation` reads only `res.headers` (usage + retry-after),
-            // which stay readable after a body cancel.
-            await res.body?.cancel().catch(ignore)
             // Fresh Date.now(), NOT the loop-start `now`: that was captured before
             // ensureAccessToken (up to a 30 s network refresh) and the upstream
             // fetch, so basing the cooldown on it would understate `Retry-After`

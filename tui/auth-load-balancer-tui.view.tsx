@@ -145,7 +145,9 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
     const p = pool()
     const accounts = p.accounts ?? []
     const now = Date.now()
-    const providerIds = [...new Set(accounts.map((a) => a.providerID))].sort()
+    const providerIds = [...new Set(accounts.map((a) => a.providerID))].sort(
+      compareAscii,
+    )
     return providerIds.map((providerID) => {
       const ranked = accounts
         .filter((a) => a.providerID === providerID)

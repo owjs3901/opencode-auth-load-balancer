@@ -51,6 +51,10 @@ const PROVIDER_NAMES: Record<string, string> = {
   anthropic: 'Claude',
   openai: 'Codex',
 }
+/** Shared fallback lookup used by both the bottom bar and sidebar group labels. */
+function providerLabel(id: string): string {
+  return PROVIDER_NAMES[id] ?? id
+}
 const POLL_MS = 3000
 
 // Scoring knobs read from env exactly like the server — single-sourced in the shared
@@ -65,19 +69,28 @@ function usePool() {
   return pool
 }
 
-interface Chip {
-  name: string
-  label: string
+/** Shared theme-color accessor used identically by `BottomBar` and `SidebarPanel`. */
+function themeColor(api: TuiPluginApi) {
+  return () => api.theme.current
+}
+
+/** The 4 usage-window display fields shared verbatim by `Chip` and `Row`. */
+interface WindowDisplay {
   weeklyPct: string
   weeklyReset: string
   hourlyPct: string
   hourlyReset: string
 }
 
+interface Chip extends WindowDisplay {
+  name: string
+  label: string
+}
+
 /** Always-visible bottom bar (app_bottom): the in-use account per provider. */
 function BottomBar(props: { api: TuiPluginApi }) {
   const pool = usePool()
-  const color = () => props.api.theme.current
+  const color = themeColor(props.api)
   const chips = createMemo<Chip[]>(() => {
     const p = pool()
     const accounts = p.accounts ?? []
@@ -93,7 +106,7 @@ function BottomBar(props: { api: TuiPluginApi }) {
       const a = accounts.find((x) => x.id === id)
       if (!a) continue
       out.push({
-        name: PROVIDER_NAMES[providerID] ?? providerID,
+        name: providerLabel(providerID),
         label: a.label,
         weeklyPct: winPct(a.usage?.weekly, now),
         weeklyReset: until(a.usage?.weekly?.resetAt, now),
@@ -120,16 +133,12 @@ function BottomBar(props: { api: TuiPluginApi }) {
   )
 }
 
-interface Row {
+interface Row extends WindowDisplay {
   id: string
   label: string
   current: boolean
   score: number | null
   rank: number | null
-  weeklyPct: string
-  weeklyReset: string
-  hourlyPct: string
-  hourlyReset: string
   state: string
 }
 interface Group {
@@ -140,7 +149,7 @@ interface Group {
 /** Sidebar panel: all accounts per provider, scored + sorted, click to rename. */
 function SidebarPanel(props: { api: TuiPluginApi }) {
   const pool = usePool()
-  const color = () => props.api.theme.current
+  const color = themeColor(props.api)
   const groups = createMemo<Group[]>(() => {
     const p = pool()
     const accounts = p.accounts ?? []
@@ -189,7 +198,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           state: stateOf(sa, tierResets(a, now), now),
         }
       })
-      return { provider: PROVIDER_NAMES[providerID] ?? providerID, rows }
+      return { provider: providerLabel(providerID), rows }
     })
   })
 

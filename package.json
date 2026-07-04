@@ -1,6 +1,6 @@
 {
   "name": "opencode-auth-load-balancer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Load-balance opencode requests across multiple Anthropic (Claude) and OpenAI (Codex) OAuth accounts, weighted primarily by weekly usage with drain-before-reset scheduling.",
   "type": "module",
   "license": "MIT",

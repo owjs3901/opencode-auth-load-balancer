@@ -57,6 +57,9 @@ const TIER_RESET_MAX_MS = MAX_QUOTA_RESET_BOUND_MS
 const ALPHA_SEGMENT_RE = /^[a-z]+$/
 /** Matches a purely numeric model-id segment (`4`, `9`, `20250929`). */
 const DIGIT_SEGMENT_RE = /^\d+$/
+/** Matches an 8-digit `YYYYMMDD` dated-snapshot suffix segment specifically
+ *  (as opposed to a real version digit, which this never matches). */
+const DATE_SEGMENT_RE = /^\d{8}$/
 
 /**
  * The model FAMILY of a first-party model id — the tier name its per-model cap
@@ -94,32 +97,51 @@ export function requestModelTier(body: string): string | null {
 }
 
 /**
- * All numeric dash-segments of a model id, in order — its comparable version
- * vector. Works for both id styles: `claude-opus-4-9` → [4,9] and
- * `claude-3-5-sonnet-latest` → [3,5] (non-numeric segments like `latest` are
- * ignored), and dated snapshots simply extend the vector
- * (`claude-sonnet-4-5-20250929` → [4,5,20250929]).
+ * A model id's comparable version: its real version digits (numeric
+ * dash-segments, in order, EXCLUDING an 8-digit `YYYYMMDD` date suffix) plus
+ * that date suffix on the side (`-1` when the id has none). Works for both id
+ * styles: `claude-opus-4-9` → `{ version: [4,9], date: -1 }` and
+ * `claude-3-5-sonnet-latest` → `{ version: [3,5], date: -1 }` (non-numeric
+ * segments like `latest` are ignored), and a dated snapshot's date is kept
+ * OUT of `version` (`claude-sonnet-4-5-20250929` →
+ * `{ version: [4,5], date: 20250929 }`). Keeping the date separate — rather
+ * than appending it to the version vector — matters because a bare-major
+ * dated id and a with-minor dated id can otherwise collide in the SAME vector
+ * slot: `claude-opus-4-20250514` (no minor) would flatten to `[4,20250514]`,
+ * putting the date where `claude-opus-4-1-20250805`'s real minor version `1`
+ * lives (`[4,1,20250805]`), so an element-wise compare would rank the
+ * undated-minor "4.0" release above "4.1" purely because a date is a bigger
+ * number than a minor-version digit.
  */
-function versionVector(model: string): number[] {
-  const out: number[] = []
+function versionVector(model: string): { version: number[]; date: number } {
+  const version: number[] = []
+  let date = -1
   for (const segment of model.split('-')) {
-    if (DIGIT_SEGMENT_RE.test(segment)) out.push(Number(segment))
+    if (DATE_SEGMENT_RE.test(segment)) date = Number(segment)
+    else if (DIGIT_SEGMENT_RE.test(segment)) version.push(Number(segment))
   }
-  return out
+  return { version, date }
 }
 
 /**
- * Element-wise version comparison (> 0 = `a` newer). A missing element
- * compares as -1, so `4-6` beats `4-5-20250929` on the second element and a
- * dated snapshot beats its own undated alias (more specific wins a tie).
+ * Version comparison (> 0 = `a` newer). Real version digits compare
+ * element-wise first — a missing element compares as -1, so `4-6` beats
+ * `4-5-20250929` on the second element — and the dated-snapshot suffix breaks
+ * ties ONLY once every version digit is equal (more specific wins a tie: a
+ * dated snapshot beats its own undated alias). Never comparing a date against
+ * a version digit is what keeps a bare-major dated id from outranking a
+ * sibling that has a real minor version (see `versionVector`'s doc comment).
  */
-function compareVersions(a: number[], b: number[]): number {
-  const len = Math.max(a.length, b.length)
+function compareVersions(
+  a: { version: number[]; date: number },
+  b: { version: number[]; date: number },
+): number {
+  const len = Math.max(a.version.length, b.version.length)
   for (let i = 0; i < len; i++) {
-    const d = (a[i] ?? -1) - (b[i] ?? -1)
+    const d = (a.version[i] ?? -1) - (b.version[i] ?? -1)
     if (d !== 0) return d
   }
-  return 0
+  return a.date - b.date
 }
 
 /** The highest-versioned catalog model of `family`, or null when it has none. */
@@ -128,7 +150,10 @@ function bestOfFamily(
   family: string,
 ): string | null {
   let best: string | null = null
-  let bestVersion: number[] = []
+  let bestVersion: { version: number[]; date: number } = {
+    version: [],
+    date: -1,
+  }
   for (const model of models) {
     if (modelFamily(model) !== family) continue
     const version = versionVector(model)

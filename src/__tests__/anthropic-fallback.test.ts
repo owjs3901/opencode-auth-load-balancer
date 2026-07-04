@@ -170,6 +170,21 @@ describe('downgradeModel', () => {
     )
   })
 
+  test('a bare-major dated id never outranks a sibling with a real minor version', () => {
+    // `claude-opus-4-20250514` (no minor) and `claude-opus-4-1-20250805`
+    // (minor `1`) both have a dated snapshot at major version 4 — the date
+    // must never be compared as if it were the minor-version digit, or the
+    // undated-minor "4.0" release would incorrectly outrank "4.1".
+    const catalog = [
+      'claude-fable-5',
+      'claude-opus-4-20250514',
+      'claude-opus-4-1-20250805',
+    ]
+    expect(downgradeModel(body(FABLE), catalog)?.toModel).toBe(
+      'claude-opus-4-1-20250805',
+    )
+  })
+
   test('EMPTY catalog degrades to the static last-resort default (Sonnet)', () => {
     expect(downgradeModel(body(OPUS), [])?.toModel).toBe(
       DEFAULT_OPUS_FALLBACK_MODEL,

@@ -15,6 +15,7 @@ import { openaiAdapter } from './providers/openai/adapter'
 import type { ProviderAdapter } from './providers/types'
 import { SESSION_HEADER } from './session'
 import { readStatus, renderStatus } from './status'
+import { MANUAL_DISABLED_REASON } from './types'
 import { refreshUsageInBackground } from './usage-refresh'
 import { ignore } from './util'
 
@@ -254,6 +255,50 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
                 }`,
           )
         return lbResult(`Renamed "${result.previous}" → "${trimmed}".`)
+      },
+    }),
+    auth_lb_disable: tool({
+      description:
+        'Disable a pooled account so the load balancer stops selecting it (match by current label or id), or re-enable a previously disabled one with `enable: true`. A disabled account is skipped by scheduling and shows as `disabled` in the auth_lb_status dashboard — separate from an account that needs re-login.',
+      args: {
+        account: tool.schema
+          .string()
+          .describe('Current label or id of the account to disable/enable'),
+        enable: tool.schema
+          .boolean()
+          .optional()
+          .describe(
+            'Set true to re-enable a previously disabled account; omit or false to disable it',
+          ),
+      },
+      execute: async ({ account, enable }) => {
+        const result = await mutatePool((pool) => {
+          const target = pool.accounts.find(
+            (a) => a.id === account || a.label === account,
+          )
+          if (!target)
+            return {
+              ok: false as const,
+              labels: pool.accounts.map((a) => `${a.label} (${a.providerID})`),
+            }
+          // Toggle ONLY the manual sentinel. A revoked-token `re-login` reason
+          // is overwritten by an explicit disable (the account was already
+          // excluded) and cleared by an explicit enable (self-heals: the next
+          // request re-detects invalid_grant and re-disables it).
+          target.disabledReason = enable ? null : MANUAL_DISABLED_REASON
+          return { ok: true as const, label: target.label, enabled: !!enable }
+        })
+        if (!result.ok)
+          return lbResult(
+            `No account matching "${account}". Available: ${
+              result.labels.join(', ') || '(none)'
+            }`,
+          )
+        return lbResult(
+          result.enabled
+            ? `Enabled "${result.label}" — back in the load-balancer rotation.`
+            : `Disabled "${result.label}" — the load balancer will skip it until you re-enable it.`,
+        )
       },
     }),
   },

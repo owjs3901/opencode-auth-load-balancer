@@ -11,8 +11,8 @@
  *   - sidebar_content — a panel next to Context / MCP / LSP listing ALL accounts
  *     per provider, sorted by the scheduler's score (highest = use next), showing
  *     the score + use-order, usage + reset countdowns, in-use marker, and state.
- *     Click any account row for a menu to Rename (prompt) or Delete (confirm) it,
- *     written straight to the pool file.
+ *     Click any account row for a menu to Rename (prompt), Disable/Enable
+ *     (toggle), or Delete (confirm) it, written straight to the pool file.
  *
  * The ranking is computed by the SAME code the server scheduler uses — imported from a
  * byte-identical copy of src/scheduler/score-core.ts installed alongside this file
@@ -33,10 +33,12 @@ import {
   cfg,
   compareAscii,
   deleteFromPool,
+  MANUAL_DISABLED_REASON,
   pct,
   type PoolShape,
   readPool,
   renameInPool,
+  setDisabledInPool,
   stateOf,
   tierResets,
   toScore,
@@ -140,6 +142,7 @@ interface Row extends WindowDisplay {
   score: number | null
   rank: number | null
   state: string
+  manuallyDisabled: boolean
 }
 interface Group {
   provider: string
@@ -196,6 +199,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           // `1e999` entry (Infinity via JSON.parse) would otherwise render its
           // tier annotation forever until the server heals the file.
           state: stateOf(sa, tierResets(a, now), now),
+          manuallyDisabled: a.disabledReason === MANUAL_DISABLED_REASON,
         }
       })
       return { provider: providerLabel(providerID), rows }
@@ -234,25 +238,71 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
     )
   }
 
-  // Click an account -> a small menu so both Rename and Delete are reachable.
-  function openMenu(id: string, label: string): void {
-    dialog().replace(() =>
-      props.api.ui.DialogSelect({
-        title: label,
-        options: [
-          {
-            title: 'Rename',
-            value: 'rename',
-            onSelect: () => openRename(id, label),
-          },
-          {
-            title: 'Delete — remove from pool',
-            value: 'delete',
-            onSelect: () => openDelete(id, label),
-          },
-        ],
-      }),
-    )
+  // Click an account -> a small menu so Rename, Disable/Enable, and Delete are
+  // all reachable. Deliberately NOT api.ui.DialogSelect: that always renders an
+  // auto-focused filter <input>, and a focused opentui input swallows the FIRST
+  // Esc (to blur itself) — so the menu needed TWO Esc presses to close. A plain
+  // clickable list has no input, so the dialog stack's own Esc binding closes it
+  // in ONE press. The menu is opened by a mouse click on the row, so mouse-driven
+  // options stay consistent (there is no keyboard path that opens it).
+  function openMenu(
+    id: string,
+    label: string,
+    manuallyDisabled: boolean,
+  ): void {
+    const items: { title: string; run: () => void }[] = [
+      { title: 'Rename', run: () => openRename(id, label) },
+      {
+        // Reversible (just a scheduler skip), so no confirm step — flip the
+        // pool flag and close, unlike Delete which drops the tokens.
+        title: manuallyDisabled
+          ? 'Enable — include in selection'
+          : 'Disable — exclude from selection',
+        run: () => {
+          setDisabledInPool(id, !manuallyDisabled)
+          dialog().clear()
+        },
+      },
+      { title: 'Delete — remove from pool', run: () => openDelete(id, label) },
+    ]
+    dialog().replace(() => {
+      const c = color()
+      const [hovered, setHovered] = createSignal(-1)
+      return (
+        <box
+          gap={1}
+          paddingBottom={1}
+          paddingLeft={4}
+          paddingRight={4}
+          paddingTop={1}
+        >
+          <box flexDirection="row" justifyContent="space-between">
+            <text fg={c.text}>
+              <b>{label}</b>
+            </text>
+            <text fg={c.textMuted} onMouseUp={() => dialog().clear()}>
+              esc
+            </text>
+          </box>
+          <box>
+            <For each={items}>
+              {(item, i) => (
+                <box
+                  onMouseMove={() => setHovered(i())}
+                  onMouseUp={() => item.run()}
+                  paddingLeft={1}
+                  paddingRight={1}
+                >
+                  <text fg={hovered() === i() ? c.primary : c.text}>
+                    {item.title}
+                  </text>
+                </box>
+              )}
+            </For>
+          </box>
+        </box>
+      )
+    })
   }
 
   return (
@@ -262,7 +312,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
           <b>Auth accounts</b>
           <span style={{ fg: color().textMuted }}>
             {' '}
-            (click: rename / delete)
+            (click: rename / disable / delete)
           </span>
         </text>
         <For each={groups()}>
@@ -271,9 +321,19 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
               <text fg={color().textMuted}>{g.provider}</text>
               <For each={g.rows}>
                 {(r) => (
-                  <box onMouseUp={() => openMenu(r.id, r.label)}>
+                  <box
+                    onMouseUp={() =>
+                      openMenu(r.id, r.label, r.manuallyDisabled)
+                    }
+                  >
                     <text
-                      fg={r.current ? color().primary : color().text}
+                      fg={
+                        r.manuallyDisabled
+                          ? color().textMuted
+                          : r.current
+                            ? color().primary
+                            : color().text
+                      }
                       wrapMode="word"
                     >
                       {(r.current ? '▶ ' : '  ') +

@@ -85,9 +85,26 @@ export interface PoolAccount {
    * parse without a cast.
    */
   opusCooldownUntil?: number
-  /** Non-null when the account needs manual re-login (e.g. revoked refresh token). */
+  /**
+   * Non-null when the scheduler skips this account. Two sources, both gated by
+   * `isAvailable`: the automatic `invalid_grant: re-login required (…)` reason
+   * written on a revoked refresh token (`src/refresh.ts`), and the manual
+   * `MANUAL_DISABLED_REASON` sentinel written by the disable action (TUI menu /
+   * `auth_lb_disable` tool). The dashboards distinguish the two to render
+   * `disabled` (a user turned it off) vs `re-login` (needs a fresh OAuth login).
+   */
   disabledReason: string | null
 }
+
+/**
+ * Sentinel `disabledReason` written by the MANUAL disable action (the TUI
+ * sidebar menu and the `auth_lb_disable` tool), distinct from the automatic
+ * `invalid_grant: re-login required (…)` reason `src/refresh.ts` writes when a
+ * refresh token is revoked. Both are non-null so `isAvailable` skips the
+ * account; the value is kept distinct only so the dashboards can render
+ * `disabled` (a user turned it off) rather than `re-login` (needs a fresh login).
+ */
+export const MANUAL_DISABLED_REASON = 'manually disabled'
 
 /** A conversation's sticky account assignment (preserves prompt cache across turns). */
 export interface SessionAssignment {

@@ -9,7 +9,12 @@ const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-status-'))
 
 import { mutatePool } from '../pool/store'
 import { buildStatus, displayWidth, readStatus, renderStatus } from '../status'
-import type { PoolAccount, PoolFile, UsageWindow } from '../types'
+import {
+  MANUAL_DISABLED_REASON,
+  type PoolAccount,
+  type PoolFile,
+  type UsageWindow,
+} from '../types'
 import { testAccount } from './fixtures/account'
 
 const NOW = 1_000_000_000_000
@@ -151,6 +156,25 @@ describe('renderStatus', () => {
     expect(out).toContain('1d6h')
     expect(out).toContain('3h0m')
     expect(out).toContain('30m')
+  })
+
+  test('a manually disabled account renders `disabled`, distinct from `re-login`', () => {
+    // The sentinel `MANUAL_DISABLED_REASON` (user turned the account off) must
+    // read as `disabled`, NOT the `re-login` shown for the auto invalid_grant
+    // reason — both sideline the account, but only re-login needs a fresh OAuth.
+    const p = pool(
+      [
+        acc({
+          id: 'off',
+          weekly: win(0.3, 20 * HOUR),
+          disabled: MANUAL_DISABLED_REASON,
+        }),
+      ],
+      { anthropic: 'off' },
+    )
+    const out = renderStatus(buildStatus(p, NOW), NOW)
+    expect(out).toContain('disabled')
+    expect(out).not.toContain('re-login')
   })
 
   test('floors a sub-minute future cooldown at 1m (never "0m")', () => {

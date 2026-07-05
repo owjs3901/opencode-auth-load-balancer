@@ -10,7 +10,11 @@ import {
   isAvailable,
   scoreAccount,
 } from './scheduler/score-core'
-import type { PoolAccount, PoolFile } from './types'
+import {
+  MANUAL_DISABLED_REASON,
+  type PoolAccount,
+  type PoolFile,
+} from './types'
 
 const PROVIDER_NAMES: Record<string, string> = {
   anthropic: 'Claude',
@@ -215,7 +219,8 @@ function relTime(at: number, now: number): string {
 }
 
 function stateOf(a: AccountStatus, now: number): string {
-  if (a.disabledReason) return 're-login'
+  if (a.disabledReason)
+    return a.disabledReason === MANUAL_DISABLED_REASON ? 'disabled' : 're-login'
   if (a.cooldownUntil > now) return `cooldown ${relTime(a.cooldownUntil, now)}`
   if (!a.available) return 'exhausted'
   const base = a.current ? 'in use' : 'ready'

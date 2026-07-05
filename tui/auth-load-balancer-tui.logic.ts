@@ -222,6 +222,15 @@ export function mutatePoolFile(
   }
 }
 
+/**
+ * Sentinel `disabledReason` the manual disable toggle writes — the TUI copy of
+ * `src/types.ts`'s `MANUAL_DISABLED_REASON` (the TUI runtime cannot import
+ * `src/`; see the `isPlainRecordValue`/`isFiniteNumber` NOTEs above for the
+ * same trust boundary). Kept BYTE-IDENTICAL to the server constant so a manual
+ * disable written here reads back as `disabled` (not `re-login`) everywhere.
+ */
+export const MANUAL_DISABLED_REASON = 'manually disabled'
+
 export function renameInPool(
   id: string,
   label: string,
@@ -245,6 +254,23 @@ export function deleteFromPool(id: string, path: string = POOL_FILE): void {
     for (const key of Object.keys(sessions)) {
       if (sessions[key]?.accountId === id) delete sessions[key]
     }
+  }, path)
+}
+
+/**
+ * Toggle an account's MANUAL disable flag: `disabled` writes the
+ * `MANUAL_DISABLED_REASON` sentinel (the scheduler then skips it, exactly like
+ * the server's `isAvailable`), `!disabled` clears it. Reversible, so — unlike
+ * Delete — the sidebar calls this straight through with no confirm dialog.
+ */
+export function setDisabledInPool(
+  id: string,
+  disabled: boolean,
+  path: string = POOL_FILE,
+): void {
+  mutatePoolFile((pool) => {
+    const acct = (pool.accounts ?? []).find((a) => a.id === id)
+    if (acct) acct.disabledReason = disabled ? MANUAL_DISABLED_REASON : null
   }, path)
 }
 
@@ -351,7 +377,10 @@ export function stateOf(
   tiers: [string, number][],
   now: number,
 ): string {
-  if (sa.disabledReason) return 're-login'
+  if (sa.disabledReason)
+    return sa.disabledReason === MANUAL_DISABLED_REASON
+      ? 'disabled'
+      : 're-login'
   if (sa.cooldownUntil > now) return `cooldown ${until(sa.cooldownUntil, now)}`
   if (isExhausted(sa, cfg, now)) return 'full'
   // A model-tier limit keeps the account usable (other models + downgrade),

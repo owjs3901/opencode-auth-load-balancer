@@ -27,7 +27,7 @@ import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import { loadConfig } from '../scheduler/config'
 import { SESSION_HEADER } from '../session'
-import type { PoolAccount } from '../types'
+import { MANUAL_DISABLED_REASON, type PoolAccount } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
 import { testAccount } from './fixtures/account'
 import { type Responder, responderFetch } from './fixtures/fetch-mock'
@@ -89,6 +89,14 @@ interface ToolHooks {
       execute: (args: {
         account: string
         name: string
+      }) => Promise<{ title: string; output: string }>
+    }
+    auth_lb_disable: {
+      description: string
+      args: object
+      execute: (args: {
+        account: string
+        enable?: boolean
       }) => Promise<{ title: string; output: string }>
     }
   }
@@ -1746,6 +1754,47 @@ describe('toast on switch + status tool', () => {
     expect((await readPool()).accounts.find((a) => a.id === 'r1')?.label).toBe(
       'spaced-name',
     )
+  })
+
+  test('auth_lb_disable: no matching account reports the available labels', async () => {
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+    // empty pool -> "(none)"
+    const empty = await hooks.tool.auth_lb_disable.execute({ account: 'ghost' })
+    expect(empty.output).toContain('No account matching')
+    expect(empty.output).toContain('(none)')
+
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({ id: 'd1', label: 'work', providerID: 'anthropic' }),
+      )
+    })
+    const miss = await hooks.tool.auth_lb_disable.execute({ account: 'nope' })
+    expect(miss.output).toContain('No account matching')
+    expect(miss.output).toContain('work (anthropic)')
+  })
+
+  test('auth_lb_disable: disables by label, then re-enables by id, persisting disabledReason', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'd1', label: 'burner' }))
+    })
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+
+    // Omitting `enable` disables (sets the manual sentinel, skipped by scheduling).
+    const off = await hooks.tool.auth_lb_disable.execute({ account: 'burner' })
+    expect(off.output).toContain('Disabled "burner"')
+    expect(
+      (await readPool()).accounts.find((a) => a.id === 'd1')?.disabledReason,
+    ).toBe(MANUAL_DISABLED_REASON)
+
+    // enable:true clears it — back in the rotation.
+    const on = await hooks.tool.auth_lb_disable.execute({
+      account: 'd1',
+      enable: true,
+    })
+    expect(on.output).toContain('Enabled "burner"')
+    expect(
+      (await readPool()).accounts.find((a) => a.id === 'd1')?.disabledReason,
+    ).toBeNull()
   })
 
   test('primeInUse points the in-use marker at the top-ranked (soonest-reset) account', async () => {

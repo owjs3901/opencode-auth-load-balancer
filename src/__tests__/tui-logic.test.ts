@@ -10,12 +10,14 @@ import {
   isAbsentOrPlainRecord,
   isFiniteNumber,
   isPlainRecordValue,
+  MANUAL_DISABLED_REASON,
   mutatePoolFile,
   pct,
   type PoolAccount,
   poolFile,
   readPool,
   renameInPool,
+  setDisabledInPool,
   stateOf,
   tierResets,
   toPoolShape,
@@ -469,6 +471,53 @@ describe('renameInPool / deleteFromPool (end-to-end against a scratch file)', ()
   })
 })
 
+describe('setDisabledInPool (end-to-end against a scratch file)', () => {
+  test('disables a matching account with the manual sentinel', () => {
+    const path = scratchPath('disable-hit')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        accounts: [{ id: 'a', providerID: 'anthropic', label: 'A' }],
+      }),
+    )
+    setDisabledInPool('a', true, path)
+    expect(readPool(path).accounts?.[0]?.disabledReason).toBe(
+      MANUAL_DISABLED_REASON,
+    )
+  })
+
+  test('re-enables a disabled account (clears disabledReason to null)', () => {
+    const path = scratchPath('enable-hit')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        accounts: [
+          {
+            id: 'a',
+            providerID: 'anthropic',
+            label: 'A',
+            disabledReason: MANUAL_DISABLED_REASON,
+          },
+        ],
+      }),
+    )
+    setDisabledInPool('a', false, path)
+    expect(readPool(path).accounts?.[0]?.disabledReason).toBeNull()
+  })
+
+  test('is a no-op for an unknown id', () => {
+    const path = scratchPath('disable-miss')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        accounts: [{ id: 'a', providerID: 'anthropic', label: 'A' }],
+      }),
+    )
+    setDisabledInPool('missing', true, path)
+    expect(readPool(path).accounts?.[0]?.disabledReason).toBeUndefined()
+  })
+})
+
 describe('isFiniteNumber', () => {
   test('rejects NaN/±Infinity/non-numbers, accepts finite numbers', () => {
     expect(isFiniteNumber(1)).toBe(true)
@@ -677,6 +726,20 @@ describe('stateOf', () => {
         now,
       ),
     ).toBe('re-login')
+  })
+
+  test('the manual-disable sentinel renders "disabled" (not "re-login")', () => {
+    expect(
+      stateOf(
+        {
+          usage: { hourly: null, weekly: null },
+          cooldownUntil: 0,
+          disabledReason: MANUAL_DISABLED_REASON,
+        },
+        [],
+        now,
+      ),
+    ).toBe('disabled')
   })
 
   test('an active cooldown -> "cooldown"', () => {

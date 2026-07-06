@@ -333,16 +333,17 @@ export function until(resetAt: number | undefined, now: number): string {
   if (!isFiniteNumber(resetAt) || resetAt <= now) return '-'
   // Mirror the server's `relTime` (src/status.ts) semantics: floor minutes at 1
   // (a sub-30s future reset must not render "0m" — '-' is reserved for elapsed)
-  // and FLOOR the day figure (36h is "1d", not "2d") so the TUI bar's day/minute
-  // rounding can never disagree with the CLI/tool dashboard's. NOTE: this is
+  // keep <=48h as hours (47h is "47h", not "1d") before FLOORing the day
+  // figure so the TUI bar's day/minute rounding can never disagree with the
+  // CLI/tool dashboard's. NOTE: this is
   // coarser than the CLI within the hour band on purpose (bar-width budget) —
-  // the CLI renders `${hrs}h${mins % 60}m` (e.g. "3h25m"), this renders just
-  // `${hrs}h` (e.g. "3h"). Same day-level bucket, less precision inside it —
+  // after the <=120m minute band, the CLI renders `${hrs}h${mins % 60}m`
+  // (e.g. "3h25m"), this renders just `${hrs}h` (e.g. "3h"). Same day-level bucket, less precision inside it —
   // not byte-identical output.
   const mins = Math.max(1, Math.round((resetAt - now) / 60_000))
-  if (mins < 60) return `${mins}m`
+  if (mins <= 120) return `${mins}m`
   const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h`
+  if (mins <= 48 * 60) return `${hrs}h`
   return `${Math.floor(hrs / 24)}d`
 }
 /** A window's utilization for the bar: "-" when absent, "0%" once it has reset (stale value dropped). */

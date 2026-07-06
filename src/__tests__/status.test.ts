@@ -152,10 +152,38 @@ describe('renderStatus', () => {
     expect(out).toContain('exhausted')
     expect(out).toContain('cooldown 45m')
     expect(out).toContain('re-login')
-    // relative reset formats: days+hours, hours+mins, mins, and "-" for past/unknown
-    expect(out).toContain('1d6h')
+    // relative reset formats: <48h stays hourly, hours+mins, mins, and "-" for past/unknown
+    expect(out).toContain('30h0m')
     expect(out).toContain('3h0m')
     expect(out).toContain('30m')
+  })
+
+  test('keeps resets within 48h in hours instead of rounding down to days', () => {
+    const p = pool([
+      acc({ id: 'forty-seven', weekly: win(0.2, 47 * HOUR) }),
+      acc({ id: 'forty-eight', weekly: win(0.3, 48 * HOUR) }),
+      acc({ id: 'forty-nine', weekly: win(0.4, 49 * HOUR) }),
+    ])
+    const out = renderStatus(buildStatus(p, NOW), NOW)
+
+    expect(out).toContain('47h0m')
+    expect(out).toContain('48h0m')
+    expect(out).toContain('2d1h')
+  })
+
+  test('keeps resets up to 120 minutes in minutes instead of hours', () => {
+    const p = pool([
+      acc({ id: 'sixty', weekly: win(0.2, HOUR) }),
+      acc({ id: 'ninety', weekly: win(0.3, 90 * MIN) }),
+      acc({ id: 'one-twenty', weekly: win(0.4, 120 * MIN) }),
+      acc({ id: 'two-oh-one', weekly: win(0.5, 121 * MIN) }),
+    ])
+    const out = renderStatus(buildStatus(p, NOW), NOW)
+
+    expect(out).toContain('60m')
+    expect(out).toContain('90m')
+    expect(out).toContain('120m')
+    expect(out).toContain('2h1m')
   })
 
   test('a manually disabled account renders `disabled`, distinct from `re-login`', () => {
@@ -300,7 +328,7 @@ describe('renderStatus', () => {
       { anthropic: 'mt' },
     )
     const out = renderStatus(buildStatus(p, NOW), NOW)
-    expect(out).toContain('in use · fable 2h0m · opus 4h0m')
+    expect(out).toContain('in use · fable 120m · opus 4h0m')
     expect(out).not.toContain('haiku')
   })
 })

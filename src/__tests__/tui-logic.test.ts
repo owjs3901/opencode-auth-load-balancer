@@ -614,16 +614,25 @@ describe('until', () => {
     expect(until(now + 5_000, now)).toBe('1m')
   })
 
-  test('renders minutes under an hour', () => {
+  test('renders minutes up to 120 minutes', () => {
     expect(until(now + 30 * 60_000, now)).toBe('30m')
+    expect(until(now + 60 * 60_000, now)).toBe('60m')
+    expect(until(now + 90 * 60_000, now)).toBe('90m')
+    expect(until(now + 120 * 60_000, now)).toBe('120m')
   })
 
   test('renders hours under a day', () => {
     expect(until(now + 3 * 60 * 60_000, now)).toBe('3h')
   })
 
-  test('renders floored days at/over 24h', () => {
-    expect(until(now + 36 * 60 * 60_000, now)).toBe('1d')
+  test('keeps resets within 48h in hours instead of rounding down to days', () => {
+    expect(until(now + 36 * 60 * 60_000, now)).toBe('36h')
+    expect(until(now + 47 * 60 * 60_000, now)).toBe('47h')
+    expect(until(now + 48 * 60 * 60_000, now)).toBe('48h')
+  })
+
+  test('renders floored days over 48h', () => {
+    expect(until(now + 49 * 60 * 60_000, now)).toBe('2d')
     expect(until(now + 3 * 24 * 60 * 60_000, now)).toBe('3d')
   })
 })

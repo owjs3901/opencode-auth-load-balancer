@@ -38,6 +38,7 @@ import {
   type PoolShape,
   readPool,
   renameInPool,
+  sessionAccountId,
   setDisabledInPool,
   stateOf,
   tierResets,
@@ -58,6 +59,19 @@ function providerLabel(id: string): string {
   return PROVIDER_NAMES[id] ?? id
 }
 const POLL_MS = 3000
+
+/**
+ * The current session id from the TUI route, or undefined on the home screen.
+ * Unlike the `sidebar_content` slot (handed a `session_id` prop), the always-
+ * visible `app_bottom` bar receives no slot props, so it reads the session from
+ * the route to scope its in-use account to the VIEWER's own session.
+ */
+function routeSessionId(api: TuiPluginApi): string | undefined {
+  const r = api.route.current
+  if (r.name !== 'session') return undefined
+  const sid = r.params?.sessionID
+  return typeof sid === 'string' ? sid : undefined
+}
 
 // Scoring knobs read from env exactly like the server — single-sourced in the shared
 // ./auth-load-balancer-scoring module (a byte copy of src/scheduler/score-core.ts),
@@ -98,13 +112,20 @@ function BottomBar(props: { api: TuiPluginApi }) {
     const accounts = p.accounts ?? []
     const now = Date.now()
     const out: Chip[] = []
-    // `lastSelected` key order is whichever provider served first; sort by
-    // provider id (byte-deterministic `< / >`, no locale) so the bar lists
-    // providers in the same order as the sidebar, CLI, and status tool.
-    const selected = Object.entries(p.lastSelected ?? {}).sort(([x], [y]) =>
-      compareAscii(x, y),
+    const sid = routeSessionId(props.api)
+    // Show the account THIS session is using per provider — NOT the global
+    // `lastSelected` (whichever session served last across the whole pool). On
+    // the home screen (no session) fall back to `lastSelected` so the bar isn't
+    // blank. Providers byte-sorted (`< / >`, no locale) so the bar lists them in
+    // the same order as the sidebar, CLI, and status tool.
+    const providerIds = [...new Set(accounts.map((x) => x.providerID))].sort(
+      compareAscii,
     )
-    for (const [providerID, id] of selected) {
+    for (const providerID of providerIds) {
+      const id =
+        sessionAccountId(p, providerID, sid) ??
+        (sid ? undefined : p.lastSelected?.[providerID])
+      if (!id) continue
       const a = accounts.find((x) => x.id === id)
       if (!a) continue
       out.push({
@@ -150,7 +171,10 @@ interface Group {
 }
 
 /** Sidebar panel: all accounts per provider, scored + sorted, click to rename. */
-function SidebarPanel(props: { api: TuiPluginApi }) {
+function SidebarPanel(props: {
+  api: TuiPluginApi
+  sessionId: string | undefined
+}) {
   const pool = usePool()
   const color = themeColor(props.api)
   const groups = createMemo<Group[]>(() => {
@@ -161,6 +185,10 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
       compareAscii,
     )
     return providerIds.map((providerID) => {
+      // The account the VIEWER's session is pinned to for this provider — used
+      // for the in-use (▶) marker instead of the global `lastSelected`, so the
+      // marker reflects THIS session, not whichever session served last.
+      const sessionAcct = sessionAccountId(p, providerID, props.sessionId)
       const ranked = accounts
         .filter((a) => a.providerID === providerID)
         .map((a) => {
@@ -183,7 +211,7 @@ function SidebarPanel(props: { api: TuiPluginApi }) {
         return {
           id: a.id,
           label: a.label,
-          current: p.lastSelected?.[providerID] === a.id,
+          current: sessionAcct === a.id,
           score: available ? score : null,
           rank: available ? rank : null,
           // Reuse the windows `toScore(a)` already normalized instead of
@@ -373,9 +401,11 @@ function makeSlots(api: TuiPluginApi): TuiSlotPlugin {
       app_bottom() {
         return <BottomBar api={api} />
       },
-      // Panel in the session sidebar, next to Context / MCP / LSP.
-      sidebar_content() {
-        return <SidebarPanel api={api} />
+      // Panel in the session sidebar, next to Context / MCP / LSP. The host
+      // hands this slot the current `session_id`, so the in-use marker can scope
+      // to the VIEWER's session instead of the global last-selected account.
+      sidebar_content(_ctx, props) {
+        return <SidebarPanel api={api} sessionId={props.session_id} />
       },
     },
   }

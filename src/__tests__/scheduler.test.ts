@@ -50,6 +50,14 @@ function account(
 const pick = (accts: PoolAccount[], exclude?: Set<string>) =>
   selectAccount(accts, 'anthropic', NOW, DEFAULT_CONFIG, exclude)?.account.id
 
+const pickInc = (
+  accts: PoolAccount[],
+  incumbentId: string | null,
+  exclude: Set<string> = new Set(),
+) =>
+  selectAccount(accts, 'anthropic', NOW, DEFAULT_CONFIG, exclude, incumbentId)
+    ?.account.id
+
 function poolOf(
   accounts: PoolAccount[],
   sessions: Record<string, SessionAssignment> = {},
@@ -422,6 +430,83 @@ describe('point 3: session affinity (prompt-cache stickiness)', () => {
   })
 })
 
+describe('incumbent hysteresis (anti-thrash on near-equal scores)', () => {
+  // All accounts share the 5-day reset horizon so score ∝ drainable
+  // (0.98 − weeklyUtil); the incumbent's score as a FRACTION of the best is then
+  // just drainable_incumbent / drainable_best, making the 20% band exact.
+  test('keeps the incumbent when its score is within the band of the best', () => {
+    const a = account('a', { weekly: win(0.1, 5 * DAY) }) // best (most headroom)
+    const b = account('b', { weekly: win(0.2, 5 * DAY) }) // ~88% of a's score -> in band
+    expect(pick([a, b])).toBe('a') // no incumbent -> strict argmax
+    expect(pickInc([a, b], 'b')).toBe('b') // incumbent b within 20% -> kept
+  })
+
+  test('switches when a challenger is meaningfully better (beyond the band)', () => {
+    const a = account('a', { weekly: win(0.1, 5 * DAY) }) // drainable 0.88
+    const b = account('b', { weekly: win(0.5, 5 * DAY) }) // drainable 0.48 -> ~55% of a
+    expect(pickInc([a, b], 'b')).toBe('a') // beyond 20% band -> switch to a
+  })
+
+  test('ignores an UNAVAILABLE incumbent (cooling down) and takes the argmax', () => {
+    const a = account('a', { weekly: win(0.2, 5 * DAY) }) // available
+    const b = account('b', {
+      weekly: win(0.1, 5 * DAY),
+      cooldownUntil: NOW + HOUR,
+    })
+    // b would be within-band on score, but it is unavailable, so it is not a
+    // valid incumbent -> selection falls through to the available argmax (a).
+    expect(pickInc([a, b], 'b')).toBe('a')
+  })
+
+  test('ignores an EXCLUDED incumbent (already tried this request) and takes the argmax', () => {
+    const a = account('a', { weekly: win(0.1, 5 * DAY) }) // best
+    const b = account('b', { weekly: win(0.2, 5 * DAY) }) // in band, but excluded
+    expect(pickInc([a, b], 'b', new Set(['b']))).toBe('a')
+  })
+
+  test('when every available score is 0 (all past the drain target), keeps the incumbent (flat urgency)', () => {
+    const a = account('a', { weekly: win(0.985, 5 * DAY) }) // urgency 0 -> score 0
+    const b = account('b', { weekly: win(0.985, 5 * DAY) }) // also score 0
+    expect(pick([a, b])).toBe('a') // no incumbent -> first-wins argmax
+    // band collapses to `incumbentScore >= 0` -> incumbent b kept, no special case
+    expect(pickInc([a, b], 'b')).toBe('b')
+  })
+
+  test('flows through selectForSession for a SESSIONLESS request (keeps lastSelected)', () => {
+    const a = account('a', { weekly: win(0.1, 5 * DAY) }) // best
+    const b = account('b', { weekly: win(0.2, 5 * DAY) }) // in band
+    const pool: PoolFile = {
+      version: 1,
+      accounts: [a, b],
+      lastSelected: { anthropic: 'b' },
+      sessions: {},
+    }
+    // No session key -> the sessionless selectAccount call receives lastSelected
+    // ('b') as the incumbent and keeps it instead of churning to 'a'.
+    expect(selectForSession(pool, 'anthropic', null, NOW)?.account.id).toBe('b')
+  })
+
+  test('a FORCED repick (pinned account unavailable) still honors the incumbent lastSelected', () => {
+    // The pin `p` is cooling down -> forced switch. lastSelected points to `b`,
+    // an available within-band account; the forced repick keeps `b` (incumbent)
+    // instead of churning the global in-use account to the marginally-better `a`.
+    const p = account('p', {
+      weekly: win(0.1, 5 * DAY),
+      cooldownUntil: NOW + HOUR, // pinned but unavailable -> forces a switch
+    })
+    const a = account('a', { weekly: win(0.1, 5 * DAY) }) // best available
+    const b = account('b', { weekly: win(0.2, 5 * DAY) }) // in-band incumbent
+    const pool: PoolFile = {
+      version: 1,
+      accounts: [p, a, b],
+      lastSelected: { anthropic: 'b' },
+      sessions: { 's:1': { accountId: 'p', updatedAt: NOW } },
+    }
+    const sel = selectForSession(pool, 'anthropic', 's:1', NOW)
+    expect(sel?.account.id).toBe('b')
+  })
+})
+
 describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () => {
   const migPick = (
     pool: PoolFile,
@@ -567,6 +652,12 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
   })
 
   test('a pinned account whose 5h window crosses migrateAt migrates even when weekly is healthy', () => {
+    // 5h over migrateAt (0.95) fires the proactive branch, and the migration
+    // LANDS because alt `a` (weekly 0.2 @5d) is at least as weekly-PERISHABLE as
+    // pin `b` (weekly 0.5 @5d) — same reset horizon, more drainable headroom, so
+    // >= weeklyUrgency. The non-imminent proactive switch is gated on exactly
+    // that comparison; the companion test below proves it is SUPPRESSED when the
+    // pin is the more perishable side.
     const a = account('a', { weekly: win(0.2, 5 * DAY) })
     const b = account('b', {
       weekly: win(0.5, 5 * DAY), // weekly below the drain target
@@ -574,6 +665,44 @@ describe('point 3a/3b/3c: proactive migration, cost gating, drain override', () 
     })
     const sel = migPick(pinnedTo([a, b], 'b'), 's:1')
     expect(sel?.account.id).toBe('a')
+  })
+
+  test('does NOT shed a 5h-soft pin to a LESS weekly-perishable account (keeps draining the imminently-resetting quota)', () => {
+    // The live-pool regression: pin `b`'s short 5h window crossed migrateAt
+    // (0.96) so the proactive branch fires — but its WEEKLY quota resets in ~3h
+    // at low util, vastly more perishable (weeklyUrgency ~6.0) than alt `a`,
+    // whose weekly resets 6 days out (~0.02). Shedding `b`'s sessions to `a`
+    // would waste the very quota the pool exists to drain first. A NON-imminent
+    // proactive switch must therefore be suppressed: keep draining the pin until
+    // its 5h reaches the imminent band (covered by the safety test below).
+    const a = account('a', { weekly: win(0.11, 6 * DAY) }) // far reset -> low urgency
+    const b = account('b', {
+      weekly: win(0.14, 3 * HOUR), // imminent weekly reset -> high urgency
+      hourly: win(0.96, 2 * HOUR), // 5h over migrateAt (0.95), below the imminent band
+    })
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1') // cheap (0-byte) request
+    expect(sel?.account.id).toBe('b')
+    expect(sel?.sticky).toBe(true)
+    expect(sel?.degraded).toBe(false)
+  })
+
+  test('a weekly-perishable pin in the IMMINENT 5h band still switches for safety (weekly-urgency gate does not apply)', () => {
+    // The weekly-perishability gate guards ONLY the non-imminent optimization.
+    // Once the pin's 5h enters the imminent band (>= exhaustedAt - 0.01 = 0.989)
+    // a hard-limit 429 is one turn away, so safety wins even over perishable
+    // weekly quota — and it bypasses the byte cost gate (a forced switch is
+    // coming regardless). So pin `b` (weekly resets ~3h, high urgency) sitting
+    // at 5h 0.99 still migrates to the lower-util alt `a` despite `a`'s far
+    // lower weekly urgency, even on a huge request.
+    const a = account('a', { weekly: win(0.11, 6 * DAY) }) // lower weekly urgency
+    const b = account('b', {
+      weekly: win(0.14, 3 * HOUR), // higher weekly urgency
+      hourly: win(0.99, 2 * HOUR), // 5h in the imminent band
+    })
+    const cfg = { ...DEFAULT_CONFIG, cheapSwitchMaxBytes: 1000 }
+    const sel = migPick(pinnedTo([a, b], 'b'), 's:1', cfg, 5000) // huge request
+    expect(sel?.account.id).toBe('a')
+    expect(sel?.sticky).toBe(false)
   })
 
   test('proactive migration is held back when the only alternative is cooling down (degraded)', () => {

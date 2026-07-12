@@ -311,6 +311,26 @@ export function toScore(a: PoolAccount): ScoreAccount {
 }
 
 /**
+ * The account the CURRENT opencode session is pinned to for a provider — i.e.
+ * what THIS session is actually using — read from the pool's session map. The
+ * key is `<providerID>:s:<sessionID>`, exactly what `deriveSessionKey` +
+ * `recordSuccess` (src/fetch.ts) write on each served request. Returns
+ * `undefined` when there is no session (home screen) or the session has not yet
+ * pinned an account for this provider. The in-use (▶) marker uses this so it
+ * reflects the VIEWER's OWN session, not the global `lastSelected` (whichever
+ * session served most recently across the whole pool — misleading while several
+ * sessions run at once).
+ */
+export function sessionAccountId(
+  pool: PoolShape,
+  providerID: string,
+  sessionId: string | undefined,
+): string | undefined {
+  if (!sessionId) return undefined
+  return pool.sessions?.[`${providerID}:s:${sessionId}`]?.accountId
+}
+
+/**
  * Byte-deterministic ASCII string comparator (never `localeCompare` — keeps
  * tier/provider ordering byte-identical regardless of host locale). Ships its
  * own copy independent of `src/status.ts`'s identical helper — this file

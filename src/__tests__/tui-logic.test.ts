@@ -17,6 +17,7 @@ import {
   poolFile,
   readPool,
   renameInPool,
+  sessionAccountId,
   setDisabledInPool,
   stateOf,
   tierResets,
@@ -587,6 +588,44 @@ describe('toScore', () => {
     expect(sa.cooldownUntil).toBe(0)
     expect(sa.disabledReason).toBeNull()
     expect(sa.usage).toEqual({ hourly: null, weekly: null })
+  })
+})
+
+describe('sessionAccountId (in-use marker is the VIEWER session, not global lastSelected)', () => {
+  test('returns the account THIS session is pinned to, scoped per provider', () => {
+    const pool = {
+      sessions: {
+        'anthropic:s:ses_1': { accountId: 'acc-a' },
+        'anthropic:s:ses_2': { accountId: 'acc-b' },
+        'openai:s:ses_1': { accountId: 'acc-o' },
+      },
+    }
+    expect(sessionAccountId(pool, 'anthropic', 'ses_1')).toBe('acc-a')
+    expect(sessionAccountId(pool, 'anthropic', 'ses_2')).toBe('acc-b')
+    // same session id, different provider -> different pin
+    expect(sessionAccountId(pool, 'openai', 'ses_1')).toBe('acc-o')
+  })
+
+  test('undefined when there is no session (home screen)', () => {
+    const pool = { sessions: { 'anthropic:s:ses_1': { accountId: 'acc-a' } } }
+    expect(sessionAccountId(pool, 'anthropic', undefined)).toBeUndefined()
+  })
+
+  test('undefined when this session has no pin for the provider yet', () => {
+    const pool = { sessions: { 'anthropic:s:ses_1': { accountId: 'acc-a' } } }
+    expect(sessionAccountId(pool, 'openai', 'ses_1')).toBeUndefined() // provider not used
+    expect(sessionAccountId(pool, 'anthropic', 'ses_X')).toBeUndefined() // unknown session
+  })
+
+  test('undefined when sessions is absent or the entry has no accountId', () => {
+    expect(sessionAccountId({}, 'anthropic', 'ses_1')).toBeUndefined()
+    expect(
+      sessionAccountId(
+        { sessions: { 'anthropic:s:ses_1': {} } },
+        'anthropic',
+        'ses_1',
+      ),
+    ).toBeUndefined()
   })
 })
 

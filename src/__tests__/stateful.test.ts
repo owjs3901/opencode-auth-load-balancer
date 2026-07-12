@@ -9,6 +9,7 @@ const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-stateful-'))
 const POOL = join(DIR, 'auth-load-balancer.json')
 
 import { addAccount, bootstrapFromOpencodeAuth } from '../accounts'
+import { ACCOUNT_COOLDOWN_MS } from '../fetch'
 import {
   findAccount,
   type FsOps,
@@ -31,6 +32,7 @@ import {
 } from '../types'
 import {
   _lastPollIdsForTests,
+  MAX_TRANSIENT_COOLDOWN_MS,
   refreshUsageInBackground,
 } from '../usage-refresh'
 import { sleep } from '../util'
@@ -1839,6 +1841,109 @@ describe('usage-refresh', () => {
     // lastPoll throttle has lapsed, so the readPool path polls it again.
     await refreshUsageInBackground(adapter, now + 6 * 60 * 1000)
     expect(fetched).toBe(2)
+  })
+
+  test('clears a STALE long (quota-derived) cooldown once the poll proves weekly headroom', async () => {
+    // The reported bug: a weekly-limit 429's Retry-After latched cooldownUntil
+    // at the weekly reset (recordRotation in fetch.ts), then Anthropic's
+    // out-of-band reset zeroed the weekly window via the endpoint — but nothing
+    // lowers cooldownUntil except wall-clock, so isAvailable kept sidelining a
+    // full-headroom account for days (both dashboards AND the scheduler gate on
+    // that one field). This poll is authoritative proof of headroom, so the
+    // stale latch is dropped.
+    const now = Date.now()
+    const threeDays = 3 * 24 * 60 * 60 * 1000
+    const a = account({
+      cooldownUntil: now + threeDays, // ≈ the old weekly resetAt
+      usage: {
+        hourly: null,
+        weekly: { utilization: 1, resetAt: now + threeDays },
+        capturedAt: 0, // stale -> polled
+      },
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      // Out-of-band reset: the endpoint now reports 0% with resets_at null.
+      fetchUsage: async () => ({
+        hourly: { utilization: 0, resetAt: 0 },
+        weekly: { utilization: 0, resetAt: 0 },
+        capturedAt: now,
+      }),
+    })
+    await refreshUsageInBackground(adapter, now)
+    expect(findAccount(await readPool(), a.id)?.cooldownUntil).toBe(0)
+    // End-to-end proof: the account rejoins the pool as a normal (non-degraded)
+    // selection instead of remaining the least-bad cooling-down fallback.
+    const picked = selectAccount((await readPool()).accounts, 'anthropic', now)
+    expect(picked?.account.id).toBe(a.id)
+    expect(picked?.degraded).toBe(false)
+  })
+
+  test('keeps the cooldown when the poll shows the account is still exhausted', async () => {
+    // The isExhausted gate is the real safety guard: if the authoritative poll
+    // still reports the weekly window at/over the exhaustion threshold, the
+    // limit is genuine and the cooldown must stand even though it is long.
+    const now = Date.now()
+    const cd = now + 3 * 24 * 60 * 60 * 1000
+    const a = account({
+      cooldownUntil: cd,
+      usage: {
+        hourly: null,
+        weekly: { utilization: 1, resetAt: cd },
+        capturedAt: 0,
+      },
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      // Still limited: the weekly endpoint reads ~100%.
+      fetchUsage: async () => ({
+        hourly: { utilization: 0, resetAt: 0 },
+        weekly: { utilization: 1, resetAt: cd },
+        capturedAt: now,
+      }),
+    })
+    await refreshUsageInBackground(adapter, now)
+    expect(findAccount(await readPool(), a.id)?.cooldownUntil).toBe(cd)
+  })
+
+  test('keeps a SHORT (transient) cooldown even when the poll shows headroom', async () => {
+    // A network-error / auth backoff (<= ACCOUNT_COOLDOWN_MS) must be honored:
+    // headroom does not mean the transient reason to back off has cleared. The
+    // length gate keeps it; only quota-length cooldowns are ever reconciled.
+    const now = Date.now()
+    const shortCd = now + 60_000 // 1min — well under MAX_TRANSIENT_COOLDOWN_MS
+    const a = account({
+      cooldownUntil: shortCd,
+      usage: {
+        hourly: null,
+        weekly: { utilization: 1, resetAt: now + 3 * 24 * 60 * 60 * 1000 },
+        capturedAt: 0,
+      },
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      fetchUsage: async () => ({
+        hourly: { utilization: 0, resetAt: 0 },
+        weekly: { utilization: 0, resetAt: 0 },
+        capturedAt: now,
+      }),
+    })
+    await refreshUsageInBackground(adapter, now)
+    expect(findAccount(await readPool(), a.id)?.cooldownUntil).toBe(shortCd)
+  })
+
+  test('MAX_TRANSIENT_COOLDOWN_MS stays in lockstep with fetch.ts ACCOUNT_COOLDOWN_MS', () => {
+    // The stale-vs-transient discriminator is a magnitude heuristic: only a
+    // quota Retry-After can push cooldownUntil past the transient backoff cap,
+    // so if fetch.ts ever retunes ACCOUNT_COOLDOWN_MS this local copy must move
+    // with it or the reconciliation would mis-classify cooldowns.
+    expect(MAX_TRANSIENT_COOLDOWN_MS).toBe(ACCOUNT_COOLDOWN_MS)
   })
 })
 

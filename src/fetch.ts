@@ -15,7 +15,8 @@ import type {
   ProviderAdapter,
 } from './providers/types'
 import { ensureAccessToken } from './refresh'
-import { loadConfig } from './scheduler/config'
+import { loadConfig, type SchedulerConfig } from './scheduler/config'
+import { isExhausted } from './scheduler/score-core'
 import { selectForSession } from './scheduler/select'
 import { deriveSessionKey, SESSION_HEADER } from './session'
 import type { PoolAccount, UsageSnapshot } from './types'
@@ -23,7 +24,11 @@ import { preserveWeeklyAnchor } from './usage-merge'
 import { refreshUsageInBackground } from './usage-refresh'
 import { ignore, sleepAbortable } from './util'
 
-const ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000
+// Exported so the usage-refresh stale-cooldown reconciliation's local
+// `MAX_TRANSIENT_COOLDOWN_MS` can be held `===` to it by a drift-guard test
+// (it can't import this value directly — fetch.ts imports usage-refresh.ts, so
+// the reverse import would cycle).
+export const ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000
 const AUTH_COOLDOWN_MS = 2 * 60 * 1000
 
 const DEBUG =
@@ -270,13 +275,32 @@ async function recordSuccess(
   partial: Partial<UsageSnapshot> | null,
   sessionKey: string | null,
   now: number,
-  ttlMs: number,
+  cfg: SchedulerConfig,
 ): Promise<void> {
   await bestEffort('record-success', () =>
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
       if (account) {
         if (partial) applyUsagePartial(account, partial, now)
+        // Self-heal a STALE long cooldown on the account that JUST SERVED a 2xx.
+        // The endpoint-poll reconciliation (usage-refresh.ts) is the primary
+        // path, but its staleness gate SKIPS an account whose usage was just
+        // captured — exactly what a continuously (degraded-)served account looks
+        // like — so a stale weekly-reset latch on the pool's active workhorse
+        // would otherwise never clear (it stays wrongly excluded from normal
+        // selection despite having headroom). A 2xx WITH fresh usage headers is
+        // proof the account can serve, so drop a long (quota-class, >
+        // ACCOUNT_COOLDOWN_MS — never a live 5min/2min transient backoff)
+        // cooldown once that fresh usage shows it is not exhausted. Same
+        // predicate as usage-refresh; kept OUT of applyUsagePartial (shared with
+        // recordModelCooldown, where a tier-429 must NOT clear the account-wide
+        // cooldown).
+        if (
+          partial &&
+          account.cooldownUntil > now + ACCOUNT_COOLDOWN_MS &&
+          !isExhausted(account, cfg, now)
+        )
+          account.cooldownUntil = 0
         pool.lastSelected[adapter.id] = accountId
       }
       if (sessionKey) {
@@ -288,7 +312,8 @@ async function recordSuccess(
         // satisfies noUncheckedIndexedAccess without a `!` escape.)
         for (const k of Object.keys(pool.sessions)) {
           const pin = pool.sessions[k]
-          if (pin && now - pin.updatedAt > ttlMs) delete pool.sessions[k]
+          if (pin && now - pin.updatedAt > cfg.sessionTtlMs)
+            delete pool.sessions[k]
         }
       }
     }),
@@ -822,7 +847,7 @@ export function createLoadBalancedFetch(
           partial,
           sessionKey,
           successNow,
-          cfg.sessionTtlMs,
+          cfg,
         )
         return adapter.transformResponse(res)
       } catch (error) {

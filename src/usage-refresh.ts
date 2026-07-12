@@ -1,10 +1,24 @@
 import { findAccount, mutatePool, readPool } from './pool/store'
 import type { ProviderAdapter } from './providers/types'
 import { ensureAccessToken } from './refresh'
+import { isExhausted, loadScoreConfig } from './scheduler/score-core'
 import type { PoolAccount, PoolFile } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
 
 const SEED_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Max lifetime of a TRANSIENT (non-quota) cooldown. fetch.ts cools a thrown
+ * network error or a header-less 429/402 for at most `ACCOUNT_COOLDOWN_MS`
+ * (5min) and an auth 401/403 for `AUTH_COOLDOWN_MS` (2min); ONLY a quota 429's
+ * `Retry-After` writes a cooldown beyond this. So a cooldown whose remainder
+ * still exceeds this bound is necessarily quota-derived — the one class that can
+ * outlive its own usage window after an out-of-band reset (see the stale-cooldown
+ * reconciliation below). Kept `=== ACCOUNT_COOLDOWN_MS` by a drift-guard test;
+ * defined locally because importing it from fetch.ts (which imports THIS module)
+ * would form a cycle.
+ */
+export const MAX_TRANSIENT_COOLDOWN_MS = 5 * 60 * 1000
 
 /** Per-account last poll time, to throttle usage-endpoint calls (which are themselves rate-limited). */
 const lastPoll = new Map<string, number>()
@@ -95,6 +109,12 @@ export async function refreshUsageInBackground(
     for (const id of lastPoll.keys()) if (!aliveIds.has(id)) lastPoll.delete(id)
   }
   if (!stale) return
+  // Loaded once per poll batch (past the steady-state early-return above, so it
+  // never runs on the request hot path), shared by the stale-cooldown
+  // reconciliation inside the mutate below. `loadScoreConfig` reads the same
+  // `OPENCODE_AUTH_LB_EXHAUSTED_AT` knob the scheduler uses, so "has headroom"
+  // here means exactly "available" there.
+  const scoreCfg = loadScoreConfig()
   // Parallelize across the stale subset: per-account refresh locks in
   // `refresh.ts` are keyed by (providerID, accountId), so distinct accounts
   // never contend; and `mutatePool` already serializes via the in-process
@@ -124,7 +144,7 @@ export async function refreshUsageInBackground(
             // of erasing it. `capturedAt` is weekly-scoped (types.ts) — a failed
             // weekly refresh must not stamp freshness, or the re-poll that
             // would heal it is suppressed for SEED_TTL_MS.
-            if (stored)
+            if (stored) {
               stored.usage = {
                 hourly: snapshot.hourly ?? stored.usage.hourly,
                 weekly:
@@ -138,6 +158,27 @@ export async function refreshUsageInBackground(
                 capturedAt:
                   snapshot.weekly === null ? stored.usage.capturedAt : now,
               }
+              // Self-heal a STALE long cooldown. A weekly-limit 429's
+              // `Retry-After` latches `cooldownUntil` at the weekly reset
+              // (`recordRotation` in fetch.ts), but Anthropic's out-of-band
+              // resets zero the usage window early while NOTHING lowers
+              // `cooldownUntil` except wall-clock — stranding a full-headroom
+              // account as "cooldown" for days (both dashboards AND the
+              // scheduler gate on this single field). This authoritative poll
+              // just proved headroom, so drop the latch — but only when a REAL
+              // fresh weekly reading arrived (not the retained-stale malformed
+              // branch), the remainder still exceeds any transient backoff (so
+              // it is necessarily quota-derived, not a live 5min/2min error
+              // cooldown), and the merged usage is not exhausted. A genuinely
+              // still-limited account re-cools on its next real 429 — the same
+              // "re-poll, don't latch" contract `utilOf`/`isWindowExpired` keep.
+              if (
+                snapshot.weekly !== null &&
+                stored.cooldownUntil > now + MAX_TRANSIENT_COOLDOWN_MS &&
+                !isExhausted(stored, scoreCfg, now)
+              )
+                stored.cooldownUntil = 0
+            }
           })
         }
       } catch {

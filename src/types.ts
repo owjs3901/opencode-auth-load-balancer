@@ -110,6 +110,18 @@ export const MANUAL_DISABLED_REASON = 'manually disabled'
 export interface SessionAssignment {
   accountId: string
   updatedAt: number
+  /**
+   * Set when THIS session's most recent successful request was served on an
+   * auto-downgraded fallback model (the requested model tier's weekly cap is
+   * exhausted pool-wide, so the request descended the fallback ladder). Read by
+   * the TUI bottom bar to PERSISTENTLY surface the degrade — the `onModelFallback`
+   * toast is transient and gone by the next turn, yet the session keeps running
+   * on the fallback model. `from`/`to` are the raw model ids (original requested
+   * model → served model), matching the toast wording. The whole session row is
+   * overwritten on every success, so the next request served on the requested
+   * model naturally clears this back to `undefined`.
+   */
+  fallback?: { from: string; to: string }
 }
 
 export interface PoolFile {

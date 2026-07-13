@@ -1188,6 +1188,51 @@ describe('model-tier fallback (Opus/Fable → Sonnet)', () => {
     )
   })
 
+  test('the served fallback model is recorded on the session pin, then cleared once a normal model serves again', async () => {
+    // The onModelFallback toast is transient — gone by the next turn — yet the
+    // session keeps running on the downgraded model. recordSuccess persists the
+    // requested→served model ids on the session pin so the TUI bottom bar can
+    // PERSISTENTLY surface the degrade; a later success on the requested model
+    // overwrites the whole session row, clearing it back to undefined.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'OPUS_A', access: 'tokA' }))
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      // 1: Opus-tier 429 → downgrade. 2: the downgraded retry (200).
+      // 3 (next turn, plain Sonnet request): a clean 200, no tier limit.
+      return n === 1
+        ? tierLimited('seven_day_opus', now)
+        : new Response('ok', { status: 200 })
+    }
+    const { client } = spyClient()
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+    const withSession = (model: string) => ({
+      ...modelPost(model),
+      headers: { [SESSION_HEADER]: 'fb' },
+    })
+
+    // Turn 1: Opus tier-capped pool-wide → served on Sonnet → recorded on the pin.
+    await opts.fetch('https://api.anthropic.com/v1/messages', withSession(OPUS))
+    let pin = (await readPool()).sessions['anthropic:s:fb']
+    expect(pin?.accountId).toBe('OPUS_A')
+    expect(pin?.fallback).toEqual({ from: OPUS, to: SONNET })
+
+    // Turn 2: a normal model serves cleanly → the degrade marker is cleared.
+    await opts.fetch(
+      'https://api.anthropic.com/v1/messages',
+      withSession(SONNET),
+    )
+    pin = (await readPool()).sessions['anthropic:s:fb']
+    expect(pin?.accountId).toBe('OPUS_A')
+    expect(pin?.fallback).toBeUndefined()
+  })
+
   test('a tier 429 with another candidate available rotates and serves the ORIGINAL model (no downgrade, no account cooldown)', async () => {
     // THE headline scenario: fable-5's own weekly cap is exhausted on A while
     // A's aggregate 5h/7d windows still have headroom. A must NOT enter an

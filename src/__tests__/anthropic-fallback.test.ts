@@ -266,6 +266,34 @@ describe('planReactiveFallback', () => {
     },
   )
 
+  test('a non-family claim suffix (overage_included) keys the cooldown by the REQUEST family, not the suffix', () => {
+    // Anthropic emits `seven_day_overage_included` (the premium/overage bucket)
+    // for a capped fable request. "overage_included" is NOT a model family, so
+    // keying on it recorded a dead `modelCooldownsUntil.overage_included` that
+    // the proactive skip (`modelCooldownsUntil[requestModelTier="fable"]`) could
+    // never consult — the account kept receiving+429ing every fable request.
+    // The key MUST be the request's own family ("fable"). Both windows.
+    const now = Date.now()
+    for (const claim of [
+      'seven_day_overage_included',
+      'five_hour_overage_included',
+    ]) {
+      const out = planReactiveFallback(
+        res({
+          'anthropic-ratelimit-unified-representative-claim': claim,
+          'anthropic-ratelimit-unified-reset': String(
+            Math.floor((now + 2 * DAY) / 1000),
+          ),
+        }),
+        body(FABLE),
+        now,
+        CATALOG,
+      )
+      expect(out?.tier).toBe('fable') // request family, NOT "overage_included"
+      expect(out?.fallback.toModel).toBe('claude-opus-4-9')
+    }
+  })
+
   test('a missing reset header falls back to a short (~1 h) tier cooldown', () => {
     const now = Date.now()
     const out = planReactiveFallback(

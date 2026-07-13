@@ -18,6 +18,7 @@ import {
   readPool,
   renameInPool,
   sessionAccountId,
+  sessionFallback,
   setDisabledInPool,
   stateOf,
   tierResets,
@@ -626,6 +627,60 @@ describe('sessionAccountId (in-use marker is the VIEWER session, not global last
         'ses_1',
       ),
     ).toBeUndefined()
+  })
+})
+
+describe('sessionFallback (persisted model downgrade surfaced on the bottom bar)', () => {
+  test('returns the recorded requested→served model ids for the viewer session', () => {
+    const pool = {
+      sessions: {
+        'anthropic:s:ses_1': {
+          accountId: 'acc-a',
+          fallback: { from: 'claude-fable-5', to: 'claude-sonnet-4-6' },
+        },
+        'openai:s:ses_1': { accountId: 'acc-o' },
+      },
+    }
+    expect(sessionFallback(pool, 'anthropic', 'ses_1')).toEqual({
+      from: 'claude-fable-5',
+      to: 'claude-sonnet-4-6',
+    })
+  })
+
+  test('undefined when there is no session (home screen)', () => {
+    const pool = {
+      sessions: {
+        'anthropic:s:ses_1': {
+          accountId: 'a',
+          fallback: { from: 'x', to: 'y' },
+        },
+      },
+    }
+    expect(sessionFallback(pool, 'anthropic', undefined)).toBeUndefined()
+  })
+
+  test('undefined when the session ran on its requested model (no downgrade recorded)', () => {
+    expect(sessionFallback({}, 'anthropic', 'ses_1')).toBeUndefined()
+    expect(
+      sessionFallback(
+        { sessions: { 'anthropic:s:ses_1': { accountId: 'a' } } },
+        'anthropic',
+        'ses_1',
+      ),
+    ).toBeUndefined()
+  })
+
+  test('a hand-edited malformed fallback reads as no-downgrade rather than rendering junk', () => {
+    // Trust boundary: the pool is a user-editable JSON file. A `fallback` whose
+    // `from`/`to` are missing or non-strings must NOT reach the bar as `undefined`.
+    const pool = toPoolShape({
+      sessions: {
+        'anthropic:s:miss': { accountId: 'a', fallback: { from: 'x' } },
+        'anthropic:s:typ': { accountId: 'a', fallback: { from: 5, to: 6 } },
+      },
+    })
+    expect(sessionFallback(pool, 'anthropic', 'miss')).toBeUndefined() // `to` absent
+    expect(sessionFallback(pool, 'anthropic', 'typ')).toBeUndefined() // wrong types
   })
 })
 

@@ -67,7 +67,10 @@ export interface PoolAccount {
 export interface PoolShape {
   accounts?: PoolAccount[]
   lastSelected?: Record<string, string>
-  sessions?: Record<string, { accountId?: string }>
+  sessions?: Record<
+    string,
+    { accountId?: string; fallback?: { from?: string; to?: string } }
+  >
 }
 
 /**
@@ -328,6 +331,28 @@ export function sessionAccountId(
 ): string | undefined {
   if (!sessionId) return undefined
   return pool.sessions?.[`${providerID}:s:${sessionId}`]?.accountId
+}
+
+/**
+ * The active model downgrade for THIS session on `providerID`, or `undefined`
+ * when the session's latest request ran on the model it asked for (or there is
+ * no session). `{ from, to }` are the raw model ids (requested → served) the
+ * server recorded in {@link SessionAssignment.fallback}. The bottom bar shows it
+ * so a session silently running on a fallback model is visible even after the
+ * transient switch toast is gone. Both fields are re-validated as strings (a
+ * hand-edited pool could hold anything) — a malformed `fallback` reads as "no
+ * downgrade" rather than rendering `undefined`.
+ */
+export function sessionFallback(
+  pool: PoolShape,
+  providerID: string,
+  sessionId: string | undefined,
+): { from: string; to: string } | undefined {
+  if (!sessionId) return undefined
+  const fb = pool.sessions?.[`${providerID}:s:${sessionId}`]?.fallback
+  if (!fb || typeof fb.from !== 'string' || typeof fb.to !== 'string')
+    return undefined
+  return { from: fb.from, to: fb.to }
 }
 
 /**

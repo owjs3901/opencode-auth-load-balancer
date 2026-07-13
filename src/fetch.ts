@@ -276,6 +276,7 @@ async function recordSuccess(
   sessionKey: string | null,
   now: number,
   cfg: SchedulerConfig,
+  fallback: ModelFallback | null,
 ): Promise<void> {
   await bestEffort('record-success', () =>
     mutatePool((pool) => {
@@ -304,7 +305,18 @@ async function recordSuccess(
         pool.lastSelected[adapter.id] = accountId
       }
       if (sessionKey) {
-        pool.sessions[sessionKey] = { accountId, updatedAt: now }
+        // Overwrite the WHOLE row: when this success ran on the requested model
+        // (`fallback === null`) the `fallback` key is simply absent, clearing any
+        // downgrade the bottom bar was showing from a prior turn. When it ran on a
+        // downgraded model, persist the original→served model ids so the bar can
+        // surface the still-active degrade (the toast is long gone by next turn).
+        pool.sessions[sessionKey] = fallback
+          ? {
+              accountId,
+              updatedAt: now,
+              fallback: { from: fallback.fromModel, to: fallback.toModel },
+            }
+          : { accountId, updatedAt: now }
         // Object.keys, not Object.entries: this TTL prune runs on EVERY
         // successful request, and entries allocates one 2-element tuple per
         // session on top of the outer array for data a keyed read gets free.
@@ -848,6 +860,7 @@ export function createLoadBalancedFetch(
           sessionKey,
           successNow,
           cfg,
+          fallbackInfo,
         )
         return adapter.transformResponse(res)
       } catch (error) {

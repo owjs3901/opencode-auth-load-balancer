@@ -39,6 +39,7 @@ import {
   readPool,
   renameInPool,
   sessionAccountId,
+  sessionFallback,
   setDisabledInPool,
   stateOf,
   tierResets,
@@ -101,6 +102,8 @@ interface WindowDisplay {
 interface Chip extends WindowDisplay {
   name: string
   label: string
+  /** Raw model ids (requested → served) when this session runs on a fallback model, else undefined. */
+  fallback?: { from: string; to: string }
 }
 
 /** Always-visible bottom bar (app_bottom): the in-use account per provider. */
@@ -135,6 +138,9 @@ function BottomBar(props: { api: TuiPluginApi }) {
         weeklyReset: until(a.usage?.weekly?.resetAt, now),
         hourlyPct: winPct(a.usage?.hourly, now),
         hourlyReset: until(a.usage?.hourly?.resetAt, now),
+        // Only THIS session's fallback (keyed by sid); the `lastSelected` home-screen
+        // fallback path has no session, so no downgrade to surface there.
+        fallback: sessionFallback(p, providerID, sid),
       })
     }
     return out
@@ -148,6 +154,11 @@ function BottomBar(props: { api: TuiPluginApi }) {
             <span style={{ fg: color().primary }}>
               {a.name} {a.label}
             </span>
+            {a.fallback ? (
+              <span style={{ fg: color().warning }}>
+                {`  fallback ${a.fallback.from}→${a.fallback.to}`}
+              </span>
+            ) : null}
             {`  wk ${a.weeklyPct} (${a.weeklyReset}) · 5h ${a.hourlyPct} (${a.hourlyReset})`}
           </text>
         )}

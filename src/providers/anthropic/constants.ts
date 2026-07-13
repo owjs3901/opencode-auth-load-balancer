@@ -62,10 +62,15 @@ export const REPRESENTATIVE_CLAIM_HEADER =
   'anthropic-ratelimit-unified-representative-claim'
 
 /**
- * `representative-claim` values that name a MODEL-TIER window (a per-model
- * weekly/5h cap, e.g. `seven_day_opus`, `seven_day_fable`) rather than an
- * account-wide one (bare `five_hour` / `seven_day`). The capture group is the
- * tier name — the key of `PoolAccount.modelCooldownsUntil`.
+ * `representative-claim` values that name a TIER-scoped window (a per-model
+ * weekly/5h cap OR the premium/overage bucket — e.g. `seven_day_opus`,
+ * `seven_day_fable`, `seven_day_overage_included`) rather than a bare
+ * account-wide one (`five_hour` / `seven_day`). Used ONLY as a GATE by
+ * `planReactiveFallback`; the captured suffix is NOT the cooldown key. Anthropic
+ * emits non-model-family suffixes (`overage_included`) that no request's model
+ * family ever equals, so keying on the suffix records a dead
+ * `modelCooldownsUntil` entry the proactive skip can never consult — the cooldown
+ * is keyed by the REQUEST's model family instead (see `planReactiveFallback`).
  */
 export const MODEL_TIER_CLAIM_RE = /^(?:seven_day|five_hour)_(.+)$/
 

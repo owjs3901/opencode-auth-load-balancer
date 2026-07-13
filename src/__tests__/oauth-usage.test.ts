@@ -765,6 +765,41 @@ describe('openai usage', () => {
     expect(u?.weekly?.utilization).toBeCloseTo(0.4, 5)
   })
 
+  test('parseUsageHeaders maps a seven-day primary header to weekly usage', () => {
+    // Given: an official Codex header set whose sole primary window is seven days.
+    const h = new Headers({
+      'x-codex-primary-used-percent': '7',
+      'x-codex-primary-window-minutes': '10080',
+      'x-codex-primary-reset-at': '1900000000',
+    })
+
+    // When: response-header usage is parsed.
+    const u = oParse(h)
+
+    // Then: the duration identifies 7% as weekly, not 5h usage.
+    expect(u?.hourly).toBeUndefined()
+    expect(u?.weekly?.utilization).toBeCloseTo(0.07, 5)
+  })
+
+  test('parseUsageHeaders maps a shorter secondary header to hourly when primary is weekly', () => {
+    // Given: duration headers identify primary as 7d and secondary as 5h.
+    const h = new Headers({
+      'x-codex-primary-used-percent': '7',
+      'x-codex-primary-window-minutes': '10080',
+      'x-codex-primary-reset-at': '1900000000',
+      'x-codex-secondary-used-percent': '20',
+      'x-codex-secondary-window-minutes': '300',
+      'x-codex-secondary-reset-at': '1900000000',
+    })
+
+    // When: response-header usage is parsed.
+    const u = oParse(h)
+
+    // Then: both windows follow their durations rather than positional names.
+    expect(u?.hourly?.utilization).toBeCloseTo(0.2, 5)
+    expect(u?.weekly?.utilization).toBeCloseTo(0.07, 5)
+  })
+
   test('parseUsageHeaders: null when absent, NaN ignored, zero reset when missing', () => {
     expect(oParse(new Headers())).toBeNull()
     // Present-but-unparsable header → null, not a truthy empty `{}` partial
@@ -820,6 +855,43 @@ describe('openai usage', () => {
         'chatgpt-account-id'
       ],
     ).toBe('acc_9')
+  })
+
+  test('fetchUsage maps a seven-day primary window to weekly usage when secondary is absent', async () => {
+    // Given: Codex reports the weekly general limit as the sole primary window.
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          rate_limit: {
+            primary_window: {
+              used_percent: 7,
+              limit_window_seconds: 604800,
+              reset_at: 1900000000,
+            },
+            secondary_window: null,
+          },
+        }),
+        { status: 200 },
+      )
+
+    // When: the authoritative usage endpoint is parsed.
+    const u = await oFetchUsage(acct('openai', 'a'), 0)
+
+    // Then: 93% remaining is represented as 7% weekly usage, not 0%.
+    expect(u?.hourly).toEqual({ utilization: 0, resetAt: 0 })
+    expect(u?.weekly?.utilization).toBeCloseTo(0.07, 5)
+  })
+
+  test('fetchUsage rejects a non-object rate_limit instead of recording zero usage', async () => {
+    // Given: a malformed-but-successful response whose envelope is not an object.
+    respond = () =>
+      new Response(JSON.stringify({ rate_limit: [] }), { status: 200 })
+
+    // When: the endpoint response crosses the provider boundary.
+    const u = await oFetchUsage(acct('openai', 'a'), 0)
+
+    // Then: the poll is discarded so it cannot overwrite last-known usage with 0%.
+    expect(u).toBeNull()
   })
 
   test('fetchUsage omits the account header without an id and handles null windows', async () => {

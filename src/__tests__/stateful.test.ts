@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-stateful-'))
 const POOL = join(DIR, 'auth-load-balancer.json')
 
+import { setReloginTargetInPool } from '../../tui/auth-load-balancer-tui.logic'
 import { addAccount, bootstrapFromOpencodeAuth } from '../accounts'
 import { ACCOUNT_COOLDOWN_MS } from '../fetch'
 import {
@@ -181,6 +182,57 @@ describe('pool store', () => {
       }),
     )
     expect((await readPool()).accounts[0]).toEqual(source)
+  })
+
+  test('readPool keeps only a complete, finite, unexpired re-login intent', async () => {
+    const expiresAt = Date.now() + 60_000
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [],
+        lastSelected: {},
+        sessions: {},
+        relogin: { accountId: 'target', providerID: 'anthropic', expiresAt },
+      }),
+    )
+
+    expect((await readPool()).relogin).toEqual({
+      accountId: 'target',
+      providerID: 'anthropic',
+      expiresAt,
+    })
+  })
+
+  test('readPool drops absent, expired, non-finite, and malformed re-login intents', async () => {
+    const invalidIntents = [
+      undefined,
+      null,
+      [],
+      'intent',
+      { accountId: 7, providerID: 'anthropic', expiresAt: Date.now() + 60_000 },
+      { accountId: 'target', providerID: 7, expiresAt: Date.now() + 60_000 },
+      { accountId: 'target', providerID: 'anthropic', expiresAt: Date.now() },
+    ]
+    for (const relogin of invalidIntents) {
+      await writeFile(
+        POOL,
+        JSON.stringify({
+          version: 1,
+          accounts: [],
+          lastSelected: {},
+          sessions: {},
+          ...(relogin === undefined ? {} : { relogin }),
+        }),
+      )
+      expect((await readPool()).relogin).toBeUndefined()
+    }
+
+    await writeFile(
+      POOL,
+      '{"version":1,"accounts":[],"lastSelected":{},"sessions":{},"relogin":{"accountId":"target","providerID":"anthropic","expiresAt":1e999}}',
+    )
+    expect((await readPool()).relogin).toBeUndefined()
   })
 
   test('readPool heals an array-valued usage to emptyUsage() (usage writes must persist)', async () => {
@@ -1352,6 +1404,190 @@ describe('accounts', () => {
     })
     expect(other.id).not.toBe(first.id)
     expect((await readPool()).accounts).toHaveLength(2)
+  })
+
+  test('Anthropic re-login intent folds rotated tokens onto the clicked row', async () => {
+    const first = await addAccount('anthropic', {
+      access: 'old-access',
+      refresh: 'old-refresh',
+      expires: 1,
+    })
+    await mutatePool((pool) => {
+      const row = pool.accounts.find((candidate) => candidate.id === first.id)
+      if (row) row.disabledReason = 'invalid_grant: re-login required'
+      pool.relogin = {
+        accountId: first.id,
+        providerID: 'anthropic',
+        expiresAt: Date.now() + 60_000,
+      }
+    })
+
+    const relogged = await addAccount('anthropic', {
+      access: 'new-access',
+      refresh: 'rotated-refresh',
+      expires: 2,
+    })
+    const pool = await readPool()
+
+    expect(relogged.id).toBe(first.id)
+    expect(pool.accounts).toHaveLength(1)
+    expect(pool.accounts[0]).toMatchObject({
+      access: 'new-access',
+      refresh: 'rotated-refresh',
+      expires: 2,
+      disabledReason: null,
+    })
+    expect(pool.relogin).toBeUndefined()
+  })
+
+  test('identity dedup consumes a matching-provider intent even when it claims the tokens', async () => {
+    const first = await addAccount('openai', {
+      access: 'old',
+      refresh: 'old-refresh',
+      expires: 1,
+      accountId: 'stable-account',
+    })
+    await mutatePool((pool) => {
+      pool.relogin = {
+        accountId: first.id,
+        providerID: 'openai',
+        expiresAt: Date.now() + 60_000,
+      }
+    })
+
+    await addAccount('openai', {
+      access: 'new',
+      refresh: 'new-refresh',
+      expires: 2,
+      accountId: 'stable-account',
+    })
+
+    expect((await readPool()).relogin).toBeUndefined()
+  })
+
+  test('an intent for another provider remains and normal append proceeds', async () => {
+    const target = await addAccount('anthropic', {
+      access: 'a',
+      refresh: 'anthropic-refresh',
+      expires: 1,
+    })
+    await mutatePool((pool) => {
+      pool.relogin = {
+        accountId: target.id,
+        providerID: 'anthropic',
+        expiresAt: Date.now() + 60_000,
+      }
+    })
+
+    await addAccount('openai', {
+      access: 'o',
+      refresh: 'openai-refresh',
+      expires: 1,
+    })
+    const pool = await readPool()
+
+    expect(pool.accounts).toHaveLength(2)
+    expect(pool.relogin?.accountId).toBe(target.id)
+  })
+
+  test('a consumed intent whose target was deleted falls through to append', async () => {
+    await mutatePool((pool) => {
+      pool.relogin = {
+        accountId: 'deleted-row',
+        providerID: 'anthropic',
+        expiresAt: Date.now() + 60_000,
+      }
+    })
+
+    const added = await addAccount('anthropic', {
+      access: 'new',
+      refresh: 'new-refresh',
+      expires: 1,
+    })
+    const pool = await readPool()
+
+    expect(added.id).not.toBe('deleted-row')
+    expect(pool.accounts).toHaveLength(1)
+    expect(pool.relogin).toBeUndefined()
+  })
+
+  // Cross-module regression lock: the TUI's setReloginTargetInPool writer hands
+  // off to the server's addAccount reader. Every other re-login test plants the
+  // intent server-side (mutatePool), so this one exercises the real handshake.
+  test('the TUI Re-login writer hands off to addAccount: rotated Codex tokens update the clicked row', async () => {
+    const first = await addAccount('openai', {
+      access: 'old',
+      refresh: 'old-refresh',
+      expires: 1,
+    })
+    await mutatePool((pool) => {
+      const row = pool.accounts.find((candidate) => candidate.id === first.id)
+      if (row) row.disabledReason = 'invalid_grant: re-login required (revoked)'
+    })
+
+    setReloginTargetInPool(first.id, 'openai', Date.now(), POOL)
+    const afterIntent = await readPool()
+
+    expect(afterIntent.relogin?.accountId).toBe(first.id)
+    expect(afterIntent.relogin?.providerID).toBe('openai')
+    expect(afterIntent.version).toBe(1)
+    expect(afterIntent.accounts).toHaveLength(1)
+
+    const relogged = await addAccount('openai', {
+      access: 'NEW',
+      refresh: 'ROTATED-refresh',
+      expires: 2,
+      accountId: 'chatgpt-acct-1',
+    })
+    const pool = await readPool()
+
+    expect(pool.accounts).toHaveLength(1)
+    expect(relogged.id).toBe(first.id)
+    expect(pool.accounts[0]).toMatchObject({
+      access: 'NEW',
+      refresh: 'ROTATED-refresh',
+      expires: 2,
+      disabledReason: null,
+      accountId: 'chatgpt-acct-1',
+    })
+    expect(pool.relogin).toBeUndefined()
+  })
+
+  test('accountId identity match wins over an intent targeting another row', async () => {
+    const intended = await addAccount('openai', {
+      access: 'intended-old',
+      refresh: 'intended-refresh',
+      expires: 1,
+      accountId: 'intended-account',
+    })
+    const identityMatch = await addAccount('openai', {
+      access: 'identity-old',
+      refresh: 'identity-refresh',
+      expires: 1,
+      accountId: 'identity-account',
+    })
+    await mutatePool((pool) => {
+      pool.relogin = {
+        accountId: intended.id,
+        providerID: 'openai',
+        expiresAt: Date.now() + 60_000,
+      }
+    })
+
+    const relogged = await addAccount('openai', {
+      access: 'identity-new',
+      refresh: 'identity-rotated',
+      expires: 2,
+      accountId: 'identity-account',
+    })
+    const pool = await readPool()
+
+    expect(relogged.id).toBe(identityMatch.id)
+    expect(pool.accounts).toHaveLength(2)
+    expect(pool.accounts.find((row) => row.id === intended.id)?.access).toBe(
+      'intended-old',
+    )
+    expect(pool.relogin).toBeUndefined()
   })
 
   test('addAccount default label avoids colliding with a surviving label after a middle-of-list delete', async () => {

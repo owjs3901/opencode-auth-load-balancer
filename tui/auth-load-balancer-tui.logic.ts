@@ -66,6 +66,7 @@ export interface PoolAccount {
 /** Loosely-typed view of the on-disk pool JSON (one shape for reads AND read-modify-writes). */
 export interface PoolShape {
   accounts?: PoolAccount[]
+  relogin?: { accountId?: string; providerID?: string; expiresAt?: number }
   lastSelected?: Record<string, string>
   sessions?: Record<
     string,
@@ -233,6 +234,53 @@ export function mutatePoolFile(
  * disable written here reads back as `disabled` (not `re-login`) everywhere.
  */
 export const MANUAL_DISABLED_REASON = 'manually disabled'
+
+/**
+ * NOTE: byte-identical copy of `src/types.ts`'s `RELOGIN_TTL_MS`, kept in sync
+ * by hand because the TUI runtime cannot import `src/`; see the
+ * `MANUAL_DISABLED_REASON` NOTE above for the same trust boundary.
+ */
+export const RELOGIN_TTL_MS = 600_000
+
+export function setReloginTargetInPool(
+  accountId: string,
+  providerID: string,
+  now: number,
+  path: string = POOL_FILE,
+): void {
+  mutatePoolFile((pool) => {
+    pool.relogin = {
+      accountId,
+      providerID,
+      expiresAt: now + RELOGIN_TTL_MS,
+    }
+  }, path)
+}
+
+export function clearReloginTargetInPool(path: string = POOL_FILE): void {
+  mutatePoolFile((pool) => {
+    delete pool.relogin
+  }, path)
+}
+
+/**
+ * Resolve the provider OAuth method by label instead of hardcoding an index:
+ * opencode aggregates auth methods from every plugin registered for a provider,
+ * so this plugin's position is not stable. Prefer its pooled-login label, then
+ * fall back to the provider's first OAuth method when no such label is present.
+ */
+export function pickAuthMethodIndex(
+  methods: readonly { type?: string; label?: string }[] | undefined,
+): number | null {
+  const pooled = methods?.findIndex(
+    (method) =>
+      method.type === 'oauth' &&
+      method.label?.toLowerCase().includes('load balancer'),
+  )
+  if (pooled !== undefined && pooled >= 0) return pooled
+  const oauth = methods?.findIndex((method) => method.type === 'oauth')
+  return oauth !== undefined && oauth >= 0 ? oauth : null
+}
 
 export function renameInPool(
   id: string,

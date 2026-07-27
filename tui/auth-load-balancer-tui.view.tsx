@@ -12,7 +12,7 @@
  *     per provider, sorted by the scheduler's score (highest = use next), showing
  *     the score + use-order, usage + reset countdowns, in-use marker, and state.
  *     Click any account row for a menu to Rename (prompt), Disable/Enable
- *     (toggle), or Delete (confirm) it, written straight to the pool file.
+ *     (toggle), Re-login (provider OAuth), or Delete (confirm) it.
  *
  * The ranking is computed by the SAME code the server scheduler uses — imported from a
  * byte-identical copy of src/scheduler/score-core.ts installed alongside this file
@@ -31,16 +31,19 @@ import {
 } from './auth-load-balancer-scoring'
 import {
   cfg,
+  clearReloginTargetInPool,
   compareAscii,
   deleteFromPool,
   MANUAL_DISABLED_REASON,
   pct,
+  pickAuthMethodIndex,
   type PoolShape,
   readPool,
   renameInPool,
   sessionAccountId,
   sessionFallback,
   setDisabledInPool,
+  setReloginTargetInPool,
   stateOf,
   tierResets,
   toScore,
@@ -170,6 +173,7 @@ function BottomBar(props: { api: TuiPluginApi }) {
 interface Row extends WindowDisplay {
   id: string
   label: string
+  providerID: string
   current: boolean
   score: number | null
   rank: number | null
@@ -222,6 +226,7 @@ function SidebarPanel(props: {
         return {
           id: a.id,
           label: a.label,
+          providerID,
           current: sessionAcct === a.id,
           score: available ? score : null,
           rank: available ? rank : null,
@@ -277,7 +282,115 @@ function SidebarPanel(props: {
     )
   }
 
-  // Click an account -> a small menu so Rename, Disable/Enable, and Delete are
+  async function openRelogin(
+    id: string,
+    label: string,
+    providerID: string,
+  ): Promise<void> {
+    try {
+      const methods = (await props.api.client.provider.auth()).data?.[
+        providerID
+      ]
+      const method = pickAuthMethodIndex(methods)
+      if (method === null) {
+        props.api.ui.toast({
+          variant: 'error',
+          message: `No OAuth login method is registered for ${providerID}.`,
+        })
+        return
+      }
+
+      const auth = (
+        await props.api.client.provider.oauth.authorize({
+          providerID,
+          method,
+        })
+      ).data
+      if (!auth) {
+        props.api.ui.toast({
+          variant: 'error',
+          message: `Unable to start OAuth login for ${providerID}.`,
+        })
+        return
+      }
+
+      setReloginTargetInPool(id, providerID, Date.now())
+
+      const completeRelogin = async (code?: string): Promise<void> => {
+        try {
+          const completed = (
+            await props.api.client.provider.oauth.callback({
+              providerID,
+              method,
+              ...(code === undefined ? {} : { code }),
+            })
+          ).data
+          if (completed) {
+            props.api.ui.toast({
+              variant: 'success',
+              message: `Re-login complete for ${label}.`,
+            })
+            // The existing 3s usePool poll observes the consumed intent and
+            // cleared disabledReason; no manual state refresh is needed.
+          } else {
+            clearReloginTargetInPool()
+            props.api.ui.toast({
+              variant: 'error',
+              message: `Re-login failed for ${label}.`,
+            })
+          }
+          dialog().clear()
+        } catch {
+          clearReloginTargetInPool()
+          dialog().clear()
+          props.api.ui.toast({
+            variant: 'error',
+            message: `Re-login failed for ${label}.`,
+          })
+        }
+      }
+
+      if (auth.method === 'auto') {
+        await completeRelogin()
+        return
+      }
+
+      dialog().replace(() =>
+        props.api.ui.DialogPrompt({
+          title: `Re-login "${label}"`,
+          description: () => (
+            <box>
+              <text>{auth.instructions}</text>
+              <text>{auth.url}</text>
+            </box>
+          ),
+          placeholder: 'Paste the authorization code',
+          onConfirm: (code: string) => {
+            const trimmed = code.trim()
+            if (!trimmed) {
+              clearReloginTargetInPool()
+              dialog().clear()
+              return
+            }
+            void completeRelogin(trimmed)
+          },
+          onCancel: () => {
+            clearReloginTargetInPool()
+            dialog().clear()
+          },
+        }),
+      )
+    } catch {
+      clearReloginTargetInPool()
+      dialog().clear()
+      props.api.ui.toast({
+        variant: 'error',
+        message: `Re-login failed for ${label}.`,
+      })
+    }
+  }
+
+  // Click an account -> a small menu so Rename, Disable/Enable, Re-login, and Delete are
   // all reachable. Deliberately NOT api.ui.DialogSelect: that always renders an
   // auto-focused filter <input>, and a focused opentui input swallows the FIRST
   // Esc (to blur itself) — so the menu needed TWO Esc presses to close. A plain
@@ -287,6 +400,7 @@ function SidebarPanel(props: {
   function openMenu(
     id: string,
     label: string,
+    providerID: string,
     manuallyDisabled: boolean,
   ): void {
     const items: { title: string; run: () => void }[] = [
@@ -300,6 +414,12 @@ function SidebarPanel(props: {
         run: () => {
           setDisabledInPool(id, !manuallyDisabled)
           dialog().clear()
+        },
+      },
+      {
+        title: 'Re-login — re-authorize with the provider',
+        run: () => {
+          void openRelogin(id, label, providerID)
         },
       },
       { title: 'Delete — remove from pool', run: () => openDelete(id, label) },
@@ -351,7 +471,7 @@ function SidebarPanel(props: {
           <b>Auth accounts</b>
           <span style={{ fg: color().textMuted }}>
             {' '}
-            (click: rename / disable / delete)
+            (click: rename / disable / re-login / delete)
           </span>
         </text>
         <For each={groups()}>
@@ -362,7 +482,7 @@ function SidebarPanel(props: {
                 {(r) => (
                   <box
                     onMouseUp={() =>
-                      openMenu(r.id, r.label, r.manuallyDisabled)
+                      openMenu(r.id, r.label, r.providerID, r.manuallyDisabled)
                     }
                   >
                     <text

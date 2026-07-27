@@ -106,6 +106,22 @@ export interface PoolAccount {
  */
 export const MANUAL_DISABLED_REASON = 'manually disabled'
 
+/**
+ * Re-login intents expire after ten minutes. A bounded lifetime prevents an
+ * abandoned TUI OAuth flow from redirecting a later, unrelated provider login
+ * onto the account row that happened to be clicked earlier.
+ */
+export const RELOGIN_TTL_MS = 600_000
+
+export interface ReloginIntent {
+  /** `PoolAccount.id` the freshly exchanged tokens must land on. */
+  accountId: string
+  /** Provider the re-login was started for; an intent for another provider is ignored. */
+  providerID: string
+  /** epoch ms after which the intent is stale and dropped at the read boundary. */
+  expiresAt: number
+}
+
 /** A conversation's sticky account assignment (preserves prompt cache across turns). */
 export interface SessionAssignment {
   accountId: string
@@ -127,6 +143,15 @@ export interface SessionAssignment {
 export interface PoolFile {
   version: 1
   accounts: PoolAccount[]
+  /**
+   * Short-lived TUI → server handshake consumed by the first `addAccount` for
+   * this provider. It identifies the clicked pool row when a provider rotates
+   * refresh tokens and exposes no stable account id (Anthropic); without it a
+   * completed re-login appends a duplicate while leaving the revoked row
+   * behind. Absent in the steady state so `JSON.stringify` keeps the pool file
+   * compact.
+   */
+  relogin?: ReloginIntent
   /**
    * providerID -> account that most recently served a request. Drives the ▶
    * "in use" marker in the status tool/CLI and the TUI bottom bar/sidebar;

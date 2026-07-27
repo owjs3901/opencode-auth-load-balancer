@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 
 import {
+  clearReloginTargetInPool,
   deleteFromPool,
   type FsOps,
   isAbsentOrPlainRecord,
@@ -13,13 +14,16 @@ import {
   MANUAL_DISABLED_REASON,
   mutatePoolFile,
   pct,
+  pickAuthMethodIndex,
   type PoolAccount,
   poolFile,
   readPool,
+  RELOGIN_TTL_MS,
   renameInPool,
   sessionAccountId,
   sessionFallback,
   setDisabledInPool,
+  setReloginTargetInPool,
   stateOf,
   tierResets,
   toPoolShape,
@@ -517,6 +521,73 @@ describe('setDisabledInPool (end-to-end against a scratch file)', () => {
     )
     setDisabledInPool('missing', true, path)
     expect(readPool(path).accounts?.[0]?.disabledReason).toBeUndefined()
+  })
+})
+
+describe('setReloginTargetInPool / clearReloginTargetInPool', () => {
+  test('writes the clicked account and provider with a deterministic expiry', () => {
+    const path = scratchPath('relogin-set')
+    const now = 1_000_000
+    writeFileSync(path, JSON.stringify({ accounts: [] }))
+
+    setReloginTargetInPool('account-a', 'anthropic', now, path)
+
+    expect(readPool(path).relogin).toEqual({
+      accountId: 'account-a',
+      providerID: 'anthropic',
+      expiresAt: now + RELOGIN_TTL_MS,
+    })
+  })
+
+  test('removes an existing re-login target', () => {
+    const path = scratchPath('relogin-clear')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        accounts: [],
+        relogin: {
+          accountId: 'account-a',
+          providerID: 'anthropic',
+          expiresAt: 1_600_000,
+        },
+      }),
+    )
+
+    clearReloginTargetInPool(path)
+
+    expect(readPool(path).relogin).toBeUndefined()
+  })
+})
+
+describe('pickAuthMethodIndex', () => {
+  test('prefers the first pooled OAuth label regardless of case', () => {
+    expect(
+      pickAuthMethodIndex([
+        { type: 'oauth', label: 'Default OAuth' },
+        { type: 'api', label: 'Load Balancer API key' },
+        {
+          type: 'oauth',
+          label: 'Claude Pro/Max (add account to LOAD BALANCER)',
+        },
+        { type: 'oauth', label: 'Another load balancer method' },
+      ]),
+    ).toBe(2)
+  })
+
+  test('falls back to the first OAuth method when no pooled label matches', () => {
+    expect(
+      pickAuthMethodIndex([
+        { type: 'api', label: 'API key' },
+        { type: 'oauth', label: 'Provider login' },
+        { type: 'oauth', label: 'Other login' },
+      ]),
+    ).toBe(1)
+  })
+
+  test('returns null when OAuth is unavailable', () => {
+    expect(pickAuthMethodIndex([{ type: 'api', label: 'API key' }])).toBeNull()
+    expect(pickAuthMethodIndex([])).toBeNull()
+    expect(pickAuthMethodIndex(undefined)).toBeNull()
   })
 })
 

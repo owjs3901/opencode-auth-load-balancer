@@ -1,19 +1,34 @@
 name: CI & Release
 
 # Single pipeline: the `quality` gate (typecheck / lint / test / build) must pass
-# before the `release` job (changepacks) is allowed to run — enforced via `needs`.
+# before anything is released — enforced via `needs`.
 #
 # changepacks-driven npm publishing:
-# On a pull request: the `release` job's changepacks/action posts/updates a
-# comment summarising the pending changepacks (whether the package will bump).
+# On a pull request: `release` posts/updates a comment summarising the pending
+# changepacks (whether the package will bump).
 # On push to main:
-# - if changepack logs (.changepacks/changepack_log_*.json) are pending, the
-#   action opens/updates a "Update Versions" PR that runs `changepacks update`;
-# - once that PR is merged (logs consumed), the action publishes the bumped
-#   package to npm (publish: true) and creates a GitHub release + tag.
+# - if changepack logs (.changepacks/changepack_log_*.json) are pending, `release`
+#   opens/updates a "Update Versions" PR that runs `changepacks update`;
+# - once that PR is merged (logs consumed), `release` pushes the tag and creates a
+#   draft GitHub release, reporting it in `pending_releases`; `publish` then ships
+#   the package to npm, and `finalize` un-drafts the release. The draft is a
+#   durable receipt: a failed `publish` leaves it pending and the next run retries
+#   it instead of duplicating the release.
 #
-# Uses NPM Trusted Publishing (OIDC) — no NPM_TOKEN secret required.
-# Configure the package on npmjs.com: package Settings > Trusted Publishers.
+# Why `npm publish` and not the action's built-in (bun-backed) `publish: true`:
+# bun cannot perform the npm OIDC token exchange (oven-sh/bun#22423), and it also
+# ignores the `NPM_CONFIG_USERCONFIG` .npmrc that actions/setup-node writes — so
+# the built-in publish failed with "missing authentication" even on its dry-run.
+# Publishing therefore lives in its own `id-token: write` job running npm, whose
+# OIDC support needs npm >= 11.5.1 (Node 24 bundles npm 11.16+).
+#
+# Trusted Publisher setup (npmjs.com > package > Settings > Trusted Publisher):
+# GitHub Actions / owner `owjs3901` / repo `opencode-auth-load-balancer` /
+# workflow `release.yml`. That page only exists once the package has been
+# published at least once, so `NODE_AUTH_TOKEN` stays wired as fallback auth —
+# npm's OIDC exchange is opportunistic and falls back to the token when no
+# trusted publisher is configured. Once the first publish lands and the trusted
+# publisher is registered, drop that env line and revoke the NPM_TOKEN secret.
 
 on:
   push:
@@ -23,9 +38,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
-  id-token: write
+  contents: read
 
 concurrency:
   group: ci-release-${{ github.ref }}
@@ -58,38 +71,86 @@ jobs:
         run: bun run build
 
   release:
-    name: changepacks (version PR / publish)
+    name: changepacks (version PR / release)
     # Gate: release runs ONLY if the quality job fully passed.
     needs: quality
     runs-on: ubuntu-latest
+    permissions:
+      # Create branches, commits and tags.
+      contents: write
+      # Create/update the "Update Versions" PR and its comment.
+      pull-requests: write
     steps:
       - uses: actions/checkout@v7
         with:
           # changepacks detects changes from git history — needs the full tree.
           fetch-depth: 0
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.9"
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Install dependencies
-        # NOT --frozen-lockfile: after the "Update Versions" PR bumps the
-        # package.json version, this re-syncs bun.lock before publish.
-        run: bun install
-
-      - name: Build (produce dist/ for publish)
-        run: bun run build
-
       - name: Changepacks
         uses: changepacks/action@main
         id: changepacks
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          publish: true
+          # Publishing is done by the `publish` job below, not by the action.
+          publish: false
+    outputs:
+      changepacks: ${{ steps.changepacks.outputs.changepacks }}
+      pending_releases: ${{ steps.changepacks.outputs.pending_releases }}
+
+  publish:
+    name: npm publish (OIDC)
+    needs: release
+    # Only when changepacks actually released this package.
+    if: contains(needs.release.outputs.changepacks, 'package.json')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for the npm OIDC token exchange (Trusted Publishing).
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.9"
+
+      - name: Install dependencies
+        # NOT --frozen-lockfile: the merged "Update Versions" commit bumps the
+        # package.json version, so bun.lock is re-synced here before publish.
+        run: bun install
+
+      - name: Build (produce dist/ for publish)
+        run: bun run build
+
+      # setup-node comes AFTER the bun steps: it rewrites the npm config that
+      # only the publish below consumes.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Publish to npm
+        # --ignore-scripts: dist/ is already built above, and the `prepare`
+        # (husky) hook has nothing to do in a publish container.
+        run: npm publish --access public --ignore-scripts
         env:
+          # Fallback auth until the trusted publisher is registered (see header).
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  finalize:
+    name: finalize GitHub release
+    needs: [release, publish]
+    # Guard: an empty receipt makes the action fall through to its full
+    # changepacks flow, which would run here without a checkout.
+    if: needs.release.outputs.pending_releases != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Finalize-only: publishes the draft releases recorded in the receipt.
+      # Needs no checkout — it talks to the GitHub API directly.
+      - uses: changepacks/action@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          finalize_releases: ${{ needs.release.outputs.pending_releases }}

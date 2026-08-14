@@ -20,7 +20,7 @@ import { selectForSession } from './scheduler/select'
 import { deriveSessionKey, SESSION_HEADER } from './session'
 import type { PoolAccount, UsageSnapshot } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
-import { refreshUsageInBackground } from './usage-refresh'
+import { refreshAllUsageInBackground } from './usage-refresh'
 import { ignore, sleepAbortable } from './util'
 
 const ACCOUNT_COOLDOWN_MS = 5 * 60 * 1000
@@ -551,9 +551,17 @@ export function createLoadBalancedFetch(
       // latency). Passes THIS iteration's pool snapshot so the seeding path
       // adds no extra pool read on the request hot path; only the first round
       // fires, so a 429-rotation retry doesn't re-trigger it.
+      //
+      // ALL providers, not just `adapter`: response headers keep the provider
+      // you are actually requesting fresh, so scoping this poll to that same
+      // provider left an IDLE one (Codex while you work in Claude) with no
+      // refresh cycle at all after its startup seed — its dashboard/TUI
+      // numbers froze for the whole opencode process. The staleness gate and
+      // per-account throttle inside make the extra providers free in the
+      // steady state.
       if (!usageSeeded) {
         usageSeeded = true
-        void refreshUsageInBackground(adapter, now, pool).catch(ignore)
+        void refreshAllUsageInBackground(now, pool).catch(ignore)
       }
 
       const selection = selectForSession(

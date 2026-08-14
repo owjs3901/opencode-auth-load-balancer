@@ -15,7 +15,10 @@ import { openaiAdapter } from './providers/openai/adapter'
 import type { ProviderAdapter } from './providers/types'
 import { SESSION_HEADER } from './session'
 import { readStatus, renderStatus } from './status'
-import { refreshUsageInBackground } from './usage-refresh'
+import {
+  refreshAllUsageInBackground,
+  refreshUsageInBackground,
+} from './usage-refresh'
 import { ignore } from './util'
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -190,17 +193,15 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
         // throttle keeps repeat calls cheap, and failures fall back to the
         // last-known snapshot (never fail the dashboard).
         const now = Date.now()
-        // ONE serialized pool read shared by both refresh calls: without the
-        // snapshot each call performs its own readPool() just for the
-        // staleness gates (the actual usage write still goes through
-        // mutatePool, which re-reads under the lock). The final readStatus
-        // below re-reads regardless, so freshly polled numbers still render.
+        // ONE serialized pool read for the whole refresh: without the snapshot
+        // it performs its own readPool() just for the staleness gates (the
+        // actual usage write still goes through mutatePool, which re-reads
+        // under the lock). The final readStatus below re-reads regardless, so
+        // freshly polled numbers still render. Every provider in one call —
+        // the registry (providers/registry.ts) is the single source of truth,
+        // so a third provider needs no edit here.
         const pool = await readPool()
-        await Promise.all(
-          [anthropicAdapter, openaiAdapter].map((adapter) =>
-            refreshUsageInBackground(adapter, now, pool).catch(ignore),
-          ),
-        )
+        await refreshAllUsageInBackground(now, pool).catch(ignore)
         // ONE clock for ranking (readStatus → available/rank/displayUtil) AND
         // rendering (renderStatus → stateOf/relTime): two separate Date.now()
         // stamps let an account whose cooldown expires between them rank as

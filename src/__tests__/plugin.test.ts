@@ -29,6 +29,7 @@ import { loadConfig } from '../scheduler/config'
 import { SESSION_HEADER } from '../session'
 import type { PoolAccount } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
+import { sleep } from '../util'
 import { testAccount } from './fixtures/account'
 import { type Responder, responderFetch } from './fixtures/fetch-mock'
 
@@ -120,6 +121,27 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
     },
     ...over,
   })
+}
+
+/**
+ * Poll the pool until `id`'s row satisfies `done`, then return it. For the
+ * fire-and-forget writes the request path deliberately does NOT await (usage
+ * seeding): a fixed sleep would either flake on a slow machine or pad every
+ * run. Throws on timeout so a broken wiring fails loudly instead of asserting
+ * against a stale row.
+ */
+async function waitForAccount(
+  id: string,
+  done: (a: PoolAccount) => boolean,
+  timeoutMs = 5_000,
+): Promise<PoolAccount> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const found = (await readPool()).accounts.find((a) => a.id === id)
+    if (found && done(found)) return found
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${id}`)
+    await sleep(10)
+  }
 }
 
 /**
@@ -1967,6 +1989,66 @@ describe('out-of-band weekly reset (e.g. a promotional server-side quota reset)'
       (x) => x.id === 'status-stale',
     )
     expect(stored?.usage.weekly?.utilization).toBeCloseTo(0.03, 5)
+  })
+
+  test('an ANTHROPIC request refreshes a stale OPENAI account (an idle provider must not freeze)', async () => {
+    // Regression lock for the idle-provider freeze. Usage converges to
+    // server-side truth from response headers — which only ever arrive for the
+    // provider you are actually requesting — or from the usage-endpoint poll.
+    // While that poll was scoped to the requesting provider's own adapter, a
+    // provider you did not send requests to (Codex while you work in Claude)
+    // had NO refresh cycle at all after its one startup seed: its dashboard/
+    // TUI numbers stayed pinned at the launch-time snapshot for the entire
+    // opencode process, while the active provider updated every request.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({ id: 'claude-active', label: 'claude-active' }), // fresh -> not polled
+        account({
+          id: 'codex-idle',
+          label: 'codex-idle',
+          providerID: 'openai',
+          access: 'tokO',
+          usage: { hourly: null, weekly: null, capturedAt: 0 }, // stale
+        }),
+      )
+    })
+    const weeklyResetSec = Math.floor((now + 3 * 24 * 60 * 60 * 1000) / 1000)
+    respond = (url) => {
+      if (url.includes('/wham/usage'))
+        return new Response(
+          JSON.stringify({
+            rate_limit: {
+              primary_window: {
+                used_percent: 7,
+                reset_at: Math.floor((now + 60 * 60 * 1000) / 1000),
+              },
+              secondary_window: {
+                used_percent: 64,
+                reset_at: weeklyResetSec,
+              },
+            },
+          }),
+          { status: 200 },
+        )
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+
+    // The seeding call is fire-and-forget (it must never add request latency),
+    // so poll the pool for the write instead of racing a fixed sleep.
+    const codex = await waitForAccount(
+      'codex-idle',
+      (a) => a.usage.capturedAt !== 0,
+    )
+    expect(codex.usage.weekly?.utilization).toBeCloseTo(0.64, 5)
+    expect(codex.usage.weekly?.resetAt).toBe(weeklyResetSec * 1000)
+    expect(codex.usage.hourly?.utilization).toBeCloseTo(0.07, 5)
   })
 })
 

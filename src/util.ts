@@ -63,11 +63,12 @@ export function isFiniteNumber(v: unknown): v is number {
 
 /**
  * True for a plain JSON object (non-null `object`, not an array). Shared
- * trust-boundary predicate for the two consumers that accept arbitrary JSON
+ * trust-boundary predicate for the consumers that accept arbitrary JSON
  * shapes: the user-editable pool file's `lastSelected` / `sessions`
- * containers and session rows (`pool/store.ts`), and the incoming `system`
+ * containers and session rows (`pool/store.ts`), the incoming `system`
  * prompt blocks in the Anthropic request transform
- * (`providers/anthropic/transform.ts`). NOTE:
+ * (`providers/anthropic/transform.ts`), and the Codex `/wham/usage`
+ * `rate_limit` envelope (`providers/openai/usage.ts`). NOTE:
  * `tui/auth-load-balancer-tui.logic.ts` ships its OWN `isPlainRecordValue`
  * copy by design — the TUI runtime cannot import `src/`.
  */

@@ -85,19 +85,73 @@ export interface PoolAccount {
    * parse without a cast.
    */
   opusCooldownUntil?: number
-  /** Non-null when the account needs manual re-login (e.g. revoked refresh token). */
+  /**
+   * Non-null when the scheduler skips this account. Two sources, both gated by
+   * `isAvailable`: the automatic `invalid_grant: re-login required (…)` reason
+   * written on a revoked refresh token (`src/refresh.ts`), and the manual
+   * `MANUAL_DISABLED_REASON` sentinel written by the disable action (TUI menu /
+   * `auth_lb_disable` tool). The dashboards distinguish the two to render
+   * `disabled` (a user turned it off) vs `re-login` (needs a fresh OAuth login).
+   */
   disabledReason: string | null
+}
+
+/**
+ * Sentinel `disabledReason` written by the MANUAL disable action (the TUI
+ * sidebar menu and the `auth_lb_disable` tool), distinct from the automatic
+ * `invalid_grant: re-login required (…)` reason `src/refresh.ts` writes when a
+ * refresh token is revoked. Both are non-null so `isAvailable` skips the
+ * account; the value is kept distinct only so the dashboards can render
+ * `disabled` (a user turned it off) rather than `re-login` (needs a fresh login).
+ */
+export const MANUAL_DISABLED_REASON = 'manually disabled'
+
+/**
+ * Re-login intents expire after ten minutes. A bounded lifetime prevents an
+ * abandoned TUI OAuth flow from redirecting a later, unrelated provider login
+ * onto the account row that happened to be clicked earlier.
+ */
+export const RELOGIN_TTL_MS = 600_000
+
+export interface ReloginIntent {
+  /** `PoolAccount.id` the freshly exchanged tokens must land on. */
+  accountId: string
+  /** Provider the re-login was started for; an intent for another provider is ignored. */
+  providerID: string
+  /** epoch ms after which the intent is stale and dropped at the read boundary. */
+  expiresAt: number
 }
 
 /** A conversation's sticky account assignment (preserves prompt cache across turns). */
 export interface SessionAssignment {
   accountId: string
   updatedAt: number
+  /**
+   * Set when THIS session's most recent successful request was served on an
+   * auto-downgraded fallback model (the requested model tier's weekly cap is
+   * exhausted pool-wide, so the request descended the fallback ladder). Read by
+   * the TUI bottom bar to PERSISTENTLY surface the degrade — the `onModelFallback`
+   * toast is transient and gone by the next turn, yet the session keeps running
+   * on the fallback model. `from`/`to` are the raw model ids (original requested
+   * model → served model), matching the toast wording. The whole session row is
+   * overwritten on every success, so the next request served on the requested
+   * model naturally clears this back to `undefined`.
+   */
+  fallback?: { from: string; to: string }
 }
 
 export interface PoolFile {
   version: 1
   accounts: PoolAccount[]
+  /**
+   * Short-lived TUI → server handshake consumed by the first `addAccount` for
+   * this provider. It identifies the clicked pool row when a provider rotates
+   * refresh tokens and exposes no stable account id (Anthropic); without it a
+   * completed re-login appends a duplicate while leaving the revoked row
+   * behind. Absent in the steady state so `JSON.stringify` keeps the pool file
+   * compact.
+   */
+  relogin?: ReloginIntent
   /**
    * providerID -> account that most recently served a request. Drives the ▶
    * "in use" marker in the status tool/CLI and the TUI bottom bar/sidebar;

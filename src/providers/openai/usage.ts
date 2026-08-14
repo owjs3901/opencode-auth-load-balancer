@@ -127,7 +127,7 @@ function endpointWindow(
 /**
  * Poll GET /wham/usage for authoritative 5h + weekly utilization without
  * consuming inference quota, assigning each returned window to its role BY
- * DURATION (see WEEK_SECONDS above) rather than by position. Null on failure.
+ * DURATION (see `isWeeklyMinutes`) rather than by position. Null on failure.
  * Sends the Codex CLI's `codex-cli` UA and the `chatgpt-account-id` (from the
  * stored id or, as a fallback, decoded from the access-token JWT) — required
  * for team/workspace accounts.

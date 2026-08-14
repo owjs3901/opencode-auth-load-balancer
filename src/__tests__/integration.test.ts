@@ -219,6 +219,103 @@ describe('anthropic end-to-end', () => {
     // internal routing header must not leak upstream
     expect(msgCalls[0]?.headers.get(SESSION_HEADER)).toBeNull()
   })
+
+  test('a successful serve clears a STALE long cooldown on the account that served it (active-workhorse self-heal)', async () => {
+    // The endpoint-poll reconciliation (usage-refresh) SKIPS an account whose
+    // usage was just captured — exactly a continuously (degraded-)served
+    // account — so a stale weekly-reset cooldown latch on the pool's active
+    // workhorse would never clear there. `A` is the only account (so it is
+    // degraded-selected and serves), has full headroom, but carries a days-out
+    // stale cooldown. Its 2xx's fresh headers prove headroom, so recordSuccess
+    // must drop the latch and let it rejoin normal selection.
+    const now = Date.now()
+    await seed([
+      testAccount({
+        id: 'A',
+        providerID: 'anthropic',
+        label: 'A',
+        access: 'tokA',
+        refresh: 'ref-A',
+        expires: now + HOUR,
+        usage: {
+          hourly: null,
+          weekly: { utilization: 0.02, resetAt: now + 3 * 24 * HOUR },
+          capturedAt: now,
+        },
+        cooldownUntil: now + 3 * 24 * HOUR, // stale latch ~ weekly reset
+      }),
+    ])
+    mockFetch(() => {
+      const headers = new Headers({
+        'anthropic-ratelimit-unified-5h-utilization': '0.09',
+        'anthropic-ratelimit-unified-5h-reset': String(
+          Math.floor((now + 5 * HOUR) / 1000),
+        ),
+        'anthropic-ratelimit-unified-7d-utilization': '0.02',
+        'anthropic-ratelimit-unified-7d-reset': String(
+          Math.floor((now + 3 * 24 * HOUR) / 1000),
+        ),
+      })
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers,
+      })
+    })
+    const lbFetch = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lbFetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    expect(res.status).toBe(200)
+    const A = (await readPool()).accounts.find((x) => x.id === 'A')
+    expect(A?.cooldownUntil).toBe(0)
+  })
+
+  test('a successful serve does NOT clear the cooldown when the fresh headers still show exhaustion (safety gate)', async () => {
+    // The !isExhausted gate: if the 2xx's own usage headers show the account is
+    // still at/over the exhaustion threshold, the long cooldown is real and
+    // must stand — only genuine headroom clears it.
+    const now = Date.now()
+    await seed([
+      testAccount({
+        id: 'A',
+        providerID: 'anthropic',
+        label: 'A',
+        access: 'tokA',
+        refresh: 'ref-A',
+        expires: now + HOUR,
+        usage: {
+          hourly: null,
+          weekly: { utilization: 0.5, resetAt: now + 3 * 24 * HOUR },
+          capturedAt: now,
+        },
+        cooldownUntil: now + 3 * 24 * HOUR,
+      }),
+    ])
+    mockFetch(() => {
+      const headers = new Headers({
+        'anthropic-ratelimit-unified-5h-utilization': '0.10',
+        'anthropic-ratelimit-unified-5h-reset': String(
+          Math.floor((now + 5 * HOUR) / 1000),
+        ),
+        'anthropic-ratelimit-unified-7d-utilization': '1', // still exhausted
+        'anthropic-ratelimit-unified-7d-reset': String(
+          Math.floor((now + 3 * 24 * HOUR) / 1000),
+        ),
+      })
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers,
+      })
+    })
+    const lbFetch = createLoadBalancedFetch(anthropicAdapter)
+    await lbFetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    const A = (await readPool()).accounts.find((x) => x.id === 'A')
+    expect(A?.cooldownUntil).toBeGreaterThan(now)
+  })
 })
 
 describe('openai/codex end-to-end', () => {

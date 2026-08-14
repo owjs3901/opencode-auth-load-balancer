@@ -5,17 +5,25 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 
 import {
+  clearReloginTargetInPool,
   deleteFromPool,
   type FsOps,
   isAbsentOrPlainRecord,
   isFiniteNumber,
   isPlainRecordValue,
+  MANUAL_DISABLED_REASON,
   mutatePoolFile,
   pct,
+  pickAuthMethodIndex,
   type PoolAccount,
   poolFile,
   readPool,
+  RELOGIN_TTL_MS,
   renameInPool,
+  sessionAccountId,
+  sessionFallback,
+  setDisabledInPool,
+  setReloginTargetInPool,
   stateOf,
   tierResets,
   toPoolShape,
@@ -469,6 +477,120 @@ describe('renameInPool / deleteFromPool (end-to-end against a scratch file)', ()
   })
 })
 
+describe('setDisabledInPool (end-to-end against a scratch file)', () => {
+  test('disables a matching account with the manual sentinel', () => {
+    const path = scratchPath('disable-hit')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        accounts: [{ id: 'a', providerID: 'anthropic', label: 'A' }],
+      }),
+    )
+    setDisabledInPool('a', true, path)
+    expect(readPool(path).accounts?.[0]?.disabledReason).toBe(
+      MANUAL_DISABLED_REASON,
+    )
+  })
+
+  test('re-enables a disabled account (clears disabledReason to null)', () => {
+    const path = scratchPath('enable-hit')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        accounts: [
+          {
+            id: 'a',
+            providerID: 'anthropic',
+            label: 'A',
+            disabledReason: MANUAL_DISABLED_REASON,
+          },
+        ],
+      }),
+    )
+    setDisabledInPool('a', false, path)
+    expect(readPool(path).accounts?.[0]?.disabledReason).toBeNull()
+  })
+
+  test('is a no-op for an unknown id', () => {
+    const path = scratchPath('disable-miss')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        accounts: [{ id: 'a', providerID: 'anthropic', label: 'A' }],
+      }),
+    )
+    setDisabledInPool('missing', true, path)
+    expect(readPool(path).accounts?.[0]?.disabledReason).toBeUndefined()
+  })
+})
+
+describe('setReloginTargetInPool / clearReloginTargetInPool', () => {
+  test('writes the clicked account and provider with a deterministic expiry', () => {
+    const path = scratchPath('relogin-set')
+    const now = 1_000_000
+    writeFileSync(path, JSON.stringify({ accounts: [] }))
+
+    setReloginTargetInPool('account-a', 'anthropic', now, path)
+
+    expect(readPool(path).relogin).toEqual({
+      accountId: 'account-a',
+      providerID: 'anthropic',
+      expiresAt: now + RELOGIN_TTL_MS,
+    })
+  })
+
+  test('removes an existing re-login target', () => {
+    const path = scratchPath('relogin-clear')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        accounts: [],
+        relogin: {
+          accountId: 'account-a',
+          providerID: 'anthropic',
+          expiresAt: 1_600_000,
+        },
+      }),
+    )
+
+    clearReloginTargetInPool(path)
+
+    expect(readPool(path).relogin).toBeUndefined()
+  })
+})
+
+describe('pickAuthMethodIndex', () => {
+  test('prefers the first pooled OAuth label regardless of case', () => {
+    expect(
+      pickAuthMethodIndex([
+        { type: 'oauth', label: 'Default OAuth' },
+        { type: 'api', label: 'Load Balancer API key' },
+        {
+          type: 'oauth',
+          label: 'Claude Pro/Max (add account to LOAD BALANCER)',
+        },
+        { type: 'oauth', label: 'Another load balancer method' },
+      ]),
+    ).toBe(2)
+  })
+
+  test('falls back to the first OAuth method when no pooled label matches', () => {
+    expect(
+      pickAuthMethodIndex([
+        { type: 'api', label: 'API key' },
+        { type: 'oauth', label: 'Provider login' },
+        { type: 'oauth', label: 'Other login' },
+      ]),
+    ).toBe(1)
+  })
+
+  test('returns null when OAuth is unavailable', () => {
+    expect(pickAuthMethodIndex([{ type: 'api', label: 'API key' }])).toBeNull()
+    expect(pickAuthMethodIndex([])).toBeNull()
+    expect(pickAuthMethodIndex(undefined)).toBeNull()
+  })
+})
+
 describe('isFiniteNumber', () => {
   test('rejects NaN/±Infinity/non-numbers, accepts finite numbers', () => {
     expect(isFiniteNumber(1)).toBe(true)
@@ -541,6 +663,98 @@ describe('toScore', () => {
   })
 })
 
+describe('sessionAccountId (in-use marker is the VIEWER session, not global lastSelected)', () => {
+  test('returns the account THIS session is pinned to, scoped per provider', () => {
+    const pool = {
+      sessions: {
+        'anthropic:s:ses_1': { accountId: 'acc-a' },
+        'anthropic:s:ses_2': { accountId: 'acc-b' },
+        'openai:s:ses_1': { accountId: 'acc-o' },
+      },
+    }
+    expect(sessionAccountId(pool, 'anthropic', 'ses_1')).toBe('acc-a')
+    expect(sessionAccountId(pool, 'anthropic', 'ses_2')).toBe('acc-b')
+    // same session id, different provider -> different pin
+    expect(sessionAccountId(pool, 'openai', 'ses_1')).toBe('acc-o')
+  })
+
+  test('undefined when there is no session (home screen)', () => {
+    const pool = { sessions: { 'anthropic:s:ses_1': { accountId: 'acc-a' } } }
+    expect(sessionAccountId(pool, 'anthropic', undefined)).toBeUndefined()
+  })
+
+  test('undefined when this session has no pin for the provider yet', () => {
+    const pool = { sessions: { 'anthropic:s:ses_1': { accountId: 'acc-a' } } }
+    expect(sessionAccountId(pool, 'openai', 'ses_1')).toBeUndefined() // provider not used
+    expect(sessionAccountId(pool, 'anthropic', 'ses_X')).toBeUndefined() // unknown session
+  })
+
+  test('undefined when sessions is absent or the entry has no accountId', () => {
+    expect(sessionAccountId({}, 'anthropic', 'ses_1')).toBeUndefined()
+    expect(
+      sessionAccountId(
+        { sessions: { 'anthropic:s:ses_1': {} } },
+        'anthropic',
+        'ses_1',
+      ),
+    ).toBeUndefined()
+  })
+})
+
+describe('sessionFallback (persisted model downgrade surfaced on the bottom bar)', () => {
+  test('returns the recorded requested→served model ids for the viewer session', () => {
+    const pool = {
+      sessions: {
+        'anthropic:s:ses_1': {
+          accountId: 'acc-a',
+          fallback: { from: 'claude-fable-5', to: 'claude-sonnet-4-6' },
+        },
+        'openai:s:ses_1': { accountId: 'acc-o' },
+      },
+    }
+    expect(sessionFallback(pool, 'anthropic', 'ses_1')).toEqual({
+      from: 'claude-fable-5',
+      to: 'claude-sonnet-4-6',
+    })
+  })
+
+  test('undefined when there is no session (home screen)', () => {
+    const pool = {
+      sessions: {
+        'anthropic:s:ses_1': {
+          accountId: 'a',
+          fallback: { from: 'x', to: 'y' },
+        },
+      },
+    }
+    expect(sessionFallback(pool, 'anthropic', undefined)).toBeUndefined()
+  })
+
+  test('undefined when the session ran on its requested model (no downgrade recorded)', () => {
+    expect(sessionFallback({}, 'anthropic', 'ses_1')).toBeUndefined()
+    expect(
+      sessionFallback(
+        { sessions: { 'anthropic:s:ses_1': { accountId: 'a' } } },
+        'anthropic',
+        'ses_1',
+      ),
+    ).toBeUndefined()
+  })
+
+  test('a hand-edited malformed fallback reads as no-downgrade rather than rendering junk', () => {
+    // Trust boundary: the pool is a user-editable JSON file. A `fallback` whose
+    // `from`/`to` are missing or non-strings must NOT reach the bar as `undefined`.
+    const pool = toPoolShape({
+      sessions: {
+        'anthropic:s:miss': { accountId: 'a', fallback: { from: 'x' } },
+        'anthropic:s:typ': { accountId: 'a', fallback: { from: 5, to: 6 } },
+      },
+    })
+    expect(sessionFallback(pool, 'anthropic', 'miss')).toBeUndefined() // `to` absent
+    expect(sessionFallback(pool, 'anthropic', 'typ')).toBeUndefined() // wrong types
+  })
+})
+
 describe('pct', () => {
   test('formats a number as a rounded percentage, "-" otherwise', () => {
     expect(pct(0.5)).toBe('50%')
@@ -565,16 +779,25 @@ describe('until', () => {
     expect(until(now + 5_000, now)).toBe('1m')
   })
 
-  test('renders minutes under an hour', () => {
+  test('renders minutes up to 120 minutes', () => {
     expect(until(now + 30 * 60_000, now)).toBe('30m')
+    expect(until(now + 60 * 60_000, now)).toBe('60m')
+    expect(until(now + 90 * 60_000, now)).toBe('90m')
+    expect(until(now + 120 * 60_000, now)).toBe('120m')
   })
 
   test('renders hours under a day', () => {
     expect(until(now + 3 * 60 * 60_000, now)).toBe('3h')
   })
 
-  test('renders floored days at/over 24h', () => {
-    expect(until(now + 36 * 60 * 60_000, now)).toBe('1d')
+  test('keeps resets within 48h in hours instead of rounding down to days', () => {
+    expect(until(now + 36 * 60 * 60_000, now)).toBe('36h')
+    expect(until(now + 47 * 60 * 60_000, now)).toBe('47h')
+    expect(until(now + 48 * 60 * 60_000, now)).toBe('48h')
+  })
+
+  test('renders floored days over 48h', () => {
+    expect(until(now + 49 * 60 * 60_000, now)).toBe('2d')
     expect(until(now + 3 * 24 * 60 * 60_000, now)).toBe('3d')
   })
 })
@@ -677,6 +900,20 @@ describe('stateOf', () => {
         now,
       ),
     ).toBe('re-login')
+  })
+
+  test('the manual-disable sentinel renders "disabled" (not "re-login")', () => {
+    expect(
+      stateOf(
+        {
+          usage: { hourly: null, weekly: null },
+          cooldownUntil: 0,
+          disabledReason: MANUAL_DISABLED_REASON,
+        },
+        [],
+        now,
+      ),
+    ).toBe('disabled')
   })
 
   test('an active cooldown -> "cooldown"', () => {

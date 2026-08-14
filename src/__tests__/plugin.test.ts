@@ -27,7 +27,7 @@ import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import { loadConfig } from '../scheduler/config'
 import { SESSION_HEADER } from '../session'
-import type { PoolAccount } from '../types'
+import { MANUAL_DISABLED_REASON, type PoolAccount } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
 import { sleep } from '../util'
 import { testAccount } from './fixtures/account'
@@ -90,6 +90,14 @@ interface ToolHooks {
       execute: (args: {
         account: string
         name: string
+      }) => Promise<{ title: string; output: string }>
+    }
+    auth_lb_disable: {
+      description: string
+      args: object
+      execute: (args: {
+        account: string
+        enable?: boolean
       }) => Promise<{ title: string; output: string }>
     }
   }
@@ -1202,6 +1210,51 @@ describe('model-tier fallback (Opus/Fable → Sonnet)', () => {
     )
   })
 
+  test('the served fallback model is recorded on the session pin, then cleared once a normal model serves again', async () => {
+    // The onModelFallback toast is transient — gone by the next turn — yet the
+    // session keeps running on the downgraded model. recordSuccess persists the
+    // requested→served model ids on the session pin so the TUI bottom bar can
+    // PERSISTENTLY surface the degrade; a later success on the requested model
+    // overwrites the whole session row, clearing it back to undefined.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'OPUS_A', access: 'tokA' }))
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      // 1: Opus-tier 429 → downgrade. 2: the downgraded retry (200).
+      // 3 (next turn, plain Sonnet request): a clean 200, no tier limit.
+      return n === 1
+        ? tierLimited('seven_day_opus', now)
+        : new Response('ok', { status: 200 })
+    }
+    const { client } = spyClient()
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+    const withSession = (model: string) => ({
+      ...modelPost(model),
+      headers: { [SESSION_HEADER]: 'fb' },
+    })
+
+    // Turn 1: Opus tier-capped pool-wide → served on Sonnet → recorded on the pin.
+    await opts.fetch('https://api.anthropic.com/v1/messages', withSession(OPUS))
+    let pin = (await readPool()).sessions['anthropic:s:fb']
+    expect(pin?.accountId).toBe('OPUS_A')
+    expect(pin?.fallback).toEqual({ from: OPUS, to: SONNET })
+
+    // Turn 2: a normal model serves cleanly → the degrade marker is cleared.
+    await opts.fetch(
+      'https://api.anthropic.com/v1/messages',
+      withSession(SONNET),
+    )
+    pin = (await readPool()).sessions['anthropic:s:fb']
+    expect(pin?.accountId).toBe('OPUS_A')
+    expect(pin?.fallback).toBeUndefined()
+  })
+
   test('a tier 429 with another candidate available rotates and serves the ORIGINAL model (no downgrade, no account cooldown)', async () => {
     // THE headline scenario: fable-5's own weekly cap is exhausted on A while
     // A's aggregate 5h/7d windows still have headroom. A must NOT enter an
@@ -1768,6 +1821,47 @@ describe('toast on switch + status tool', () => {
     expect((await readPool()).accounts.find((a) => a.id === 'r1')?.label).toBe(
       'spaced-name',
     )
+  })
+
+  test('auth_lb_disable: no matching account reports the available labels', async () => {
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+    // empty pool -> "(none)"
+    const empty = await hooks.tool.auth_lb_disable.execute({ account: 'ghost' })
+    expect(empty.output).toContain('No account matching')
+    expect(empty.output).toContain('(none)')
+
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({ id: 'd1', label: 'work', providerID: 'anthropic' }),
+      )
+    })
+    const miss = await hooks.tool.auth_lb_disable.execute({ account: 'nope' })
+    expect(miss.output).toContain('No account matching')
+    expect(miss.output).toContain('work (anthropic)')
+  })
+
+  test('auth_lb_disable: disables by label, then re-enables by id, persisting disabledReason', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'd1', label: 'burner' }))
+    })
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+
+    // Omitting `enable` disables (sets the manual sentinel, skipped by scheduling).
+    const off = await hooks.tool.auth_lb_disable.execute({ account: 'burner' })
+    expect(off.output).toContain('Disabled "burner"')
+    expect(
+      (await readPool()).accounts.find((a) => a.id === 'd1')?.disabledReason,
+    ).toBe(MANUAL_DISABLED_REASON)
+
+    // enable:true clears it — back in the rotation.
+    const on = await hooks.tool.auth_lb_disable.execute({
+      account: 'd1',
+      enable: true,
+    })
+    expect(on.output).toContain('Enabled "burner"')
+    expect(
+      (await readPool()).accounts.find((a) => a.id === 'd1')?.disabledReason,
+    ).toBeNull()
   })
 
   test('primeInUse points the in-use marker at the top-ranked (soonest-reset) account', async () => {

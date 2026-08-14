@@ -10,7 +10,11 @@ import {
   isAvailable,
   scoreAccount,
 } from './scheduler/score-core'
-import type { PoolAccount, PoolFile } from './types'
+import {
+  MANUAL_DISABLED_REASON,
+  type PoolAccount,
+  type PoolFile,
+} from './types'
 
 const PROVIDER_NAMES: Record<string, string> = {
   anthropic: 'Claude',
@@ -208,14 +212,15 @@ function relTime(at: number, now: number): string {
   // Floor at 1: a sub-30s future time would otherwise round to "0m", which
   // reads as "already done" while the guard above reserves '-' for elapsed.
   const mins = Math.max(1, Math.round((at - now) / 60_000))
-  if (mins < 60) return `${mins}m`
+  if (mins <= 120) return `${mins}m`
   const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h${mins % 60}m`
+  if (mins <= 48 * 60) return `${hrs}h${mins % 60}m`
   return `${Math.floor(hrs / 24)}d${hrs % 24}h`
 }
 
 function stateOf(a: AccountStatus, now: number): string {
-  if (a.disabledReason) return 're-login'
+  if (a.disabledReason)
+    return a.disabledReason === MANUAL_DISABLED_REASON ? 'disabled' : 're-login'
   if (a.cooldownUntil > now) return `cooldown ${relTime(a.cooldownUntil, now)}`
   if (!a.available) return 'exhausted'
   const base = a.current ? 'in use' : 'ready'

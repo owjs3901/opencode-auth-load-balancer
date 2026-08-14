@@ -67,12 +67,16 @@ export interface ModelFallback {
 
 /**
  * Reactive-fallback plan returned from a rejected (429) response whose headers
- * indicate a MODEL-TIER cap (not an account-wide limit). `tier` names the
- * limited tier (e.g. "opus", "fable") and `resetAt` (epoch ms) is when it
- * recovers — persisted as `PoolAccount.modelCooldownsUntil[tier]` so subsequent
- * requests for that tier avoid the account without paying a rejected
- * round-trip. `fallback` is the downgraded body the fetch loop adopts once the
- * WHOLE pool proves limited for the tier.
+ * indicate a MODEL-TIER cap (not an account-wide limit). `tier` is the REQUEST's
+ * own model family (e.g. "opus", "fable") — the exact key the fetch loop's
+ * proactive skip reads as `requestModelTier(body)` — NOT the raw claim suffix
+ * (Anthropic emits non-family suffixes like `overage_included` that no request
+ * ever maps to; keying on them recorded a dead `modelCooldownsUntil` entry the
+ * skip could never consult). `resetAt` (epoch ms) is when the tier recovers —
+ * persisted as `PoolAccount.modelCooldownsUntil[tier]` so subsequent requests
+ * for that tier avoid the account without paying a rejected round-trip.
+ * `fallback` is the downgraded body the fetch loop adopts once the WHOLE pool
+ * proves limited for the tier.
  */
 export interface ReactiveModelFallback {
   tier: string

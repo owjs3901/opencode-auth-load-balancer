@@ -31,6 +31,7 @@ import {
 } from '../types'
 import {
   _lastPollIdsForTests,
+  refreshAllUsageInBackground,
   refreshUsageInBackground,
 } from '../usage-refresh'
 import { sleep } from '../util'
@@ -1839,6 +1840,73 @@ describe('usage-refresh', () => {
     // lastPoll throttle has lapsed, so the readPool path polls it again.
     await refreshUsageInBackground(adapter, now + 6 * 60 * 1000)
     expect(fetched).toBe(2)
+  })
+
+  test('refreshAllUsageInBackground polls EVERY provider, each row through its OWN adapter', async () => {
+    // The single-provider entry point refreshes only its own rows, which is
+    // why an idle provider used to freeze (see the fetch.ts request-path lock
+    // in plugin.test.ts). This locks the registry-wide entry point AND the
+    // per-row adapter routing: both rows are stale, and the two providers'
+    // usage endpoints answer with DIFFERENT shapes/scales — Anthropic's
+    // `five_hour`/`seven_day` percents vs Codex's `rate_limit.*_window`
+    // `used_percent` — so each row can only land its expected number if it
+    // was parsed by ITS provider's adapter, never the caller's.
+    const now = Date.now()
+    const anthropicWeeklyResetSec = Math.floor((now + 2 * 86_400_000) / 1000)
+    const openaiWeeklyResetSec = Math.floor((now + 5 * 86_400_000) / 1000)
+    const a = account({
+      providerID: 'anthropic',
+      usage: emptyUsage(), // capturedAt 0 -> stale
+    })
+    const o = account({
+      providerID: 'openai',
+      usage: emptyUsage(), // capturedAt 0 -> stale
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a }, { ...o })
+    })
+    const realFetch = globalThis.fetch
+    globalThis.fetch = responderFetch(() => (url) => {
+      if (url.includes('/api/oauth/usage'))
+        return new Response(
+          JSON.stringify({
+            five_hour: { utilization: 11, resets_at: now + 3_600_000 },
+            seven_day: {
+              utilization: 22,
+              resets_at: anthropicWeeklyResetSec,
+            },
+          }),
+          { status: 200 },
+        )
+      if (url.includes('/wham/usage'))
+        return new Response(
+          JSON.stringify({
+            rate_limit: {
+              primary_window: { used_percent: 33, reset_at: now / 1000 },
+              secondary_window: {
+                used_percent: 44,
+                reset_at: openaiWeeklyResetSec,
+              },
+            },
+          }),
+          { status: 200 },
+        )
+      return new Response('{}', { status: 404 })
+    })
+    try {
+      await refreshAllUsageInBackground(now)
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    const pool = await readPool()
+    expect(findAccount(pool, a.id)?.usage.weekly).toEqual({
+      utilization: 0.22,
+      resetAt: anthropicWeeklyResetSec * 1000,
+    })
+    expect(findAccount(pool, o.id)?.usage.weekly).toEqual({
+      utilization: 0.44,
+      resetAt: openaiWeeklyResetSec * 1000,
+    })
   })
 })
 

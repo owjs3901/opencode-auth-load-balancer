@@ -1,7 +1,0 @@
-{
-  "changes": {
-    "package.json": "Minor"
-  },
-  "note": "Add the auth_lb_disable tool, fix the Codex weekly window mapping, and refresh every provider's usage",
-  "date": "2026-08-14T10:58:19.607750800Z"
-}

@@ -66,8 +66,12 @@ export interface PoolAccount {
 /** Loosely-typed view of the on-disk pool JSON (one shape for reads AND read-modify-writes). */
 export interface PoolShape {
   accounts?: PoolAccount[]
+  relogin?: { accountId?: string; providerID?: string; expiresAt?: number }
   lastSelected?: Record<string, string>
-  sessions?: Record<string, { accountId?: string }>
+  sessions?: Record<
+    string,
+    { accountId?: string; fallback?: { from?: string; to?: string } }
+  >
 }
 
 /**
@@ -222,6 +226,62 @@ export function mutatePoolFile(
   }
 }
 
+/**
+ * Sentinel `disabledReason` the manual disable toggle writes — the TUI copy of
+ * `src/types.ts`'s `MANUAL_DISABLED_REASON` (the TUI runtime cannot import
+ * `src/`; see the `isPlainRecordValue`/`isFiniteNumber` NOTEs above for the
+ * same trust boundary). Kept BYTE-IDENTICAL to the server constant so a manual
+ * disable written here reads back as `disabled` (not `re-login`) everywhere.
+ */
+export const MANUAL_DISABLED_REASON = 'manually disabled'
+
+/**
+ * NOTE: byte-identical copy of `src/types.ts`'s `RELOGIN_TTL_MS`, kept in sync
+ * by hand because the TUI runtime cannot import `src/`; see the
+ * `MANUAL_DISABLED_REASON` NOTE above for the same trust boundary.
+ */
+export const RELOGIN_TTL_MS = 600_000
+
+export function setReloginTargetInPool(
+  accountId: string,
+  providerID: string,
+  now: number,
+  path: string = POOL_FILE,
+): void {
+  mutatePoolFile((pool) => {
+    pool.relogin = {
+      accountId,
+      providerID,
+      expiresAt: now + RELOGIN_TTL_MS,
+    }
+  }, path)
+}
+
+export function clearReloginTargetInPool(path: string = POOL_FILE): void {
+  mutatePoolFile((pool) => {
+    delete pool.relogin
+  }, path)
+}
+
+/**
+ * Resolve the provider OAuth method by label instead of hardcoding an index:
+ * opencode aggregates auth methods from every plugin registered for a provider,
+ * so this plugin's position is not stable. Prefer its pooled-login label, then
+ * fall back to the provider's first OAuth method when no such label is present.
+ */
+export function pickAuthMethodIndex(
+  methods: readonly { type?: string; label?: string }[] | undefined,
+): number | null {
+  const pooled = methods?.findIndex(
+    (method) =>
+      method.type === 'oauth' &&
+      method.label?.toLowerCase().includes('load balancer'),
+  )
+  if (pooled !== undefined && pooled >= 0) return pooled
+  const oauth = methods?.findIndex((method) => method.type === 'oauth')
+  return oauth !== undefined && oauth >= 0 ? oauth : null
+}
+
 export function renameInPool(
   id: string,
   label: string,
@@ -245,6 +305,23 @@ export function deleteFromPool(id: string, path: string = POOL_FILE): void {
     for (const key of Object.keys(sessions)) {
       if (sessions[key]?.accountId === id) delete sessions[key]
     }
+  }, path)
+}
+
+/**
+ * Toggle an account's MANUAL disable flag: `disabled` writes the
+ * `MANUAL_DISABLED_REASON` sentinel (the scheduler then skips it, exactly like
+ * the server's `isAvailable`), `!disabled` clears it. Reversible, so — unlike
+ * Delete — the sidebar calls this straight through with no confirm dialog.
+ */
+export function setDisabledInPool(
+  id: string,
+  disabled: boolean,
+  path: string = POOL_FILE,
+): void {
+  mutatePoolFile((pool) => {
+    const acct = (pool.accounts ?? []).find((a) => a.id === id)
+    if (acct) acct.disabledReason = disabled ? MANUAL_DISABLED_REASON : null
   }, path)
 }
 
@@ -285,6 +362,48 @@ export function toScore(a: PoolAccount): ScoreAccount {
 }
 
 /**
+ * The account the CURRENT opencode session is pinned to for a provider — i.e.
+ * what THIS session is actually using — read from the pool's session map. The
+ * key is `<providerID>:s:<sessionID>`, exactly what `deriveSessionKey` +
+ * `recordSuccess` (src/fetch.ts) write on each served request. Returns
+ * `undefined` when there is no session (home screen) or the session has not yet
+ * pinned an account for this provider. The in-use (▶) marker uses this so it
+ * reflects the VIEWER's OWN session, not the global `lastSelected` (whichever
+ * session served most recently across the whole pool — misleading while several
+ * sessions run at once).
+ */
+export function sessionAccountId(
+  pool: PoolShape,
+  providerID: string,
+  sessionId: string | undefined,
+): string | undefined {
+  if (!sessionId) return undefined
+  return pool.sessions?.[`${providerID}:s:${sessionId}`]?.accountId
+}
+
+/**
+ * The active model downgrade for THIS session on `providerID`, or `undefined`
+ * when the session's latest request ran on the model it asked for (or there is
+ * no session). `{ from, to }` are the raw model ids (requested → served) the
+ * server recorded in {@link SessionAssignment.fallback}. The bottom bar shows it
+ * so a session silently running on a fallback model is visible even after the
+ * transient switch toast is gone. Both fields are re-validated as strings (a
+ * hand-edited pool could hold anything) — a malformed `fallback` reads as "no
+ * downgrade" rather than rendering `undefined`.
+ */
+export function sessionFallback(
+  pool: PoolShape,
+  providerID: string,
+  sessionId: string | undefined,
+): { from: string; to: string } | undefined {
+  if (!sessionId) return undefined
+  const fb = pool.sessions?.[`${providerID}:s:${sessionId}`]?.fallback
+  if (!fb || typeof fb.from !== 'string' || typeof fb.to !== 'string')
+    return undefined
+  return { from: fb.from, to: fb.to }
+}
+
+/**
  * Byte-deterministic ASCII string comparator (never `localeCompare` — keeps
  * tier/provider ordering byte-identical regardless of host locale). Ships its
  * own copy independent of `src/status.ts`'s identical helper — this file
@@ -307,16 +426,17 @@ export function until(resetAt: number | undefined, now: number): string {
   if (!isFiniteNumber(resetAt) || resetAt <= now) return '-'
   // Mirror the server's `relTime` (src/status.ts) semantics: floor minutes at 1
   // (a sub-30s future reset must not render "0m" — '-' is reserved for elapsed)
-  // and FLOOR the day figure (36h is "1d", not "2d") so the TUI bar's day/minute
-  // rounding can never disagree with the CLI/tool dashboard's. NOTE: this is
+  // keep <=48h as hours (47h is "47h", not "1d") before FLOORing the day
+  // figure so the TUI bar's day/minute rounding can never disagree with the
+  // CLI/tool dashboard's. NOTE: this is
   // coarser than the CLI within the hour band on purpose (bar-width budget) —
-  // the CLI renders `${hrs}h${mins % 60}m` (e.g. "3h25m"), this renders just
-  // `${hrs}h` (e.g. "3h"). Same day-level bucket, less precision inside it —
+  // after the <=120m minute band, the CLI renders `${hrs}h${mins % 60}m`
+  // (e.g. "3h25m"), this renders just `${hrs}h` (e.g. "3h"). Same day-level bucket, less precision inside it —
   // not byte-identical output.
   const mins = Math.max(1, Math.round((resetAt - now) / 60_000))
-  if (mins < 60) return `${mins}m`
+  if (mins <= 120) return `${mins}m`
   const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h`
+  if (mins <= 48 * 60) return `${hrs}h`
   return `${Math.floor(hrs / 24)}d`
 }
 /** A window's utilization for the bar: "-" when absent, "0%" once it has reset (stale value dropped). */
@@ -351,7 +471,10 @@ export function stateOf(
   tiers: [string, number][],
   now: number,
 ): string {
-  if (sa.disabledReason) return 're-login'
+  if (sa.disabledReason)
+    return sa.disabledReason === MANUAL_DISABLED_REASON
+      ? 'disabled'
+      : 're-login'
   if (sa.cooldownUntil > now) return `cooldown ${until(sa.cooldownUntil, now)}`
   if (isExhausted(sa, cfg, now)) return 'full'
   // A model-tier limit keeps the account usable (other models + downgrade),

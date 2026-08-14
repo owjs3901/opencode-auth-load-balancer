@@ -255,7 +255,7 @@ function ladderTargetForFamily(
 export function downgradeModel(
   body: string,
   models: readonly string[],
-): ModelFallback | null {
+): (ModelFallback & { fromTier: string }) | null {
   const setting = resolveFallbackSetting()
   if (setting.kind === 'disabled') return null
   let parsed: Record<string, unknown>
@@ -307,10 +307,29 @@ export function planReactiveFallback(
   now: number,
   models: readonly string[],
 ): ReactiveModelFallback | null {
+  // GATE only: does the claim name a TIER-scoped window (`seven_day_<x>` /
+  // `five_hour_<x>`) rather than a bare account-wide `seven_day` / `five_hour`?
+  // The captured suffix is deliberately NOT used as the cooldown key. Anthropic
+  // emits non-model-family suffixes (e.g. `seven_day_overage_included` — the
+  // premium/overage bucket) that NO request's model family ever equals, so
+  // keying on it recorded a dead `modelCooldownsUntil.overage_included` that the
+  // proactive skip (`modelCooldownsUntil[requestModelTier(body)]`) could never
+  // consult — the account then received AND 429'd every fable request forever.
   const claim = res.headers.get(REPRESENTATIVE_CLAIM_HEADER)
-  const tier = claim ? MODEL_TIER_CLAIM_RE.exec(claim)?.[1] : undefined
-  if (!tier) return null
+  if (!claim || !MODEL_TIER_CLAIM_RE.test(claim)) return null
   const fallback = downgradeModel(body, models)
   if (!fallback) return null
-  return { tier, resetAt: parseTierReset(res, now), fallback }
+  // Key the cooldown by the REQUEST's own model family (the tier that was just
+  // rejected) so it EQUALS `requestModelTier(body)` — the exact key the fetch
+  // loop's proactive skip reads. `downgradeModel` already derived it as
+  // `fromTier` (typed required — it returns null when the model has no family).
+  // For a real `seven_day_fable` claim this is still "fable" (behavior
+  // unchanged); for a non-family suffix like `overage_included` it becomes the
+  // request family instead of the phantom suffix, so future same-family requests
+  // skip this account proactively (no more wasted 429 round-trip).
+  return {
+    tier: fallback.fromTier,
+    resetAt: parseTierReset(res, now),
+    fallback,
+  }
 }

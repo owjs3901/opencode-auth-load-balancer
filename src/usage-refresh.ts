@@ -1,10 +1,25 @@
 import { findAccount, mutatePool, readPool } from './pool/store'
+import { adapterFor, ADAPTERS } from './providers/registry'
 import type { ProviderAdapter } from './providers/types'
 import { ensureAccessToken } from './refresh'
+import { isExhausted, loadScoreConfig } from './scheduler/score-core'
 import type { PoolAccount, PoolFile } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
 
 const SEED_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Max lifetime of a TRANSIENT (non-quota) cooldown. fetch.ts cools a thrown
+ * network error or a header-less 429/402 for at most `ACCOUNT_COOLDOWN_MS`
+ * (5min) and an auth 401/403 for `AUTH_COOLDOWN_MS` (2min); ONLY a quota 429's
+ * `Retry-After` writes a cooldown beyond this. So a cooldown whose remainder
+ * still exceeds this bound is necessarily quota-derived — the one class that can
+ * outlive its own usage window after an out-of-band reset (see the stale-cooldown
+ * reconciliation below). Kept `=== ACCOUNT_COOLDOWN_MS` by a drift-guard test;
+ * defined locally because importing it from fetch.ts (which imports THIS module)
+ * would form a cycle.
+ */
+export const MAX_TRANSIENT_COOLDOWN_MS = 5 * 60 * 1000
 
 /** Per-account last poll time, to throttle usage-endpoint calls (which are themselves rate-limited). */
 const lastPoll = new Map<string, number>()
@@ -20,15 +35,26 @@ export function _lastPollIdsForTests(): Set<string> {
   return new Set(lastPoll.keys())
 }
 
+/** One stale pool row paired with the adapter that owns its provider. */
+interface StaleTarget {
+  adapter: ProviderAdapter
+  account: PoolAccount
+}
+
 /**
  * Best-effort: seed/refresh usage for accounts whose WEEKLY snapshot is missing or
  * stale (`capturedAt` is stamped only when a weekly window arrives — see
- * `applyUsagePartial` in fetch.ts), via the provider's dedicated usage endpoint.
+ * `applyUsagePartial` in fetch.ts), via each provider's dedicated usage endpoint.
  * Throttled per account (at most one poll per account per SEED_TTL_MS). Callers
  * invoke it fire-and-forget, so it adds no latency to the request path; failures
  * are swallowed — response headers remain the primary, always-fresh usage signal
  * and this fixes cold-start blindness AND out-of-band server-side resets (e.g. a
  * promotional weekly-quota reset) that response headers alone don't converge.
+ *
+ * `adapters` is a LIST, not a single provider, because a pool row is refreshed
+ * by whichever adapter owns its `providerID` — the ambient callers (request
+ * path, dashboard) pass the whole registry so ANY activity keeps EVERY
+ * provider's usage current (see `refreshAllUsageInBackground`).
  *
  * Returns a promise (for tests / explicit awaiting); request-path callers ignore it.
  *
@@ -39,14 +65,14 @@ export function _lastPollIdsForTests(): Set<string> {
  * re-reads under the lock), so a slightly stale snapshot is harmless. Callers
  * without a pool in hand (e.g. the startup seed in index.ts) omit it.
  */
-export async function refreshUsageInBackground(
-  adapter: ProviderAdapter,
+async function refreshUsage(
+  adapters: readonly ProviderAdapter[],
   now: number,
   poolSnapshot?: PoolFile,
 ): Promise<void> {
   const pool = poolSnapshot ?? (await readPool())
-  // Collect the stale, poll-eligible subset in ONE synchronous loop — provider
-  // filter, staleness gate, and `lastPoll` throttle fused. This runs once per
+  // Collect the stale, poll-eligible subset in ONE synchronous loop — staleness
+  // gate, adapter resolution, and `lastPoll` throttle fused. This runs once per
   // request (fire-and-forget from the fetch retry loop), and in the dominant
   // steady state — every account's weekly snapshot freshly captured from
   // response headers — the old shape still allocated a filter array, one async
@@ -75,26 +101,41 @@ export async function refreshUsageInBackground(
   // final prune loop is O(lastPoll.size), bounded by the historical account
   // count, and runs once after this loop instead of gating on a size compare.
   const aliveIds = lastPoll.size > 0 ? new Set<string>() : undefined
-  let stale: PoolAccount[] | undefined
+  let stale: StaleTarget[] | undefined
   for (const account of pool.accounts) {
     aliveIds?.add(account.id)
-    if (account.providerID !== adapter.id || account.disabledReason) continue
-    // Check staleness FIRST: in the steady state it is false, and the
-    // `lastPoll` Map lookup would be dead weight on the per-request hot path.
+    if (account.disabledReason) continue
+    // Check staleness FIRST: in the steady state it is false, and both the
+    // adapter lookup and the `lastPoll` Map lookup would be dead weight on the
+    // per-request hot path.
     if (
       account.usage.capturedAt !== 0 &&
       now - account.usage.capturedAt <= SEED_TTL_MS
     )
       continue
+    // Resolve the adapter that OWNS this row, rather than assuming the caller's
+    // own provider: a single-provider caller passes a one-entry list, so a row
+    // belonging to another provider finds no match and is skipped exactly as
+    // the previous `providerID !== adapter.id` filter did. Resolved BEFORE the
+    // throttle is stamped so a row whose provider this build doesn't know never
+    // burns its `lastPoll` slot on a poll that can't happen.
+    const adapter = adapterFor(adapters, account.providerID)
+    if (!adapter) continue
     if ((lastPoll.get(account.id) ?? 0) > now - SEED_TTL_MS) continue
     lastPoll.set(account.id, now)
     stale ??= []
-    stale.push(account)
+    stale.push({ adapter, account })
   }
   if (aliveIds) {
     for (const id of lastPoll.keys()) if (!aliveIds.has(id)) lastPoll.delete(id)
   }
   if (!stale) return
+  // Loaded once per poll batch (past the steady-state early-return above, so it
+  // never runs on the request hot path), shared by the stale-cooldown
+  // reconciliation inside the mutate below. `loadScoreConfig` reads the same
+  // `OPENCODE_AUTH_LB_EXHAUSTED_AT` knob the scheduler uses, so "has headroom"
+  // here means exactly "available" there.
+  const scoreCfg = loadScoreConfig()
   // Parallelize across the stale subset: per-account refresh locks in
   // `refresh.ts` are keyed by (providerID, accountId), so distinct accounts
   // never contend; and `mutatePool` already serializes via the in-process
@@ -103,7 +144,7 @@ export async function refreshUsageInBackground(
   // pool drops from O(N) sequential 30 s timeouts (OAUTH_HTTP_TIMEOUT_MS +
   // USAGE_HTTP_TIMEOUT_MS per account, summed) to a single worst-case window.
   await Promise.all(
-    stale.map(async (account) => {
+    stale.map(async ({ adapter, account }) => {
       try {
         await ensureAccessToken(adapter, account, now)
         const snapshot = await adapter.fetchUsage(account, now)
@@ -124,7 +165,7 @@ export async function refreshUsageInBackground(
             // of erasing it. `capturedAt` is weekly-scoped (types.ts) — a failed
             // weekly refresh must not stamp freshness, or the re-poll that
             // would heal it is suppressed for SEED_TTL_MS.
-            if (stored)
+            if (stored) {
               stored.usage = {
                 hourly: snapshot.hourly ?? stored.usage.hourly,
                 weekly:
@@ -138,6 +179,27 @@ export async function refreshUsageInBackground(
                 capturedAt:
                   snapshot.weekly === null ? stored.usage.capturedAt : now,
               }
+              // Self-heal a STALE long cooldown. A weekly-limit 429's
+              // `Retry-After` latches `cooldownUntil` at the weekly reset
+              // (`recordRotation` in fetch.ts), but Anthropic's out-of-band
+              // resets zero the usage window early while NOTHING lowers
+              // `cooldownUntil` except wall-clock — stranding a full-headroom
+              // account as "cooldown" for days (both dashboards AND the
+              // scheduler gate on this single field). This authoritative poll
+              // just proved headroom, so drop the latch — but only when a REAL
+              // fresh weekly reading arrived (not the retained-stale malformed
+              // branch), the remainder still exceeds any transient backoff (so
+              // it is necessarily quota-derived, not a live 5min/2min error
+              // cooldown), and the merged usage is not exhausted. A genuinely
+              // still-limited account re-cools on its next real 429 — the same
+              // "re-poll, don't latch" contract `utilOf`/`isWindowExpired` keep.
+              if (
+                snapshot.weekly !== null &&
+                stored.cooldownUntil > now + MAX_TRANSIENT_COOLDOWN_MS &&
+                !isExhausted(stored, scoreCfg, now)
+              )
+                stored.cooldownUntil = 0
+            }
           })
         }
       } catch {
@@ -146,4 +208,43 @@ export async function refreshUsageInBackground(
       }
     }),
   )
+}
+
+/**
+ * Refresh stale usage for ONE provider's accounts (see `refreshUsage`).
+ *
+ * Used by the flows that are inherently scoped to a single provider: the
+ * OAuth login callback (only the just-added account matters) and each
+ * provider plugin's startup seed, which awaits ITS provider's usage before
+ * priming that provider's in-use marker. Ambient callers must NOT use this —
+ * see `refreshAllUsageInBackground`.
+ */
+export function refreshUsageInBackground(
+  adapter: ProviderAdapter,
+  now: number,
+  poolSnapshot?: PoolFile,
+): Promise<void> {
+  return refreshUsage([adapter], now, poolSnapshot)
+}
+
+/**
+ * Refresh stale usage across EVERY registered provider (see `refreshUsage`).
+ *
+ * This is what the ambient callers — the request hot path and the
+ * `auth_lb_status` dashboard — use, and the distinction is load-bearing:
+ * usage converges to server-side truth from response headers (only for the
+ * provider you are actually sending requests to) or from a usage-endpoint
+ * poll. Scoping that poll to the requesting provider left an IDLE provider
+ * with no refresh cycle whatsoever after its one startup seed, so working all
+ * day in Claude froze the Codex numbers in the dashboard/TUI at whatever they
+ * were when opencode launched (and vice versa). Refreshing the whole registry
+ * instead costs nothing in the steady state — the per-account staleness gate
+ * and `lastPoll` throttle inside `refreshUsage` are unchanged, so an idle
+ * provider is polled at most once per SEED_TTL_MS and a fresh one not at all.
+ */
+export function refreshAllUsageInBackground(
+  now: number,
+  poolSnapshot?: PoolFile,
+): Promise<void> {
+  return refreshUsage(ADAPTERS, now, poolSnapshot)
 }

@@ -23,6 +23,22 @@ const IMMINENT_EXHAUSTION_BAND = 0.01
  * paying a full per-account prompt-cache write.
  */
 const PROACTIVE_MIGRATE_MIN_DELTA = 0.02
+/**
+ * Incumbent hysteresis for `selectAccount`: keep the provider's current in-use
+ * account (`lastSelected`) instead of switching to a marginally-higher-scoring
+ * one, as long as its score stays within this RELATIVE band of the best
+ * available (`incumbentScore >= best * (1 - H)`). When several accounts' weekly-
+ * urgency scores are near-equal — the common steady state, since weekly resets
+ * are days apart — strict argmax flips on every tiny per-request usage update,
+ * scattering unpinned/new/forced-repick traffic across accounts and burning a
+ * full prompt-cache write each time. A RELATIVE band (not an absolute score
+ * delta) because `scoreAccount` ranges from ~0.015 in calm periods to several
+ * units near a reset, so an absolute delta would either never fire now or
+ * over-stick later. Only the sessionless / forced-repick callers pass an
+ * incumbent; proactive & drain MIGRATION pass null so this never fights their
+ * intent (they have their own `PROACTIVE_MIGRATE_MIN_DELTA` / drain-margin).
+ */
+const INCUMBENT_HYSTERESIS = 0.2
 
 export interface Selection {
   account: PoolAccount
@@ -56,7 +72,10 @@ const NO_EXCLUSIONS: ReadonlySet<string> = new Set()
  * 1. Restrict to the provider's non-disabled accounts, minus `exclude` (already
  *    tried this request).
  * 2. Prefer the subset that is currently available (not exhausted / cooling down).
- * 3. Among those, pick the highest urgency score.
+ * 3. Among those, pick the highest urgency score — but KEEP the incumbent
+ *    (`incumbentId`, the provider's current in-use account) when its score is
+ *    within `INCUMBENT_HYSTERESIS` of the best, so near-equal scores don't churn
+ *    the account and waste prompt cache.
  * 4. If none are available, fall back to the least-bad account (lowest weekly
  *    utilization) and flag the selection as `degraded`.
  *
@@ -68,17 +87,27 @@ export function selectAccount(
   now: number,
   cfg: SchedulerConfig = DEFAULT_CONFIG,
   exclude: ReadonlySet<string> = NO_EXCLUSIONS,
+  // The provider's current in-use account (`pool.lastSelected[providerID]`),
+  // passed by the sessionless / forced-repick callers so a near-equal challenger
+  // does not needlessly displace it (see `INCUMBENT_HYSTERESIS`). Proactive &
+  // drain migration pass null to opt OUT — they WANT to move off the incumbent.
+  incumbentId: string | null = null,
 ): Selection | null {
   // Single pass over `accounts` on this per-request hot path — no intermediate
   // filtered arrays, no per-call scoring closure. Both bests use a strict
   // comparison so ties keep the FIRST candidate (matching the old arg-max
   // loop's first-wins order); the fallback minimizes raw `weeklyUtil`, which is
   // the old `-weeklyUtil` maximization written directly.
-  let sawAvailable = false
   let bestAvail: PoolAccount | null = null
   let bestAvailScore = Number.NEGATIVE_INFINITY
   let bestFallback: PoolAccount | null = null
   let lowestWeeklyUtil = Number.POSITIVE_INFINITY
+  // The incumbent's account + score, recorded only if it survives the SAME
+  // filters as any other candidate (provider match, not disabled, not excluded,
+  // available) — so a disabled/cooling/excluded incumbent is ignored and
+  // selection falls through to the argmax below.
+  let incumbentAccount: PoolAccount | null = null
+  let incumbentScore = Number.NEGATIVE_INFINITY
   for (const account of accounts) {
     if (
       account.providerID !== providerID ||
@@ -87,11 +116,14 @@ export function selectAccount(
     )
       continue
     if (isAvailable(account, cfg, now)) {
-      sawAvailable = true
       const score = scoreAccount(account, cfg, now)
       if (score > bestAvailScore) {
         bestAvailScore = score
         bestAvail = account
+      }
+      if (account.id === incumbentId) {
+        incumbentAccount = account
+        incumbentScore = score
       }
     } else {
       const util = weeklyUtil(account)
@@ -102,14 +134,27 @@ export function selectAccount(
     }
   }
 
-  // `degraded` means "no account was AVAILABLE" (not "the winner came from the
-  // fallback"), so it keys off `sawAvailable` — exactly the old
-  // `available.length === 0`. The degraded fallback ranks the unavailable set
-  // by least-bad weekly use.
-  if (sawAvailable)
-    return bestAvail
-      ? { account: bestAvail, degraded: false, sticky: false }
-      : null
+  // `bestAvail` is non-null IFF at least one account was AVAILABLE — the first
+  // available account always sets it (its finite score beats the -Infinity
+  // seed) — so it doubles as the old `sawAvailable` / `available.length > 0`
+  // gate: a non-null `bestAvail` means "someone was available", and the
+  // `degraded` fallback below runs only when NONE was. The degraded fallback
+  // ranks the unavailable set by least-bad weekly use.
+  if (bestAvail) {
+    // Incumbent hysteresis: keep the current in-use account when its score is
+    // within the relative band of the best. `scoreAccount` is provably >= 0
+    // (weeklyUrgency >= 0 times a factor in [0,1]), so no special case is needed
+    // when the best score is 0 (every available account past weeklyDrainTarget):
+    // the band collapses to `incumbentScore >= 0`, which keeps the incumbent —
+    // exactly right when the urgency signal has gone flat. Only a MEANINGFULLY
+    // better challenger (beyond the band) displaces it.
+    if (
+      incumbentAccount &&
+      incumbentScore >= bestAvailScore * (1 - INCUMBENT_HYSTERESIS)
+    )
+      return { account: incumbentAccount, degraded: false, sticky: false }
+    return { account: bestAvail, degraded: false, sticky: false }
+  }
   return bestFallback
     ? { account: bestFallback, degraded: true, sticky: false }
     : null
@@ -186,11 +231,29 @@ export function selectForSession(
     ? findPinned(pool, providerID, sessionKey, exclude)
     : null
   if (!pinned)
-    return selectAccount(pool.accounts, providerID, now, cfg, exclude)
+    return selectAccount(
+      pool.accounts,
+      providerID,
+      now,
+      cfg,
+      exclude,
+      pool.lastSelected[providerID] ?? null,
+    )
 
-  // Forced: the pinned account can no longer serve requests.
+  // Forced: the pinned account can no longer serve requests. Pass the current
+  // in-use account as the incumbent so a forced repick still honors hysteresis
+  // (a near-equal challenger won't churn the global in-use account). If
+  // lastSelected IS this now-unavailable pin, it simply won't match an
+  // available candidate and selection falls through to the argmax.
   if (!isAvailable(pinned, cfg, now))
-    return selectAccount(pool.accounts, providerID, now, cfg, exclude)
+    return selectAccount(
+      pool.accounts,
+      providerID,
+      now,
+      cfg,
+      exclude,
+      pool.lastSelected[providerID] ?? null,
+    )
 
   // Non-forced migration. The forced-switch path above already handled "the pin
   // can't serve"; here the pin is still usable, so any switch is OPTIONAL and must
@@ -253,6 +316,10 @@ export function selectForSession(
         now,
         cfg,
         withExcluded(exclude, pinned.id),
+        // No incumbent: a proactive/drain MIGRATION deliberately moves OFF the
+        // pin, so it must not be pulled back by incumbent hysteresis — it has
+        // its own PROACTIVE_MIGRATE_MIN_DELTA / drain-margin gates below.
+        null,
       )
       // A `degraded` alt is selectAccount's "least-bad of the cooling-down /
       // exhausted set" — switching a still-healthy pin onto it just trades one
@@ -268,9 +335,24 @@ export function selectForSession(
           // so two near-threshold accounts don't ping-pong A->B->A, each switch
           // paying a full prompt-cache write.
           const altUtil = maxUtil(alt.account, now)
+          // The NON-imminent proactive switch is a headroom OPTIMIZATION, not a
+          // safety requirement, so it must not override the scheduler's core
+          // weekly-drain priority: only shed a pin that crossed its 5h soft
+          // threshold onto an account at least as weekly-PERISHABLE. A pin whose
+          // weekly quota resets sooner (higher weeklyUrgency) keeps draining
+          // until it reaches the IMMINENT band (the ternary's `pinnedImminent`
+          // arm), which ignores this gate and switches for hard-limit safety.
+          // Without the gate, a pin whose weekly resets in HOURS (mostly unused)
+          // bled its pinned sessions to one resetting days out the instant its
+          // short 5h window crossed migrateAt — wasting the very quota the pool
+          // exists to drain first. Compared via weeklyUrgency (pure
+          // perishability), NOT scoreAccount, whose 5h de-rate is exactly the
+          // signal that mis-fires here.
           const proactiveBetter = pinnedImminent
             ? altUtil < pinnedUtil
-            : pinnedUtil - altUtil >= PROACTIVE_MIGRATE_MIN_DELTA
+            : pinnedUtil - altUtil >= PROACTIVE_MIGRATE_MIN_DELTA &&
+              weeklyUrgency(alt.account, cfg, now) >=
+                weeklyUrgency(pinned, cfg, now)
           if (proactiveBetter) {
             return { account: alt.account, degraded: false, sticky: false }
           }

@@ -31,6 +31,20 @@ function makeAccount(
   }
 }
 
+function applyTokens(row: PoolAccount, tokens: TokenSet): PoolAccount {
+  // Persist the newer refresh token when matched via accountId (a no-op when
+  // matched by refresh — they are already equal); never clear it.
+  if (tokens.refresh) row.refresh = tokens.refresh
+  row.access = tokens.access
+  row.expires = tokens.expires
+  row.disabledReason = null
+  // A re-login may decode a fresh accountId from the id_token (OpenAI);
+  // propagate it so a row bootstrapped with `accountId: null` stops falling
+  // back to the per-request JWT decode. Never clear an existing id.
+  if (tokens.accountId) row.accountId = tokens.accountId
+  return row
+}
+
 /**
  * Append a freshly-authorized account to the pool, deduped by refresh token
  * or provider account id. Re-authorizing the same account refreshes its
@@ -42,6 +56,13 @@ export async function addAccount(
   label?: string,
 ): Promise<PoolAccount> {
   return mutatePool((pool) => {
+    const intent =
+      pool.relogin?.providerID === providerID ? pool.relogin : undefined
+    // A completed provider login spends its matching hint regardless of which
+    // branch below claims the tokens. Consuming it up front guarantees a stale
+    // hint can never redirect a later, unrelated login onto this row.
+    if (intent) delete pool.relogin
+
     // Dedup intent: "same account re-authorized" → fold the new tokens onto
     // the existing pool row instead of creating a duplicate. The signal is a
     // matching refresh token (the only stable, per-account identifier OAuth
@@ -68,19 +89,15 @@ export async function addAccount(
         ((tokens.refresh && a.refresh === tokens.refresh) ||
           (tokens.accountId && a.accountId === tokens.accountId)),
     )
-    if (existing) {
-      // Persist the newer refresh token when matched via accountId (a no-op
-      // when matched by refresh — they are already equal); never clear it.
-      if (tokens.refresh) existing.refresh = tokens.refresh
-      existing.access = tokens.access
-      existing.expires = tokens.expires
-      existing.disabledReason = null
-      // A re-login may decode a fresh accountId from the id_token (OpenAI);
-      // propagate it so a row bootstrapped with `accountId: null` stops
-      // falling back to the per-request JWT decode. Never clear an existing id.
-      if (tokens.accountId) existing.accountId = tokens.accountId
-      return existing
-    }
+    // Explicit token/account identity always outranks the TUI hint. If the user
+    // signs into a different account than the clicked row, a stable identity
+    // match can never graft those credentials onto the hinted row.
+    if (existing) return applyTokens(existing, tokens)
+
+    const target = intent
+      ? pool.accounts.find((account) => account.id === intent.accountId)
+      : undefined
+    if (target) return applyTokens(target, tokens)
     // Pool-WIDE label set (not per-provider): `auth_lb_rename` enforces
     // pool-wide label uniqueness (rename-by-label picks the first match), and
     // renames can move a `${providerID}-${n}` style label across providers —

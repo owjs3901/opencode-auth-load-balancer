@@ -5,6 +5,7 @@ import {
   emptyUsage,
   type PoolAccount,
   type PoolFile,
+  type ReloginIntent,
   type SessionAssignment,
   type UsageWindow,
 } from '../types'
@@ -300,6 +301,30 @@ function normalizeLastSelected(
   return rows
 }
 
+/**
+ * Value-level trust boundary for the short-lived TUI → server re-login
+ * handshake. The pool file is user-editable, so a partial/non-object intent
+ * must never redirect fresh provider credentials, and an expired or non-finite
+ * `expiresAt` must not survive forever (`JSON.parse('1e999') === Infinity`).
+ * Drop the whole hint unless every field is usable; `mutatePool` writes the
+ * normalized pool back, so the file self-heals on the next bookkeeping write.
+ */
+function normalizeRelogin(
+  value: unknown,
+  now: number,
+): ReloginIntent | undefined {
+  if (!isPlainObject(value)) return undefined
+  const intent = value as Partial<ReloginIntent>
+  if (
+    typeof intent.accountId !== 'string' ||
+    typeof intent.providerID !== 'string' ||
+    !Number.isFinite(intent.expiresAt) ||
+    (intent.expiresAt as number) <= now
+  )
+    return undefined
+  return intent as ReloginIntent
+}
+
 async function readRaw(): Promise<PoolFile> {
   let text: string
   try {
@@ -321,6 +346,7 @@ async function readRaw(): Promise<PoolFile> {
       // `Array.isArray` above narrows to `PoolAccount[]` (no cast needed);
       // `normalizeAccounts` is the row-level trust boundary on top of it.
       accounts: normalizeAccounts(parsed.accounts),
+      relogin: normalizeRelogin(parsed.relogin, Date.now()),
       // `isPlainObject` (not `??`) so hand-edited primitives/arrays are also
       // healed — `??` only replaces `null`/`undefined`, and a surviving
       // primitive (`"sessions": "oops"`) makes `recordSuccess`'s property

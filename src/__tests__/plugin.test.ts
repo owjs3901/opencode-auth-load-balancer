@@ -27,8 +27,9 @@ import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import { loadConfig } from '../scheduler/config'
 import { SESSION_HEADER } from '../session'
-import type { PoolAccount } from '../types'
+import { MANUAL_DISABLED_REASON, type PoolAccount } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
+import { sleep } from '../util'
 import { testAccount } from './fixtures/account'
 import { type Responder, responderFetch } from './fixtures/fetch-mock'
 
@@ -91,6 +92,14 @@ interface ToolHooks {
         name: string
       }) => Promise<{ title: string; output: string }>
     }
+    auth_lb_disable: {
+      description: string
+      args: object
+      execute: (args: {
+        account: string
+        enable?: boolean
+      }) => Promise<{ title: string; output: string }>
+    }
   }
 }
 
@@ -120,6 +129,27 @@ function account(over: Partial<PoolAccount> = {}): PoolAccount {
     },
     ...over,
   })
+}
+
+/**
+ * Poll the pool until `id`'s row satisfies `done`, then return it. For the
+ * fire-and-forget writes the request path deliberately does NOT await (usage
+ * seeding): a fixed sleep would either flake on a slow machine or pad every
+ * run. Throws on timeout so a broken wiring fails loudly instead of asserting
+ * against a stale row.
+ */
+async function waitForAccount(
+  id: string,
+  done: (a: PoolAccount) => boolean,
+  timeoutMs = 5_000,
+): Promise<PoolAccount> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const found = (await readPool()).accounts.find((a) => a.id === id)
+    if (found && done(found)) return found
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${id}`)
+    await sleep(10)
+  }
 }
 
 /**
@@ -1180,6 +1210,51 @@ describe('model-tier fallback (Opus/Fable → Sonnet)', () => {
     )
   })
 
+  test('the served fallback model is recorded on the session pin, then cleared once a normal model serves again', async () => {
+    // The onModelFallback toast is transient — gone by the next turn — yet the
+    // session keeps running on the downgraded model. recordSuccess persists the
+    // requested→served model ids on the session pin so the TUI bottom bar can
+    // PERSISTENTLY surface the degrade; a later success on the requested model
+    // overwrites the whole session row, clearing it back to undefined.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'OPUS_A', access: 'tokA' }))
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      // 1: Opus-tier 429 → downgrade. 2: the downgraded retry (200).
+      // 3 (next turn, plain Sonnet request): a clean 200, no tier limit.
+      return n === 1
+        ? tierLimited('seven_day_opus', now)
+        : new Response('ok', { status: 200 })
+    }
+    const { client } = spyClient()
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+    const withSession = (model: string) => ({
+      ...modelPost(model),
+      headers: { [SESSION_HEADER]: 'fb' },
+    })
+
+    // Turn 1: Opus tier-capped pool-wide → served on Sonnet → recorded on the pin.
+    await opts.fetch('https://api.anthropic.com/v1/messages', withSession(OPUS))
+    let pin = (await readPool()).sessions['anthropic:s:fb']
+    expect(pin?.accountId).toBe('OPUS_A')
+    expect(pin?.fallback).toEqual({ from: OPUS, to: SONNET })
+
+    // Turn 2: a normal model serves cleanly → the degrade marker is cleared.
+    await opts.fetch(
+      'https://api.anthropic.com/v1/messages',
+      withSession(SONNET),
+    )
+    pin = (await readPool()).sessions['anthropic:s:fb']
+    expect(pin?.accountId).toBe('OPUS_A')
+    expect(pin?.fallback).toBeUndefined()
+  })
+
   test('a tier 429 with another candidate available rotates and serves the ORIGINAL model (no downgrade, no account cooldown)', async () => {
     // THE headline scenario: fable-5's own weekly cap is exhausted on A while
     // A's aggregate 5h/7d windows still have headroom. A must NOT enter an
@@ -1748,6 +1823,47 @@ describe('toast on switch + status tool', () => {
     )
   })
 
+  test('auth_lb_disable: no matching account reports the available labels', async () => {
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+    // empty pool -> "(none)"
+    const empty = await hooks.tool.auth_lb_disable.execute({ account: 'ghost' })
+    expect(empty.output).toContain('No account matching')
+    expect(empty.output).toContain('(none)')
+
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({ id: 'd1', label: 'work', providerID: 'anthropic' }),
+      )
+    })
+    const miss = await hooks.tool.auth_lb_disable.execute({ account: 'nope' })
+    expect(miss.output).toContain('No account matching')
+    expect(miss.output).toContain('work (anthropic)')
+  })
+
+  test('auth_lb_disable: disables by label, then re-enables by id, persisting disabledReason', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'd1', label: 'burner' }))
+    })
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+
+    // Omitting `enable` disables (sets the manual sentinel, skipped by scheduling).
+    const off = await hooks.tool.auth_lb_disable.execute({ account: 'burner' })
+    expect(off.output).toContain('Disabled "burner"')
+    expect(
+      (await readPool()).accounts.find((a) => a.id === 'd1')?.disabledReason,
+    ).toBe(MANUAL_DISABLED_REASON)
+
+    // enable:true clears it — back in the rotation.
+    const on = await hooks.tool.auth_lb_disable.execute({
+      account: 'd1',
+      enable: true,
+    })
+    expect(on.output).toContain('Enabled "burner"')
+    expect(
+      (await readPool()).accounts.find((a) => a.id === 'd1')?.disabledReason,
+    ).toBeNull()
+  })
+
   test('primeInUse points the in-use marker at the top-ranked (soonest-reset) account', async () => {
     await mutatePool((pool) => {
       pool.accounts.push(
@@ -1967,6 +2083,66 @@ describe('out-of-band weekly reset (e.g. a promotional server-side quota reset)'
       (x) => x.id === 'status-stale',
     )
     expect(stored?.usage.weekly?.utilization).toBeCloseTo(0.03, 5)
+  })
+
+  test('an ANTHROPIC request refreshes a stale OPENAI account (an idle provider must not freeze)', async () => {
+    // Regression lock for the idle-provider freeze. Usage converges to
+    // server-side truth from response headers — which only ever arrive for the
+    // provider you are actually requesting — or from the usage-endpoint poll.
+    // While that poll was scoped to the requesting provider's own adapter, a
+    // provider you did not send requests to (Codex while you work in Claude)
+    // had NO refresh cycle at all after its one startup seed: its dashboard/
+    // TUI numbers stayed pinned at the launch-time snapshot for the entire
+    // opencode process, while the active provider updated every request.
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({ id: 'claude-active', label: 'claude-active' }), // fresh -> not polled
+        account({
+          id: 'codex-idle',
+          label: 'codex-idle',
+          providerID: 'openai',
+          access: 'tokO',
+          usage: { hourly: null, weekly: null, capturedAt: 0 }, // stale
+        }),
+      )
+    })
+    const weeklyResetSec = Math.floor((now + 3 * 24 * 60 * 60 * 1000) / 1000)
+    respond = (url) => {
+      if (url.includes('/wham/usage'))
+        return new Response(
+          JSON.stringify({
+            rate_limit: {
+              primary_window: {
+                used_percent: 7,
+                reset_at: Math.floor((now + 60 * 60 * 1000) / 1000),
+              },
+              secondary_window: {
+                used_percent: 64,
+                reset_at: weeklyResetSec,
+              },
+            },
+          }),
+          { status: 200 },
+        )
+      return new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(anthropicAdapter)
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+    })
+    expect(res.status).toBe(200)
+
+    // The seeding call is fire-and-forget (it must never add request latency),
+    // so poll the pool for the write instead of racing a fixed sleep.
+    const codex = await waitForAccount(
+      'codex-idle',
+      (a) => a.usage.capturedAt !== 0,
+    )
+    expect(codex.usage.weekly?.utilization).toBeCloseTo(0.64, 5)
+    expect(codex.usage.weekly?.resetAt).toBe(weeklyResetSec * 1000)
+    expect(codex.usage.hourly?.utilization).toBeCloseTo(0.07, 5)
   })
 })
 

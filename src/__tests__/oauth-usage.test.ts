@@ -765,6 +765,55 @@ describe('openai usage', () => {
     expect(u?.weekly?.utilization).toBeCloseTo(0.4, 5)
   })
 
+  test('parseUsageHeaders maps a seven-day primary header to WEEKLY usage', () => {
+    // `primary`/`secondary` are POSITIONS, not durations. On the current
+    // ChatGPT Pro shape the seven-day general limit is the SOLE primary
+    // window, so reading positionally filed the weekly number as 5h usage and
+    // pinned `weekly` at 0% forever — the dashboard's Codex "weekly" column
+    // never moved, and the scheduler saw full weekly headroom on an account
+    // that was nearly exhausted.
+    const h = new Headers({
+      'x-codex-primary-used-percent': '7',
+      'x-codex-primary-window-minutes': '10080', // 7 days
+      'x-codex-primary-reset-at': '1900000000',
+    })
+    const u = oParse(h)
+    expect(u?.hourly).toBeUndefined()
+    expect(u?.weekly?.utilization).toBeCloseTo(0.07, 5)
+  })
+
+  test('parseUsageHeaders maps the shorter secondary header to hourly when primary is weekly', () => {
+    // Both windows present with the roles exchanged: each must follow its
+    // DURATION, not its positional name.
+    const h = new Headers({
+      'x-codex-primary-used-percent': '7',
+      'x-codex-primary-window-minutes': '10080', // 7 days
+      'x-codex-primary-reset-at': '1900000000',
+      'x-codex-secondary-used-percent': '20',
+      'x-codex-secondary-window-minutes': '300', // 5 h
+      'x-codex-secondary-reset-at': '1900000000',
+    })
+    const u = oParse(h)
+    expect(u?.hourly?.utilization).toBeCloseTo(0.2, 5)
+    expect(u?.weekly?.utilization).toBeCloseTo(0.07, 5)
+  })
+
+  test('parseUsageHeaders keeps the positional default for a window LONGER than the weekly band', () => {
+    // The weekly test is a ±5% BAND, not "anything big". A monthly (43200 min)
+    // or annual primary window is not the weekly one, so the pair must keep
+    // the historical primary=5h / secondary=weekly reading rather than swap.
+    const h = new Headers({
+      'x-codex-primary-used-percent': '7',
+      'x-codex-primary-window-minutes': '43200', // 30 days
+      'x-codex-primary-reset-at': '1900000000',
+      'x-codex-secondary-used-percent': '20',
+      'x-codex-secondary-reset-at': '1900000000',
+    })
+    const u = oParse(h)
+    expect(u?.hourly?.utilization).toBeCloseTo(0.07, 5)
+    expect(u?.weekly?.utilization).toBeCloseTo(0.2, 5)
+  })
+
   test('parseUsageHeaders: null when absent, NaN ignored, zero reset when missing', () => {
     expect(oParse(new Headers())).toBeNull()
     // Present-but-unparsable header → null, not a truthy empty `{}` partial
@@ -820,6 +869,44 @@ describe('openai usage', () => {
         'chatgpt-account-id'
       ],
     ).toBe('acc_9')
+  })
+
+  test('fetchUsage maps a seven-day primary window to WEEKLY usage when secondary is absent', async () => {
+    // The real ChatGPT Pro `/wham/usage` body, verbatim in shape: the weekly
+    // general limit arrives as the sole primary window, identified by
+    // `limit_window_seconds: 604800`. Pre-fix this recorded 89%-used as "5h"
+    // and weekly as a permanent 0%.
+    const resetSec = Math.floor((Date.now() + 3 * 86_400_000) / 1000)
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          rate_limit: {
+            allowed: true,
+            primary_window: {
+              used_percent: 7,
+              limit_window_seconds: 604800,
+              reset_at: resetSec,
+            },
+            secondary_window: null,
+          },
+        }),
+        { status: 200 },
+      )
+    const u = await oFetchUsage(acct('openai', 'a'), 0)
+    // No 5h window exists on this plan shape -> an authoritative 0%, while the
+    // 7% AND its reset land where they belong: weekly.
+    expect(u?.hourly).toEqual({ utilization: 0, resetAt: 0 })
+    expect(u?.weekly?.utilization).toBeCloseTo(0.07, 5)
+    expect(u?.weekly?.resetAt).toBe(resetSec * 1000)
+  })
+
+  test('fetchUsage rejects a non-object rate_limit instead of recording zero usage', async () => {
+    // A truthy non-object envelope (schema drift, a JSON proxy page) passed the
+    // old `!json?.rate_limit` guard, then read both windows as `undefined` and
+    // wrote a fabricated 0% over the last-known snapshot.
+    respond = () =>
+      new Response(JSON.stringify({ rate_limit: [] }), { status: 200 })
+    expect(await oFetchUsage(acct('openai', 'a'), 0)).toBeNull()
   })
 
   test('fetchUsage omits the account header without an id and handles null windows', async () => {

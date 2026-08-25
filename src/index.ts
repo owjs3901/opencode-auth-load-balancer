@@ -13,7 +13,7 @@ import { primeInUse } from './prime'
 import { anthropicAdapter } from './providers/anthropic/adapter'
 import { openaiAdapter } from './providers/openai/adapter'
 import type { ProviderAdapter } from './providers/types'
-import { SESSION_HEADER } from './session'
+import { MESSAGE_HEADER, SESSION_HEADER } from './session'
 import { readStatus, renderStatus } from './status'
 import { MANUAL_DISABLED_REASON } from './types'
 import {
@@ -159,7 +159,10 @@ function createProviderPlugin(adapter: ProviderAdapter): Plugin {
       auth: buildAuthHook(adapter, client),
       'chat.headers': async (hook, output) => {
         if (hook.model.providerID !== adapter.id) return
-        if (hook.sessionID) output.headers[SESSION_HEADER] = hook.sessionID
+        if (hook.sessionID) {
+          output.headers[SESSION_HEADER] = hook.sessionID
+          output.headers[MESSAGE_HEADER] = hook.message.id
+        }
       },
     }
   }

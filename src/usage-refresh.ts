@@ -6,7 +6,7 @@ import { isExhausted, loadScoreConfig } from './scheduler/score-core'
 import type { PoolAccount, PoolFile } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
 
-const SEED_TTL_MS = 5 * 60 * 1000
+export const USAGE_REFRESH_TTL_MS = 5 * 60 * 1000
 
 /**
  * Max lifetime of a TRANSIENT (non-quota) cooldown. fetch.ts cools a thrown
@@ -110,7 +110,7 @@ async function refreshUsage(
     // per-request hot path.
     if (
       account.usage.capturedAt !== 0 &&
-      now - account.usage.capturedAt <= SEED_TTL_MS
+      now - account.usage.capturedAt <= USAGE_REFRESH_TTL_MS
     )
       continue
     // Resolve the adapter that OWNS this row, rather than assuming the caller's
@@ -121,7 +121,7 @@ async function refreshUsage(
     // burns its `lastPoll` slot on a poll that can't happen.
     const adapter = adapterFor(adapters, account.providerID)
     if (!adapter) continue
-    if ((lastPoll.get(account.id) ?? 0) > now - SEED_TTL_MS) continue
+    if ((lastPoll.get(account.id) ?? 0) > now - USAGE_REFRESH_TTL_MS) continue
     lastPoll.set(account.id, now)
     stale ??= []
     stale.push({ adapter, account })
@@ -164,7 +164,7 @@ async function refreshUsage(
             // that contract on merge: keep the stored last-known window instead
             // of erasing it. `capturedAt` is weekly-scoped (types.ts) — a failed
             // weekly refresh must not stamp freshness, or the re-poll that
-            // would heal it is suppressed for SEED_TTL_MS.
+            // would heal it is suppressed for USAGE_REFRESH_TTL_MS.
             if (stored) {
               stored.usage = {
                 hourly: snapshot.hourly ?? stored.usage.hourly,

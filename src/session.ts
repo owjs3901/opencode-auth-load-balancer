@@ -9,6 +9,9 @@ import { joinBlockTexts } from './util'
  */
 export const SESSION_HEADER = 'x-allb-session'
 
+/** OpenCode user-message id paired with SESSION_HEADER for durable turn identity. */
+export const MESSAGE_HEADER = 'x-allb-message'
+
 /**
  * Find the first user message's text in a messages/input list. Lifted to module
  * scope (like `headerWindow` / `parseWindowPairHeaders` in

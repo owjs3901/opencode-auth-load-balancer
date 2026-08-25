@@ -12,7 +12,7 @@ import { createLoadBalancedFetch } from '../fetch'
 import { mutatePool, readPool } from '../pool/store'
 import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
-import { SESSION_HEADER } from '../session'
+import { MESSAGE_HEADER, SESSION_HEADER } from '../session'
 import type { PoolAccount } from '../types'
 import { testAccount } from './fixtures/account'
 import { responderFetch } from './fixtures/fetch-mock'
@@ -210,7 +210,10 @@ describe('anthropic end-to-end', () => {
       body: JSON.stringify({
         messages: [{ role: 'user', content: 'next turn' }],
       }),
-      headers: { [SESSION_HEADER]: 'fixed' },
+      headers: {
+        [SESSION_HEADER]: 'fixed',
+        [MESSAGE_HEADER]: 'message-fixed',
+      },
     })
 
     const msgCalls = calls.filter((c) => c.url.includes('/v1/messages'))
@@ -218,6 +221,7 @@ describe('anthropic end-to-end', () => {
     expect(msgCalls[0]?.headers.get('authorization')).toBe('Bearer tokB')
     // internal routing header must not leak upstream
     expect(msgCalls[0]?.headers.get(SESSION_HEADER)).toBeNull()
+    expect(msgCalls[0]?.headers.get(MESSAGE_HEADER)).toBeNull()
   })
 
   test('a successful serve clears a STALE long cooldown on the account that served it (active-workhorse self-heal)', async () => {

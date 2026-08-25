@@ -18,7 +18,7 @@ import { ensureAccessToken } from './refresh'
 import { loadConfig, type SchedulerConfig } from './scheduler/config'
 import { isExhausted } from './scheduler/score-core'
 import { selectForSession } from './scheduler/select'
-import { deriveSessionKey, SESSION_HEADER } from './session'
+import { deriveSessionKey, MESSAGE_HEADER, SESSION_HEADER } from './session'
 import type { CooldownKind, PoolAccount, UsageSnapshot } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
 import { refreshAllUsageInBackground } from './usage-refresh'
@@ -461,6 +461,7 @@ export function createLoadBalancedFetch(
     // The clone in the loop inherits the absence, so retry attempts cannot
     // accidentally re-introduce it.
     baseHeaders.delete(SESSION_HEADER)
+    baseHeaders.delete(MESSAGE_HEADER)
     const tried = new Set<string>()
     // Accounts cooled by an `account`-class 429/402 THIS request — the only cooldowns
     // worth WAITING out (they reflect a real Retry-After / quota window that WILL clear).

@@ -26,7 +26,7 @@ import { primeInUse } from '../prime'
 import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import { loadConfig } from '../scheduler/config'
-import { SESSION_HEADER } from '../session'
+import { MESSAGE_HEADER, SESSION_HEADER } from '../session'
 import { MANUAL_DISABLED_REASON, type PoolAccount } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
 import { sleep } from '../util'
@@ -72,7 +72,11 @@ interface PluginHooks {
     methods: AuthMethod[]
   }
   'chat.headers': (
-    input: { sessionID?: string; model?: { providerID?: string } },
+    input: {
+      sessionID?: string
+      model?: { providerID?: string }
+      message?: { id?: string }
+    },
     output: { headers: Record<string, string> },
   ) => Promise<void>
 }
@@ -111,8 +115,10 @@ async function loadHooks<T = PluginHooks>(
 ): Promise<T> {
   const factory = plugin as unknown as (input: {
     client: ToastClient
+    directory: string
+    worktree: string
   }) => Promise<T>
-  return factory({ client })
+  return factory({ client, directory: DIR, worktree: DIR })
 }
 
 function account(over: Partial<PoolAccount> = {}): PoolAccount {
@@ -229,28 +235,39 @@ describe('plugin factory', () => {
     expect((await flow.callback('garbage')).type).toBe('failed')
   })
 
-  test('chat.headers stamps the session id only for the matching provider with a session', async () => {
+  test('chat.headers stamps the session and message ids only for the matching provider', async () => {
     const hooks = await loadHooks(AnthropicLoadBalancerPlugin)
     const match: { headers: Record<string, string> } = { headers: {} }
     await hooks['chat.headers'](
-      { sessionID: 's1', model: { providerID: 'anthropic' } },
+      {
+        sessionID: 's1',
+        model: { providerID: 'anthropic' },
+        message: { id: 'm1' },
+      },
       match,
     )
     expect(match.headers[SESSION_HEADER]).toBe('s1')
+    expect(match.headers[MESSAGE_HEADER]).toBe('m1')
 
     const wrongProvider: { headers: Record<string, string> } = { headers: {} }
     await hooks['chat.headers'](
-      { sessionID: 's1', model: { providerID: 'openai' } },
+      {
+        sessionID: 's1',
+        model: { providerID: 'openai' },
+        message: { id: 'm1' },
+      },
       wrongProvider,
     )
     expect(wrongProvider.headers[SESSION_HEADER]).toBeUndefined()
+    expect(wrongProvider.headers[MESSAGE_HEADER]).toBeUndefined()
 
     const noSession: { headers: Record<string, string> } = { headers: {} }
     await hooks['chat.headers'](
-      { model: { providerID: 'anthropic' } },
+      { model: { providerID: 'anthropic' }, message: { id: 'm1' } },
       noSession,
     )
     expect(noSession.headers[SESSION_HEADER]).toBeUndefined()
+    expect(noSession.headers[MESSAGE_HEADER]).toBeUndefined()
   })
 })
 

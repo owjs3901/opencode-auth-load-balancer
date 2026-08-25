@@ -19,7 +19,7 @@ import { loadConfig, type SchedulerConfig } from './scheduler/config'
 import { isExhausted } from './scheduler/score-core'
 import { selectForSession } from './scheduler/select'
 import { deriveSessionKey, SESSION_HEADER } from './session'
-import type { PoolAccount, UsageSnapshot } from './types'
+import type { CooldownKind, PoolAccount, UsageSnapshot } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
 import { refreshAllUsageInBackground } from './usage-refresh'
 import { ignore, sleepAbortable } from './util'
@@ -160,6 +160,7 @@ function cooldownUntilFrom(
 async function applyCooldown(
   accountId: string,
   fallbackMs: number,
+  kind: CooldownKind,
 ): Promise<void> {
   // No response to consult (this path handles THROWN network errors), so
   // `cooldownUntilFrom(null, …)` reduces to exactly `now + fallbackMs` —
@@ -168,8 +169,10 @@ async function applyCooldown(
   await bestEffort('cooldown', () =>
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
-      if (account)
-        account.cooldownUntil = Math.max(account.cooldownUntil, until)
+      if (account && until >= account.cooldownUntil) {
+        account.cooldownUntil = until
+        account.cooldownKind = kind
+      }
     }),
   )
 }
@@ -193,6 +196,7 @@ async function recordRotation(
   res: Response,
   fallbackMs: number,
   now: number,
+  kind: CooldownKind,
 ): Promise<void> {
   const partial = adapter.parseUsageHeaders(res.headers)
   const until = cooldownUntilFrom(res, fallbackMs, now)
@@ -201,7 +205,10 @@ async function recordRotation(
       const account = findAccount(pool, accountId)
       if (!account) return
       if (partial) applyUsagePartial(account, partial, now)
-      account.cooldownUntil = Math.max(account.cooldownUntil, until)
+      if (until >= account.cooldownUntil) {
+        account.cooldownUntil = until
+        account.cooldownKind = kind
+      }
     }),
   )
 }
@@ -300,8 +307,10 @@ async function recordSuccess(
           partial &&
           account.cooldownUntil > now + ACCOUNT_COOLDOWN_MS &&
           !isExhausted(account, cfg, now)
-        )
+        ) {
           account.cooldownUntil = 0
+          delete account.cooldownKind
+        }
         pool.lastSelected[adapter.id] = accountId
       }
       if (sessionKey) {
@@ -823,7 +832,14 @@ export function createLoadBalancedFetch(
           // fetch, so basing the cooldown on it would understate `Retry-After`
           // by the request latency and retry the account before the server
           // said it may be. The success path already stamps response time.
-          await recordRotation(adapter, account.id, res, ms, Date.now())
+          await recordRotation(
+            adapter,
+            account.id,
+            res,
+            ms,
+            Date.now(),
+            cls === 'auth' ? 'auth' : 'quota',
+          )
           // Only an `account`-class (429/402) cooldown is worth waiting out; an auth
           // (401/403) failure needs a re-login, not time, so it stays out of the set.
           if (cls === 'account') {
@@ -891,7 +907,7 @@ export function createLoadBalancedFetch(
         // every attempt and re-cools each time, so it never gets treated as
         // healthy for longer than a real rate-limit cooldown would allow.
         if (!account.disabledReason)
-          await applyCooldown(account.id, AUTH_COOLDOWN_MS)
+          await applyCooldown(account.id, AUTH_COOLDOWN_MS, 'transient')
         // prettier-ignore
         if (DEBUG) log(`!! ${account.label} threw: ${error instanceof Error ? error.message : String(error)}`)
         continue

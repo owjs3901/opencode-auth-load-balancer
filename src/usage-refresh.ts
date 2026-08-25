@@ -199,6 +199,7 @@ async function refreshUsage(
                 !isExhausted(stored, scoreCfg, now)
               )
                 stored.cooldownUntil = 0
+              delete stored.cooldownKind
             }
           })
         }

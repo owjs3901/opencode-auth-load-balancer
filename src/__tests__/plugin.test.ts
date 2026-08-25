@@ -563,9 +563,11 @@ describe('load-balanced fetch — edge paths', () => {
    * assertions (HTTP-date tests build their header string before calling;
    * their ±2 s tolerances absorb the sub-ms `now` skew).
    */
-  async function cooldownAfter429(
-    retryAfter: string,
-  ): Promise<{ now: number; cooldownUntil: number | undefined }> {
+  async function cooldownAfter429(retryAfter: string): Promise<{
+    now: number
+    cooldownUntil: number | undefined
+    cooldownKind: string | undefined
+  }> {
     const now = Date.now()
     await seedAB(now)
     let n = 0
@@ -585,12 +587,17 @@ describe('load-balanced fetch — edge paths', () => {
     })
     expect(res.status).toBe(200)
     const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
-    return { now, cooldownUntil: cooled?.cooldownUntil }
+    return {
+      now,
+      cooldownUntil: cooled?.cooldownUntil,
+      cooldownKind: cooled?.cooldownKind,
+    }
   }
 
   test('honors retry-after when cooling down a rate-limited account', async () => {
-    const { now, cooldownUntil } = await cooldownAfter429('30')
+    const { now, cooldownUntil, cooldownKind } = await cooldownAfter429('30')
     expect(cooldownUntil).toBeGreaterThan(now + 25_000)
+    expect(cooldownKind).toBe('quota')
   })
 
   test('honors retry-after HTTP-date form (RFC 9110) when cooling down', async () => {
@@ -746,6 +753,7 @@ describe('load-balanced fetch — edge paths', () => {
     // regression that swapped the two constants would cool A out to ~5 min and
     // fail this strict upper bound.
     expect(cooled?.cooldownUntil).toBeLessThan(now + 4 * 60_000)
+    expect(cooled?.cooldownKind).toBe('auth')
   })
 
   test('a 5xx service-class response is returned untouched (no rotation, no cooldown)', async () => {
@@ -969,6 +977,9 @@ describe('load-balanced fetch — edge paths', () => {
         body: '{}',
       }),
     ).rejects.toThrow()
+    expect(
+      (await readPool()).accounts.find((a) => a.id === 'solo')?.cooldownKind,
+    ).toBe('transient')
   })
 
   test('a client-side abort propagates without cooling down or rotating accounts', async () => {

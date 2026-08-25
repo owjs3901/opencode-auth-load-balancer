@@ -42,6 +42,8 @@ export interface TokenSet {
 }
 
 /** One pooled credential. */
+export type CooldownKind = 'quota' | 'auth' | 'transient'
+
 export interface PoolAccount {
   /** Stable internal id (uuid). */
   id: string
@@ -65,6 +67,8 @@ export interface PoolAccount {
   usage: UsageSnapshot
   /** epoch ms; the account is skipped until this time. 0 = no cooldown. */
   cooldownUntil: number
+  /** Why the active account-wide cooldown was written. Absent on legacy rows. */
+  cooldownKind?: CooldownKind
   /**
    * Per MODEL-TIER cooldowns: tier name (e.g. "opus", "fable") → epoch ms until
    * that tier's separate weekly cap resets. While an entry is `> now`, requests

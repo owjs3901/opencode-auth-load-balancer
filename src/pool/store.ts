@@ -167,6 +167,14 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
       row.usage.weekly = normalizeWindow(row.usage.weekly)
     }
     if (!Number.isFinite(row.cooldownUntil)) row.cooldownUntil = 0
+    if (
+      row.cooldownKind !== undefined &&
+      row.cooldownKind !== 'quota' &&
+      row.cooldownKind !== 'auth' &&
+      row.cooldownKind !== 'transient'
+    )
+      delete row.cooldownKind
+    if (row.cooldownUntil <= 0) delete row.cooldownKind
     // Mirror the `cooldownUntil` heal for the per-tier model cooldown map.
     // Unlike the fields above it is OPTIONAL (absent on legacy files / OpenAI
     // rows), so leave `undefined` compact — but heal hand-edited garbage: a

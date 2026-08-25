@@ -197,9 +197,10 @@ async function refreshUsage(
                 snapshot.weekly !== null &&
                 stored.cooldownUntil > now + MAX_TRANSIENT_COOLDOWN_MS &&
                 !isExhausted(stored, scoreCfg, now)
-              )
+              ) {
                 stored.cooldownUntil = 0
-              delete stored.cooldownKind
+                delete stored.cooldownKind
+              }
             }
           })
         }

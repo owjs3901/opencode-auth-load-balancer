@@ -8,7 +8,10 @@ import {
 } from './accounts'
 import { createLoadBalancedFetch } from './fetch'
 import { notifyModelFallback, notifyOnSwitch, type ToastClient } from './notify'
-import { PendingCoordinator } from './pending/coordinator'
+import {
+  PendingCoordinator,
+  type PendingRestoreClient,
+} from './pending/coordinator'
 import { mutatePool, readPool } from './pool/store'
 import { primeInUse } from './prime'
 import { anthropicAdapter } from './providers/anthropic/adapter'
@@ -164,6 +167,9 @@ function createProviderPlugin(adapter: ProviderAdapter): Plugin {
       adapter,
       config: loadConfig(),
     })
+    void pending
+      .restore(input.client as unknown as PendingRestoreClient)
+      .catch(ignore)
     return {
       auth: buildAuthHook(adapter, client, pending),
       'chat.headers': async (hook, output) => {
@@ -172,6 +178,10 @@ function createProviderPlugin(adapter: ProviderAdapter): Plugin {
           output.headers[SESSION_HEADER] = hook.sessionID
           output.headers[MESSAGE_HEADER] = hook.message.id
         }
+      },
+      event: async ({ event }) => {
+        if (event.type !== 'session.deleted') return
+        await pending.removeSession(event.properties.info.id)
       },
       dispose: () => pending.dispose(),
     }

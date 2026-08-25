@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-plugin-'))
 const POOL = join(DIR, 'auth-load-balancer.json')
+const PENDING = join(DIR, 'auth-load-balancer-pending.json')
 
 import { bestEffort, createLoadBalancedFetch } from '../fetch'
 import {
@@ -15,6 +16,7 @@ import {
   OpenAILoadBalancerPlugin,
 } from '../index'
 import type { ToastClient } from '../notify'
+import { listPendingForWorkspace, upsertPending } from '../pending/store'
 import { LockTimeoutError } from '../pool/lock'
 import {
   mutatePool,
@@ -39,6 +41,7 @@ let respond: Responder
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_LB_DIR = DIR
   await rm(POOL, { force: true })
+  await rm(PENDING, { force: true })
   respond = () => new Response('{}', { status: 200 })
   globalThis.fetch = responderFetch(() => respond)
 })
@@ -80,6 +83,12 @@ interface PluginHooks {
     output: { headers: Record<string, string> },
   ) => Promise<void>
   dispose: () => Promise<void>
+  event: (input: {
+    event: {
+      type: string
+      properties?: { info?: { id?: string } }
+    }
+  }) => Promise<void>
 }
 
 interface ToolHooks {
@@ -272,6 +281,45 @@ describe('plugin factory', () => {
     )
     expect(noSession.headers[SESSION_HEADER]).toBeUndefined()
     expect(noSession.headers[MESSAGE_HEADER]).toBeUndefined()
+  })
+
+  test('session.deleted clears all provider pending rows while unrelated events do nothing', async () => {
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin)
+    await sleep(20)
+    const now = Date.now()
+    const shared = {
+      workspace: DIR,
+      sessionID: 'deleted-session',
+      messageID: 'message-a',
+      providerID: 'anthropic',
+    }
+    await upsertPending(shared, {
+      now,
+      nextCheckAt: now + 60_000,
+      resumeAt: now + 60_000,
+    })
+    await upsertPending(
+      { ...shared, messageID: 'message-b', providerID: 'openai' },
+      { now, nextCheckAt: now + 60_000, resumeAt: now + 60_000 },
+    )
+    await upsertPending(
+      { ...shared, sessionID: 'kept-session', messageID: 'message-c' },
+      { now, nextCheckAt: now + 60_000, resumeAt: now + 60_000 },
+    )
+
+    await hooks.event({ event: { type: 'session.updated' } })
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(3)
+    await hooks.event({
+      event: {
+        type: 'session.deleted',
+        properties: { info: { id: 'deleted-session' } },
+      },
+    })
+
+    expect(
+      (await listPendingForWorkspace(DIR)).map((turn) => turn.sessionID),
+    ).toEqual(['kept-session'])
+    await hooks.dispose()
   })
 })
 

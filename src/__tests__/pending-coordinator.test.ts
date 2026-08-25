@@ -115,11 +115,31 @@ function harness(
         },
       }
     },
+    list: async () => [...turns.values()],
+    removeSession: async (workspace, sessionID) => {
+      let removed = 0
+      for (const [key, pending] of turns) {
+        if (
+          pending.workspace === workspace &&
+          pending.sessionID === sessionID
+        ) {
+          turns.delete(key)
+          removed += 1
+        }
+      }
+      return removed
+    },
     onPending: async (_pendingRef, recovery) => {
       events.push(`pending:${recovery.nextCheckAt}:${recovery.resumeAt}`)
     },
     onResumed: async (pendingRef) => {
       events.push(`resumed:${pendingRef.messageID}`)
+    },
+    onRestored: async (count) => {
+      events.push(`restored:${count}`)
+    },
+    onRestoreError: async (pendingRef) => {
+      events.push(`restore-error:${pendingRef.messageID}`)
     },
     ...overrides,
   }

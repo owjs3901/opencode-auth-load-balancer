@@ -79,6 +79,7 @@ interface PluginHooks {
     },
     output: { headers: Record<string, string> },
   ) => Promise<void>
+  dispose: () => Promise<void>
 }
 
 interface ToolHooks {
@@ -186,8 +187,11 @@ describe('plugin factory', () => {
     const a = await loadHooks(AnthropicLoadBalancerPlugin)
     expect(a.auth.provider).toBe('anthropic')
     expect(typeof a['chat.headers']).toBe('function')
+    expect(typeof a.dispose).toBe('function')
     const o = await loadHooks(OpenAILoadBalancerPlugin)
     expect(o.auth.provider).toBe('openai')
+    expect(typeof o.dispose).toBe('function')
+    await Promise.all([a.dispose(), o.dispose()])
   })
 
   test('loader seeds from existing auth, zeroes model cost, returns a fetch', async () => {

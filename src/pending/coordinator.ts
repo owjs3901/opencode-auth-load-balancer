@@ -206,6 +206,20 @@ export class PendingCoordinator {
 
   /** Remove a completed/terminal turn and release any execution lease it owns. */
   async complete(ref: PendingRef): Promise<void> {
+    const key = pendingKey(ref)
+    if (!this.leases.has(key) && !this.pendingToasts.has(key)) return
+    await this.clear(ref)
+  }
+
+  /** Explicit user cancellation removes durable state; shutdown preserves it. */
+  async abort(ref: PendingRef): Promise<void> {
+    const key = pendingKey(ref)
+    if (!this.leases.has(key) && !this.pendingToasts.has(key)) return
+    if (this.disposing) {
+      this.pendingToasts.delete(key)
+      await this.releaseLease(key)
+      return
+    }
     await this.clear(ref)
   }
 

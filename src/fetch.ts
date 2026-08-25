@@ -1,3 +1,8 @@
+import {
+  classifyProviderRecovery,
+  type ProviderRecovery,
+} from './pending/recovery'
+import type { PendingRef } from './pending/types'
 import { LockTimeoutError } from './pool/lock'
 import {
   findAccount,
@@ -21,7 +26,10 @@ import { selectForSession } from './scheduler/select'
 import { deriveSessionKey, MESSAGE_HEADER, SESSION_HEADER } from './session'
 import type { CooldownKind, PoolAccount, UsageSnapshot } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
-import { refreshAllUsageInBackground } from './usage-refresh'
+import {
+  refreshAllUsageInBackground,
+  USAGE_REFRESH_TTL_MS,
+} from './usage-refresh'
 import { ignore, sleepAbortable } from './util'
 
 // Exported so the usage-refresh stale-cooldown reconciliation's local
@@ -359,6 +367,18 @@ interface FetchHooks {
   ) => void
 }
 
+/** Durable quota-wait boundary supplied by the provider plugin instance. */
+export interface PendingFetchCoordinator {
+  readonly workspace: string
+  waitForCapacity(
+    ref: PendingRef,
+    recovery: Extract<ProviderRecovery, { state: 'quota-blocked' }>,
+    signal?: AbortSignal,
+  ): Promise<'available' | 'unusable'>
+  complete(ref: PendingRef): Promise<void>
+  abort(ref: PendingRef): Promise<void>
+}
+
 /**
  * Build a provider-shaped 401 for the "pool has no usable account" case. We must
  * NOT fall through to the global fetch here: opencode handed auth control to this
@@ -425,6 +445,7 @@ export function createLoadBalancedFetch(
   // the best model that actually EXISTS one family down. Empty (tests, absent
   // catalog) degrades to the adapter's static last-resort default.
   models: readonly string[] = [],
+  pending?: PendingFetchCoordinator,
 ): typeof fetch {
   const cfg = loadConfig()
 
@@ -438,6 +459,17 @@ export function createLoadBalancedFetch(
     // and `headers.delete(SESSION_HEADER)` ran defensively on every attempt
     // even though the value to strip is deterministic from input/init.
     const baseHeaders = mergeHeaders(input, init)
+    const sessionID = baseHeaders.get(SESSION_HEADER)
+    const messageID = baseHeaders.get(MESSAGE_HEADER)
+    const pendingRef: PendingRef | null =
+      pending && sessionID && messageID
+        ? {
+            workspace: pending.workspace,
+            providerID: adapter.id,
+            sessionID,
+            messageID,
+          }
+        : null
     // The client's abort signal may ride on `init` OR on a `Request` passed as
     // `input` (`fetch(new Request(url, { signal }))` is part of the `typeof
     // fetch` contract, and Request-carried *headers* are already honored via
@@ -611,6 +643,35 @@ export function createLoadBalancedFetch(
         void refreshAllUsageInBackground(now, pool).catch(ignore)
       }
 
+      // A durable wait is entered only when every otherwise-usable account is
+      // blocked by provider-wide quota. Model-tier cooldowns are deliberately
+      // ignored by this classifier, leaving the fallback ladder below first
+      // priority. Re-reading here also avoids a guaranteed upstream 429 when a
+      // previous turn already established that the whole provider is full.
+      if (pendingRef && pending) {
+        const recovery = classifyProviderRecovery(
+          pool.accounts,
+          adapter.id,
+          cfg,
+          now,
+          USAGE_REFRESH_TTL_MS,
+        )
+        if (recovery.state === 'quota-blocked') {
+          const result = await pending.waitForCapacity(
+            pendingRef,
+            recovery,
+            signal,
+          )
+          if (result === 'unusable') {
+            await pending.complete(pendingRef).catch(ignore)
+            return noUsableAccountResponse(adapter.id)
+          }
+          tried.clear()
+          waitableCooldownIds?.clear()
+          continue
+        }
+      }
+
       const selection = selectForSession(
         pool,
         adapter.id,
@@ -625,7 +686,11 @@ export function createLoadBalancedFetch(
         // every one is disabled): return a clean 401 rather than leaking the
         // SDK's empty x-api-key through the global fetch (see
         // noUsableAccountResponse).
-        if (tried.size === 0) return noUsableAccountResponse(adapter.id)
+        if (tried.size === 0) {
+          if (pendingRef && pending)
+            await pending.complete(pendingRef).catch(ignore)
+          return noUsableAccountResponse(adapter.id)
+        }
 
         // Every candidate is limited for the CURRENT model tier (skipped
         // proactively or tier-429'd) while staying usable for other models:
@@ -887,6 +952,8 @@ export function createLoadBalancedFetch(
           cfg,
           fallbackInfo,
         )
+        if (pendingRef && pending)
+          await pending.complete(pendingRef).catch(ignore)
         return adapter.transformResponse(res)
       } catch (error) {
         lastError = error
@@ -898,7 +965,11 @@ export function createLoadBalancedFetch(
         const aborted =
           signal?.aborted === true ||
           (error instanceof Error && error.name === 'AbortError')
-        if (aborted) throw error
+        if (aborted) {
+          if (pendingRef && pending)
+            await pending.abort(pendingRef).catch(ignore)
+          throw error
+        }
         // Any OTHER thrown error here (network/DNS/timeout failure, or
         // `ensureAccessToken` rejecting on a refresh problem) intentionally
         // shares the SHORT `AUTH_COOLDOWN_MS`, not the longer
@@ -915,6 +986,7 @@ export function createLoadBalancedFetch(
       }
     }
 
+    if (pendingRef && pending) await pending.complete(pendingRef).catch(ignore)
     throw (
       lastError ??
       new Error(`${adapter.id}: no usable account in the load-balancer pool`)

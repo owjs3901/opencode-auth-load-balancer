@@ -8,11 +8,13 @@ import {
 } from './accounts'
 import { createLoadBalancedFetch } from './fetch'
 import { notifyModelFallback, notifyOnSwitch, type ToastClient } from './notify'
+import { PendingCoordinator } from './pending/coordinator'
 import { mutatePool, readPool } from './pool/store'
 import { primeInUse } from './prime'
 import { anthropicAdapter } from './providers/anthropic/adapter'
 import { openaiAdapter } from './providers/openai/adapter'
 import type { ProviderAdapter } from './providers/types'
+import { loadConfig } from './scheduler/config'
 import { MESSAGE_HEADER, SESSION_HEADER } from './session'
 import { readStatus, renderStatus } from './status'
 import { MANUAL_DISABLED_REASON } from './types'
@@ -58,6 +60,7 @@ function zeroOutCost(provider: LoaderProvider): void {
 function buildAuthHook(
   adapter: ProviderAdapter,
   client: ToastClient,
+  pending: PendingCoordinator,
 ): AuthHook {
   const label = PROVIDER_LABELS[adapter.id] ?? adapter.id
   return {
@@ -101,6 +104,7 @@ function buildAuthHook(
           // tier-capped request's downgrade target from models that actually
           // exist here (e.g. a capped fable-5 lands on the newest Opus).
           Object.keys(provider.models),
+          pending,
         ),
       }
     },
@@ -155,8 +159,13 @@ function createProviderPlugin(adapter: ProviderAdapter): Plugin {
   return async (input) => {
     // opencode's SDK client is a superset of the small toast slice we use.
     const client = input.client as unknown as ToastClient
+    const pending = new PendingCoordinator({
+      workspace: input.worktree || input.directory,
+      adapter,
+      config: loadConfig(),
+    })
     return {
-      auth: buildAuthHook(adapter, client),
+      auth: buildAuthHook(adapter, client, pending),
       'chat.headers': async (hook, output) => {
         if (hook.model.providerID !== adapter.id) return
         if (hook.sessionID) {
@@ -164,6 +173,7 @@ function createProviderPlugin(adapter: ProviderAdapter): Plugin {
           output.headers[MESSAGE_HEADER] = hook.message.id
         }
       },
+      dispose: () => pending.dispose(),
     }
   }
 }

@@ -297,4 +297,30 @@ describe('PendingCoordinator live waits', () => {
     expect(h.events.some((event) => event.startsWith('sleep:'))).toBe(false)
     expect(h.events).toContain(`release:${pendingKey(pendingRef)}`)
   })
+
+  test('terminal helpers are no-ops for turns this process never queued', async () => {
+    const h = harness()
+    const pendingRef = ref('ordinary')
+
+    await h.coordinator.complete(pendingRef)
+    await h.coordinator.abort(pendingRef)
+
+    expect(h.events).toEqual([])
+  })
+
+  test('abort clears a queued turn after capacity has resumed', async () => {
+    const h = harness()
+    h.setPool(readyPool())
+    const pendingRef = ref('resumed-cancel')
+
+    await h.coordinator.waitForCapacity(
+      pendingRef,
+      quota(START + 100, START + 100),
+    )
+    await h.coordinator.abort(pendingRef)
+
+    expect(h.turns.has(pendingKey(pendingRef))).toBe(false)
+    expect(h.events).toContain(`remove:${pendingRef.messageID}`)
+    expect(h.events).toContain(`release:${pendingKey(pendingRef)}`)
+  })
 })

@@ -7,8 +7,15 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-status-'))
 
+import type { PendingTurn } from '../pending/types'
 import { mutatePool } from '../pool/store'
-import { buildStatus, displayWidth, readStatus, renderStatus } from '../status'
+import {
+  buildStatus,
+  displayWidth,
+  readStatus,
+  renderPendingStatus,
+  renderStatus,
+} from '../status'
 import {
   MANUAL_DISABLED_REASON,
   type PoolAccount,
@@ -348,5 +355,54 @@ describe('readStatus', () => {
     expect(providers).toHaveLength(1)
     expect(providers[0]?.accounts[0]?.label).toBe('live')
     expect(providers[0]?.accounts[0]?.current).toBe(true)
+  })
+})
+
+describe('renderPendingStatus', () => {
+  const pending = (
+    providerID: string,
+    sessionID: string,
+    resumeAt: number | null,
+    nextCheckAt: number,
+    messageID = `${sessionID}-message`,
+  ): PendingTurn => {
+    const ref = {
+      workspace: 'C:\\work',
+      providerID,
+      sessionID,
+      messageID,
+    }
+    return {
+      ...ref,
+      key: `${providerID}:${sessionID}:${messageID}`,
+      createdAt: NOW - HOUR,
+      updatedAt: NOW,
+      resumeAt,
+      nextCheckAt,
+    }
+  }
+
+  test('groups unique sessions by provider with nearest known recovery', () => {
+    const out = renderPendingStatus(
+      [
+        pending('anthropic', 's1', NOW + 2 * HOUR, NOW + HOUR),
+        pending('anthropic', 's1', NOW + HOUR, NOW + HOUR, 'another'),
+        pending('anthropic', 's2', NOW + 3 * HOUR, NOW + HOUR),
+        pending('openai', 's3', null, NOW + 5 * MIN),
+      ],
+      NOW,
+    )
+
+    expect(out).toBe(
+      [
+        'Pending turns',
+        '  Claude  2 sessions · nearest recovery 60m',
+        '  Codex   1 session · checking again 5m',
+      ].join('\n'),
+    )
+  })
+
+  test('returns an empty suffix when no turns are pending', () => {
+    expect(renderPendingStatus([], NOW)).toBe('')
   })
 })

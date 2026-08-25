@@ -1,3 +1,4 @@
+import type { PendingTurn } from './pending/types'
 import { readPool } from './pool/store'
 import {
   DEFAULT_CONFIG,
@@ -239,6 +240,47 @@ function stateOf(a: AccountStatus, now: number): string {
 
 export function providerName(providerID: string): string {
   return PROVIDER_NAMES[providerID] ?? providerID
+}
+
+/** Compact workspace-scoped pending summary appended by `auth_lb_status`. */
+export function renderPendingStatus(
+  turns: readonly PendingTurn[],
+  now: number = Date.now(),
+): string {
+  if (turns.length === 0) return ''
+  const grouped = new Map<
+    string,
+    { sessions: Set<string>; resumeAt: number[]; nextCheckAt: number[] }
+  >()
+  for (const turn of turns) {
+    let group = grouped.get(turn.providerID)
+    if (!group) {
+      group = { sessions: new Set(), resumeAt: [], nextCheckAt: [] }
+      grouped.set(turn.providerID, group)
+    }
+    group.sessions.add(turn.sessionID)
+    if (turn.resumeAt !== null) group.resumeAt.push(turn.resumeAt)
+    group.nextCheckAt.push(turn.nextCheckAt)
+  }
+  const groups = [...grouped.entries()].sort(([a], [b]) => compareAscii(a, b))
+  const width = groups.reduce(
+    (max, [providerID]) =>
+      Math.max(max, displayWidth(providerName(providerID))),
+    0,
+  )
+  const pendingTime = (at: number): string =>
+    at <= now ? 'now' : relTime(at, now)
+  const lines = ['Pending turns']
+  for (const [providerID, group] of groups) {
+    const count = group.sessions.size
+    const timing = group.resumeAt.length
+      ? `nearest recovery ${pendingTime(Math.min(...group.resumeAt))}`
+      : `checking again ${pendingTime(Math.min(...group.nextCheckAt))}`
+    lines.push(
+      `  ${padDisplayEnd(providerName(providerID), width)}  ${count} session${count === 1 ? '' : 's'} · ${timing}`,
+    )
+  }
+  return lines.join('\n')
 }
 
 /** Render the status model as a compact text dashboard (for tools/commands/CLI). */

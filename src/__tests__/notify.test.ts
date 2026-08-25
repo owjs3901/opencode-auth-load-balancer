@@ -3,8 +3,13 @@ import { describe, expect, test } from 'bun:test'
 import {
   notifyModelFallback,
   notifyOnSwitch,
+  notifyPending,
+  notifyPendingRestored,
+  notifyPendingRestoreError,
+  notifyPendingResumed,
   type ToastClient,
 } from '../notify'
+import type { ProviderRecovery } from '../pending/recovery'
 import type { PoolAccount } from '../types'
 import { testAccount } from './fixtures/account'
 
@@ -381,5 +386,54 @@ describe('notifyModelFallback', () => {
     // toast, but never a MISSED one.
     await notifyModelFallback(client, 'p1', acctAt(0), 'opus', 'sonnet')
     expect(calls).toHaveLength(TOTAL + 1)
+  })
+})
+
+describe('pending notifications', () => {
+  test('renders known, unknown, restored, recovered, and restore-error states', async () => {
+    const { client, calls } = spyClient()
+    const now = new Date(2026, 7, 27, 14, 15).getTime()
+    const known: Extract<ProviderRecovery, { state: 'quota-blocked' }> = {
+      state: 'quota-blocked',
+      nextCheckAt: now + 5 * 60_000,
+      resumeAt: new Date(2026, 7, 27, 14, 20).getTime(),
+    }
+    const unknown: Extract<ProviderRecovery, { state: 'quota-blocked' }> = {
+      state: 'quota-blocked',
+      nextCheckAt: now + 5 * 60_000,
+      resumeAt: null,
+    }
+
+    await notifyPending(client, 'anthropic', known, now)
+    await notifyPending(client, 'anthropic', unknown, now)
+    await notifyPendingRestored(client, 'anthropic', 3)
+    await notifyPendingResumed(client, 'anthropic')
+    await notifyPendingRestoreError(client, 'anthropic', 'message-1')
+
+    expect(calls.map((call) => call.message)).toEqual([
+      'Claude usage exhausted — pending until Aug 27, 14:20 (Esc to cancel)',
+      'Claude usage exhausted — checking again in 5m (Esc to cancel)',
+      'Restored 3 pending Claude sessions',
+      'Claude usage recovered — resuming request',
+      'Could not restore a pending Claude request yet — retrying automatically',
+    ])
+  })
+
+  test('restore-error toast is deduplicated per provider/message and all are best-effort', async () => {
+    let calls = 0
+    const client: ToastClient = {
+      tui: {
+        showToast: async () => {
+          calls += 1
+          throw new Error('tui down')
+        },
+      },
+    }
+
+    await notifyPendingRestoreError(client, 'pending-failure', 'same-message')
+    await notifyPendingRestoreError(client, 'pending-failure', 'same-message')
+    await notifyPendingResumed(client, 'pending-failure')
+
+    expect(calls).toBe(2)
   })
 })

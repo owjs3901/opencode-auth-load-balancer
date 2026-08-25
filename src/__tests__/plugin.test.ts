@@ -1738,6 +1738,150 @@ describe('model-tier fallback (Opus/Fable → Sonnet)', () => {
 })
 
 describe('toast on switch + status tool', () => {
+  test('startup restore reports a transient SDK failure and keeps the turn for retry', async () => {
+    const now = Date.now()
+    await upsertPending(
+      {
+        workspace: DIR,
+        providerID: 'anthropic',
+        sessionID: 'restore-session',
+        messageID: 'restore-message',
+      },
+      {
+        now,
+        nextCheckAt: now + 60_000,
+        resumeAt: now + 60_000,
+      },
+    )
+    const toasts: string[] = []
+    let reads = 0
+    const client = {
+      tui: {
+        showToast: async (options: { body: { message: string } }) => {
+          toasts.push(options.body.message)
+        },
+      },
+      session: {
+        message: async () => {
+          reads += 1
+          return { error: new Error('SDK temporarily unavailable') }
+        },
+        messages: async () => ({ data: [] }),
+        prompt: async () => ({ data: {} }),
+      },
+    } as unknown as ToastClient
+
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    for (
+      let i = 0;
+      i < 100 && !toasts.some((message) => message.includes('retrying'));
+      i += 1
+    )
+      await sleep(1)
+
+    expect(toasts).toContain('Restored 1 pending Claude session')
+    expect(toasts).toContain(
+      'Could not restore a pending Claude request yet — retrying automatically',
+    )
+    expect(reads).toBe(1)
+    await hooks.dispose()
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(1)
+  })
+
+  test('a pending loader request resumes automatically when provider usage recovers', async () => {
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({
+          id: 'recovering-acct',
+          label: 'recovering-acct',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 1, resetAt: now + 75 },
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    const toasts: string[] = []
+    const client: ToastClient = {
+      tui: {
+        showToast: async (options) => {
+          toasts.push(options.body.message)
+        },
+      },
+    }
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+
+    const response = await opts.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+      headers: {
+        [SESSION_HEADER]: 'recovering-session',
+        [MESSAGE_HEADER]: 'recovering-message',
+      },
+    })
+
+    expect(response.status).toBe(200)
+    expect(toasts.some((message) => message.includes('usage exhausted'))).toBe(
+      true,
+    )
+    expect(toasts).toContain('Claude usage recovered — resuming request')
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(0)
+    await hooks.dispose()
+  })
+
+  test('the loader announces a durable provider pending turn and Esc clears it', async () => {
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({
+          id: 'pending-acct',
+          label: 'pending-acct',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 1, resetAt: now + 60 * 60_000 },
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    const toasts: string[] = []
+    const client: ToastClient = {
+      tui: {
+        showToast: async (options) => {
+          toasts.push(options.body.message)
+        },
+      },
+    }
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+    const controller = new AbortController()
+    const request = opts.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+      headers: {
+        [SESSION_HEADER]: 'pending-session',
+        [MESSAGE_HEADER]: 'pending-message',
+      },
+      signal: controller.signal,
+    })
+    for (let i = 0; i < 100 && toasts.length === 0; i += 1) await sleep(1)
+
+    expect(toasts[0]).toContain('usage exhausted')
+    expect(toasts[0]).toContain('Esc to cancel')
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(1)
+    controller.abort()
+    await expect(request).rejects.toHaveProperty('name', 'AbortError')
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(0)
+    await hooks.dispose()
+  })
+
   test("the loader's fetch toasts the in-use account on a successful request", async () => {
     await mutatePool((pool) => {
       pool.accounts.push(account({ id: 'toast-acct', label: 'toast-acct' }))
@@ -1783,10 +1927,26 @@ describe('toast on switch + status tool', () => {
       pool.lastSelected.anthropic = 'dash'
     })
     const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+    const now = Date.now()
+    await upsertPending(
+      {
+        workspace: DIR,
+        providerID: 'anthropic',
+        sessionID: 'pending-session',
+        messageID: 'pending-message',
+      },
+      {
+        now,
+        nextCheckAt: now + 5 * 60_000,
+        resumeAt: now + 60 * 60_000,
+      },
+    )
     const result = await hooks.tool.auth_lb_status.execute()
     expect(result.title).toBe('Auth Load Balancer')
     expect(result.output).toContain('dash')
     expect(result.output).toContain('in use')
+    expect(result.output).toContain('Pending turns')
+    expect(result.output).toContain('Claude  1 session')
   })
 
   test('auth_lb_rename: no matching account reports the available labels', async () => {

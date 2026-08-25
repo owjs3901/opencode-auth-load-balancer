@@ -7,11 +7,20 @@ import {
   type OpencodeAuthGetter,
 } from './accounts'
 import { createLoadBalancedFetch } from './fetch'
-import { notifyModelFallback, notifyOnSwitch, type ToastClient } from './notify'
+import {
+  notifyModelFallback,
+  notifyOnSwitch,
+  notifyPending,
+  notifyPendingRestored,
+  notifyPendingRestoreError,
+  notifyPendingResumed,
+  type ToastClient,
+} from './notify'
 import {
   PendingCoordinator,
   type PendingRestoreClient,
 } from './pending/coordinator'
+import { listPendingForWorkspace } from './pending/store'
 import { mutatePool, readPool } from './pool/store'
 import { primeInUse } from './prime'
 import { anthropicAdapter } from './providers/anthropic/adapter'
@@ -19,7 +28,7 @@ import { openaiAdapter } from './providers/openai/adapter'
 import type { ProviderAdapter } from './providers/types'
 import { loadConfig } from './scheduler/config'
 import { MESSAGE_HEADER, SESSION_HEADER } from './session'
-import { readStatus, renderStatus } from './status'
+import { readStatus, renderPendingStatus, renderStatus } from './status'
 import { MANUAL_DISABLED_REASON } from './types'
 import {
   refreshAllUsageInBackground,
@@ -166,6 +175,14 @@ function createProviderPlugin(adapter: ProviderAdapter): Plugin {
       workspace: input.worktree || input.directory,
       adapter,
       config: loadConfig(),
+      dependencies: {
+        onPending: (_ref, recovery) =>
+          notifyPending(client, adapter.id, recovery),
+        onResumed: () => notifyPendingResumed(client, adapter.id),
+        onRestored: (count) => notifyPendingRestored(client, adapter.id, count),
+        onRestoreError: (ref) =>
+          notifyPendingRestoreError(client, adapter.id, ref.messageID),
+      },
     })
     void pending
       .restore(input.client as unknown as PendingRestoreClient)
@@ -201,7 +218,7 @@ const lbResult = (output: string) => ({ title: 'Auth Load Balancer', output })
  * cooldowns, and the ranked next candidates) across ALL providers. Registered once
  * (not per provider) so the tool name doesn't collide.
  */
-export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
+export const AuthLoadBalancerStatusPlugin: Plugin = async (input) => ({
   tool: {
     auth_lb_status: tool({
       description:
@@ -233,7 +250,12 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
         // countdowns from the ranks printed beside them. Taken AFTER the
         // awaited refresh so the freshly polled numbers are in this render.
         const renderedAt = Date.now()
-        return lbResult(renderStatus(await readStatus(renderedAt), renderedAt))
+        const status = renderStatus(await readStatus(renderedAt), renderedAt)
+        const pending = renderPendingStatus(
+          await listPendingForWorkspace(input.worktree || input.directory),
+          renderedAt,
+        )
+        return lbResult(pending ? `${status}\n\n${pending}` : status)
       },
     }),
     auth_lb_rename: tool({

@@ -1,0 +1,7 @@
+{
+  "changes": {
+    "package.json": "Minor"
+  },
+  "note": "Keep provider-quota-blocked turns pending, resume them after recovery or restart, and surface pending state",
+  "date": "2026-08-25T15:04:46.5700942Z"
+}

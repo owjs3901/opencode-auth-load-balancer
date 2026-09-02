@@ -11,6 +11,7 @@ const POOL = join(DIR, 'auth-load-balancer.json')
 import { setReloginTargetInPool } from '../../tui/auth-load-balancer-tui.logic'
 import { addAccount, bootstrapFromOpencodeAuth } from '../accounts'
 import { ACCOUNT_COOLDOWN_MS } from '../fetch'
+import { classifyProviderRecovery } from '../pending/recovery'
 import {
   findAccount,
   type FsOps,
@@ -2159,6 +2160,7 @@ describe('usage-refresh', () => {
     const threeDays = 3 * 24 * 60 * 60 * 1000
     const a = account({
       cooldownUntil: now + threeDays, // ≈ the old weekly resetAt
+      cooldownKind: 'quota',
       usage: {
         hourly: null,
         weekly: { utilization: 1, resetAt: now + threeDays },
@@ -2177,7 +2179,9 @@ describe('usage-refresh', () => {
       }),
     })
     await refreshUsageInBackground(adapter, now)
-    expect(findAccount(await readPool(), a.id)?.cooldownUntil).toBe(0)
+    const healed = findAccount(await readPool(), a.id)
+    expect(healed?.cooldownUntil).toBe(0)
+    expect(healed?.cooldownKind).toBeUndefined()
     // End-to-end proof: the account rejoins the pool as a normal (non-degraded)
     // selection instead of remaining the least-bad cooling-down fallback.
     const picked = selectAccount((await readPool()).accounts, 'anthropic', now)
@@ -2193,6 +2197,7 @@ describe('usage-refresh', () => {
     const cd = now + 3 * 24 * 60 * 60 * 1000
     const a = account({
       cooldownUntil: cd,
+      cooldownKind: 'quota',
       usage: {
         hourly: null,
         weekly: { utilization: 1, resetAt: cd },
@@ -2211,17 +2216,31 @@ describe('usage-refresh', () => {
       }),
     })
     await refreshUsageInBackground(adapter, now)
-    expect(findAccount(await readPool(), a.id)?.cooldownUntil).toBe(cd)
+    const retained = findAccount(await readPool(), a.id)
+    expect(retained?.cooldownUntil).toBe(cd)
+    expect(retained?.cooldownKind).toBe('quota')
   })
 
-  test('keeps a SHORT (transient) cooldown even when the poll shows headroom', async () => {
+  test('keeps SHORT auth/transient cooldown kinds when the poll shows headroom', async () => {
     // A network-error / auth backoff (<= ACCOUNT_COOLDOWN_MS) must be honored:
     // headroom does not mean the transient reason to back off has cleared. The
     // length gate keeps it; only quota-length cooldowns are ever reconciled.
     const now = Date.now()
     const shortCd = now + 60_000 // 1min — well under MAX_TRANSIENT_COOLDOWN_MS
-    const a = account({
+    const transient = account({
+      id: 'short-transient',
       cooldownUntil: shortCd,
+      cooldownKind: 'transient',
+      usage: {
+        hourly: null,
+        weekly: { utilization: 1, resetAt: now + 3 * 24 * 60 * 60 * 1000 },
+        capturedAt: 0,
+      },
+    })
+    const auth = account({
+      id: 'short-auth',
+      cooldownUntil: shortCd,
+      cooldownKind: 'auth',
       usage: {
         hourly: null,
         weekly: { utilization: 1, resetAt: now + 3 * 24 * 60 * 60 * 1000 },
@@ -2229,7 +2248,7 @@ describe('usage-refresh', () => {
       },
     })
     await mutatePool((pool) => {
-      pool.accounts.push({ ...a })
+      pool.accounts.push({ ...transient }, { ...auth })
     })
     const adapter = fakeAdapter({
       fetchUsage: async () => ({
@@ -2239,7 +2258,52 @@ describe('usage-refresh', () => {
       }),
     })
     await refreshUsageInBackground(adapter, now)
-    expect(findAccount(await readPool(), a.id)?.cooldownUntil).toBe(shortCd)
+    const pool = await readPool()
+    expect(findAccount(pool, transient.id)?.cooldownUntil).toBe(shortCd)
+    expect(findAccount(pool, transient.id)?.cooldownKind).toBe('transient')
+    expect(findAccount(pool, auth.id)?.cooldownUntil).toBe(shortCd)
+    expect(findAccount(pool, auth.id)?.cooldownKind).toBe('auth')
+  })
+
+  test('a short quota cooldown remains quota-blocked after a headroom refresh', async () => {
+    const now = Date.now()
+    const shortCd = now + 60_000
+    const quota = account({
+      id: 'short-quota',
+      cooldownUntil: shortCd,
+      cooldownKind: 'quota',
+      usage: {
+        hourly: null,
+        weekly: { utilization: 1, resetAt: now + 3 * 24 * 60 * 60 * 1000 },
+        capturedAt: 0,
+      },
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...quota })
+    })
+    const adapter = fakeAdapter({
+      fetchUsage: async () => ({
+        hourly: { utilization: 0, resetAt: 0 },
+        weekly: { utilization: 0, resetAt: 0 },
+        capturedAt: now,
+      }),
+    })
+
+    await refreshUsageInBackground(adapter, now)
+    const pool = await readPool()
+    expect(
+      classifyProviderRecovery(
+        pool.accounts,
+        'anthropic',
+        { exhaustedAt: 0.99 },
+        now,
+        5 * 60_000,
+      ),
+    ).toEqual({
+      state: 'quota-blocked',
+      nextCheckAt: shortCd,
+      resumeAt: shortCd,
+    })
   })
 
   test('MAX_TRANSIENT_COOLDOWN_MS stays in lockstep with fetch.ts ACCOUNT_COOLDOWN_MS', () => {

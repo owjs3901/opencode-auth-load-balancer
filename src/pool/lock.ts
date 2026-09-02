@@ -45,7 +45,7 @@ export interface LockOptions {
   readonly heartbeatMs: number
 }
 
-interface LockHandle {
+export interface LockHandle {
   release(): Promise<void>
 }
 

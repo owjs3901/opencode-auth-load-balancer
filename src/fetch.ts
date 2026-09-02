@@ -1,3 +1,8 @@
+import {
+  classifyProviderRecovery,
+  type ProviderRecovery,
+} from './pending/recovery'
+import type { PendingRef } from './pending/types'
 import { LockTimeoutError } from './pool/lock'
 import {
   findAccount,
@@ -18,10 +23,13 @@ import { ensureAccessToken } from './refresh'
 import { loadConfig, type SchedulerConfig } from './scheduler/config'
 import { isExhausted } from './scheduler/score-core'
 import { selectForSession } from './scheduler/select'
-import { deriveSessionKey, SESSION_HEADER } from './session'
-import type { PoolAccount, UsageSnapshot } from './types'
+import { deriveSessionKey, MESSAGE_HEADER, SESSION_HEADER } from './session'
+import type { CooldownKind, PoolAccount, UsageSnapshot } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
-import { refreshAllUsageInBackground } from './usage-refresh'
+import {
+  refreshAllUsageInBackground,
+  USAGE_REFRESH_TTL_MS,
+} from './usage-refresh'
 import { ignore, sleepAbortable } from './util'
 
 // Exported so the usage-refresh stale-cooldown reconciliation's local
@@ -160,6 +168,7 @@ function cooldownUntilFrom(
 async function applyCooldown(
   accountId: string,
   fallbackMs: number,
+  kind: CooldownKind,
 ): Promise<void> {
   // No response to consult (this path handles THROWN network errors), so
   // `cooldownUntilFrom(null, …)` reduces to exactly `now + fallbackMs` —
@@ -168,8 +177,10 @@ async function applyCooldown(
   await bestEffort('cooldown', () =>
     mutatePool((pool) => {
       const account = findAccount(pool, accountId)
-      if (account)
-        account.cooldownUntil = Math.max(account.cooldownUntil, until)
+      if (account && until >= account.cooldownUntil) {
+        account.cooldownUntil = until
+        account.cooldownKind = kind
+      }
     }),
   )
 }
@@ -193,6 +204,7 @@ async function recordRotation(
   res: Response,
   fallbackMs: number,
   now: number,
+  kind: CooldownKind,
 ): Promise<void> {
   const partial = adapter.parseUsageHeaders(res.headers)
   const until = cooldownUntilFrom(res, fallbackMs, now)
@@ -201,7 +213,10 @@ async function recordRotation(
       const account = findAccount(pool, accountId)
       if (!account) return
       if (partial) applyUsagePartial(account, partial, now)
-      account.cooldownUntil = Math.max(account.cooldownUntil, until)
+      if (until >= account.cooldownUntil) {
+        account.cooldownUntil = until
+        account.cooldownKind = kind
+      }
     }),
   )
 }
@@ -300,8 +315,10 @@ async function recordSuccess(
           partial &&
           account.cooldownUntil > now + ACCOUNT_COOLDOWN_MS &&
           !isExhausted(account, cfg, now)
-        )
+        ) {
           account.cooldownUntil = 0
+          delete account.cooldownKind
+        }
         pool.lastSelected[adapter.id] = accountId
       }
       if (sessionKey) {
@@ -348,6 +365,18 @@ interface FetchHooks {
     toModel: string,
     fromTier?: string,
   ) => void
+}
+
+/** Durable quota-wait boundary supplied by the provider plugin instance. */
+export interface PendingFetchCoordinator {
+  readonly workspace: string
+  waitForCapacity(
+    ref: PendingRef,
+    recovery: Extract<ProviderRecovery, { state: 'quota-blocked' }>,
+    signal?: AbortSignal,
+  ): Promise<'available' | 'unusable'>
+  complete(ref: PendingRef): Promise<void>
+  abort(ref: PendingRef): Promise<void>
 }
 
 /**
@@ -416,6 +445,7 @@ export function createLoadBalancedFetch(
   // the best model that actually EXISTS one family down. Empty (tests, absent
   // catalog) degrades to the adapter's static last-resort default.
   models: readonly string[] = [],
+  pending?: PendingFetchCoordinator,
 ): typeof fetch {
   const cfg = loadConfig()
 
@@ -429,6 +459,17 @@ export function createLoadBalancedFetch(
     // and `headers.delete(SESSION_HEADER)` ran defensively on every attempt
     // even though the value to strip is deterministic from input/init.
     const baseHeaders = mergeHeaders(input, init)
+    const sessionID = baseHeaders.get(SESSION_HEADER)
+    const messageID = baseHeaders.get(MESSAGE_HEADER)
+    const pendingRef: PendingRef | null =
+      pending && sessionID && messageID
+        ? {
+            workspace: pending.workspace,
+            providerID: adapter.id,
+            sessionID,
+            messageID,
+          }
+        : null
     // The client's abort signal may ride on `init` OR on a `Request` passed as
     // `input` (`fetch(new Request(url, { signal }))` is part of the `typeof
     // fetch` contract, and Request-carried *headers* are already honored via
@@ -452,6 +493,7 @@ export function createLoadBalancedFetch(
     // The clone in the loop inherits the absence, so retry attempts cannot
     // accidentally re-introduce it.
     baseHeaders.delete(SESSION_HEADER)
+    baseHeaders.delete(MESSAGE_HEADER)
     const tried = new Set<string>()
     // Accounts cooled by an `account`-class 429/402 THIS request — the only cooldowns
     // worth WAITING out (they reflect a real Retry-After / quota window that WILL clear).
@@ -601,6 +643,35 @@ export function createLoadBalancedFetch(
         void refreshAllUsageInBackground(now, pool).catch(ignore)
       }
 
+      // A durable wait is entered only when every otherwise-usable account is
+      // blocked by provider-wide quota. Model-tier cooldowns are deliberately
+      // ignored by this classifier, leaving the fallback ladder below first
+      // priority. Re-reading here also avoids a guaranteed upstream 429 when a
+      // previous turn already established that the whole provider is full.
+      if (pendingRef && pending) {
+        const recovery = classifyProviderRecovery(
+          pool.accounts,
+          adapter.id,
+          cfg,
+          now,
+          USAGE_REFRESH_TTL_MS,
+        )
+        if (recovery.state === 'quota-blocked') {
+          const result = await pending.waitForCapacity(
+            pendingRef,
+            recovery,
+            signal,
+          )
+          if (result === 'unusable') {
+            await pending.complete(pendingRef).catch(ignore)
+            return noUsableAccountResponse(adapter.id)
+          }
+          tried.clear()
+          waitableCooldownIds?.clear()
+          continue
+        }
+      }
+
       const selection = selectForSession(
         pool,
         adapter.id,
@@ -615,7 +686,11 @@ export function createLoadBalancedFetch(
         // every one is disabled): return a clean 401 rather than leaking the
         // SDK's empty x-api-key through the global fetch (see
         // noUsableAccountResponse).
-        if (tried.size === 0) return noUsableAccountResponse(adapter.id)
+        if (tried.size === 0) {
+          if (pendingRef && pending)
+            await pending.complete(pendingRef).catch(ignore)
+          return noUsableAccountResponse(adapter.id)
+        }
 
         // Every candidate is limited for the CURRENT model tier (skipped
         // proactively or tier-429'd) while staying usable for other models:
@@ -823,7 +898,14 @@ export function createLoadBalancedFetch(
           // fetch, so basing the cooldown on it would understate `Retry-After`
           // by the request latency and retry the account before the server
           // said it may be. The success path already stamps response time.
-          await recordRotation(adapter, account.id, res, ms, Date.now())
+          await recordRotation(
+            adapter,
+            account.id,
+            res,
+            ms,
+            Date.now(),
+            cls === 'auth' ? 'auth' : 'quota',
+          )
           // Only an `account`-class (429/402) cooldown is worth waiting out; an auth
           // (401/403) failure needs a re-login, not time, so it stays out of the set.
           if (cls === 'account') {
@@ -870,6 +952,8 @@ export function createLoadBalancedFetch(
           cfg,
           fallbackInfo,
         )
+        if (pendingRef && pending)
+          await pending.complete(pendingRef).catch(ignore)
         return adapter.transformResponse(res)
       } catch (error) {
         lastError = error
@@ -881,7 +965,11 @@ export function createLoadBalancedFetch(
         const aborted =
           signal?.aborted === true ||
           (error instanceof Error && error.name === 'AbortError')
-        if (aborted) throw error
+        if (aborted) {
+          if (pendingRef && pending)
+            await pending.abort(pendingRef).catch(ignore)
+          throw error
+        }
         // Any OTHER thrown error here (network/DNS/timeout failure, or
         // `ensureAccessToken` rejecting on a refresh problem) intentionally
         // shares the SHORT `AUTH_COOLDOWN_MS`, not the longer
@@ -891,13 +979,14 @@ export function createLoadBalancedFetch(
         // every attempt and re-cools each time, so it never gets treated as
         // healthy for longer than a real rate-limit cooldown would allow.
         if (!account.disabledReason)
-          await applyCooldown(account.id, AUTH_COOLDOWN_MS)
+          await applyCooldown(account.id, AUTH_COOLDOWN_MS, 'transient')
         // prettier-ignore
         if (DEBUG) log(`!! ${account.label} threw: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
     }
 
+    if (pendingRef && pending) await pending.complete(pendingRef).catch(ignore)
     throw (
       lastError ??
       new Error(`${adapter.id}: no usable account in the load-balancer pool`)

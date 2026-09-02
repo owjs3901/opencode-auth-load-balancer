@@ -1,3 +1,4 @@
+import type { ProviderRecovery } from './pending/recovery'
 import { displayUtil } from './scheduler/score-core'
 import { pct, providerName } from './status'
 import type { PoolAccount } from './types'
@@ -124,5 +125,93 @@ export async function notifyModelFallback(
     message: `▶ ${account.label}  ·  ${fromModel} → ${toModel} (model-tier weekly limit)`,
     variant: 'warning',
     duration: 6000,
+  })
+}
+
+function pendingDate(at: number): string {
+  const date = new Date(at)
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ]
+  const month = months[date.getMonth()] ?? ''
+  const hour = String(date.getHours()).padStart(2, '0')
+  const minute = String(date.getMinutes()).padStart(2, '0')
+  return `${month} ${date.getDate()}, ${hour}:${minute}`
+}
+
+/** Announce a durable provider wait. Coordinator-level signatures dedupe it. */
+export async function notifyPending(
+  client: ToastClient,
+  providerID: string,
+  recovery: Extract<ProviderRecovery, { state: 'quota-blocked' }>,
+  now: number = Date.now(),
+): Promise<void> {
+  const provider = providerName(providerID)
+  const message =
+    recovery.resumeAt === null
+      ? `${provider} usage exhausted — checking again in ${Math.max(1, Math.round((recovery.nextCheckAt - now) / 60_000))}m (Esc to cancel)`
+      : `${provider} usage exhausted — pending until ${pendingDate(recovery.resumeAt)} (Esc to cancel)`
+  await postToast(client, {
+    title: `${provider} request pending`,
+    message,
+    variant: 'warning',
+    duration: 8000,
+  })
+}
+
+export async function notifyPendingResumed(
+  client: ToastClient,
+  providerID: string,
+): Promise<void> {
+  const provider = providerName(providerID)
+  await postToast(client, {
+    title: `${provider} request resumed`,
+    message: `${provider} usage recovered — resuming request`,
+    variant: 'success',
+    duration: 5000,
+  })
+}
+
+export async function notifyPendingRestored(
+  client: ToastClient,
+  providerID: string,
+  count: number,
+): Promise<void> {
+  const provider = providerName(providerID)
+  await postToast(client, {
+    title: `${provider} pending restored`,
+    message: `Restored ${count} pending ${provider} session${count === 1 ? '' : 's'}`,
+    variant: 'info',
+    duration: 6000,
+  })
+}
+
+const restoreErrorsToasted = new Map<string, true>()
+
+export async function notifyPendingRestoreError(
+  client: ToastClient,
+  providerID: string,
+  messageID: string,
+): Promise<void> {
+  const key = `${providerID}:${messageID}`
+  if (restoreErrorsToasted.has(key)) return
+  setBounded(restoreErrorsToasted, key, true, 256)
+  const provider = providerName(providerID)
+  await postToast(client, {
+    title: `${provider} pending restore`,
+    message: `Could not restore a pending ${provider} request yet — retrying automatically`,
+    variant: 'error',
+    duration: 8000,
   })
 }

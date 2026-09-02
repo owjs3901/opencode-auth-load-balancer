@@ -6,4 +6,5 @@ dist/
 .DS_Store
 .codegraph/
 .omo
+.superpowers/
 coverage

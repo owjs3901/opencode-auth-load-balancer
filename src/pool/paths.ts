@@ -41,6 +41,12 @@ let cachedPool: {
   path: string
 } | null = null
 
+let cachedPending: {
+  override: string | undefined
+  xdg: string | undefined
+  path: string
+} | null = null
+
 /** Path to the load-balancer's credential pool file. */
 export function poolFilePath(): string {
   const override = process.env.OPENCODE_AUTH_LB_DIR
@@ -57,5 +63,23 @@ export function poolFilePath(): string {
     'auth-load-balancer.json',
   )
   cachedPool = { override, xdg, path }
+  return path
+}
+
+/** Path to the reference-only durable pending-turn file. */
+export function pendingFilePath(): string {
+  const override = process.env.OPENCODE_AUTH_LB_DIR
+  const xdg = process.env.XDG_DATA_HOME
+  if (
+    cachedPending &&
+    cachedPending.override === override &&
+    cachedPending.xdg === xdg
+  )
+    return cachedPending.path
+  const path = join(
+    resolveDataDir({ override, xdgDataHome: xdg }, homedir()),
+    'auth-load-balancer-pending.json',
+  )
+  cachedPending = { override, xdg, path }
   return path
 }

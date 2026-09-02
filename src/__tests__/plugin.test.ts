@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-plugin-'))
 const POOL = join(DIR, 'auth-load-balancer.json')
+const PENDING = join(DIR, 'auth-load-balancer-pending.json')
 
 import { bestEffort, createLoadBalancedFetch } from '../fetch'
 import {
@@ -15,6 +16,7 @@ import {
   OpenAILoadBalancerPlugin,
 } from '../index'
 import type { ToastClient } from '../notify'
+import { listPendingForWorkspace, upsertPending } from '../pending/store'
 import { LockTimeoutError } from '../pool/lock'
 import {
   mutatePool,
@@ -26,7 +28,7 @@ import { primeInUse } from '../prime'
 import { anthropicAdapter } from '../providers/anthropic/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import { loadConfig } from '../scheduler/config'
-import { SESSION_HEADER } from '../session'
+import { MESSAGE_HEADER, SESSION_HEADER } from '../session'
 import { MANUAL_DISABLED_REASON, type PoolAccount } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
 import { sleep } from '../util'
@@ -39,6 +41,7 @@ let respond: Responder
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_LB_DIR = DIR
   await rm(POOL, { force: true })
+  await rm(PENDING, { force: true })
   respond = () => new Response('{}', { status: 200 })
   globalThis.fetch = responderFetch(() => respond)
 })
@@ -72,9 +75,20 @@ interface PluginHooks {
     methods: AuthMethod[]
   }
   'chat.headers': (
-    input: { sessionID?: string; model?: { providerID?: string } },
+    input: {
+      sessionID?: string
+      model?: { providerID?: string }
+      message?: { id?: string }
+    },
     output: { headers: Record<string, string> },
   ) => Promise<void>
+  dispose: () => Promise<void>
+  event: (input: {
+    event: {
+      type: string
+      properties?: { info?: { id?: string } }
+    }
+  }) => Promise<void>
 }
 
 interface ToolHooks {
@@ -111,8 +125,10 @@ async function loadHooks<T = PluginHooks>(
 ): Promise<T> {
   const factory = plugin as unknown as (input: {
     client: ToastClient
+    directory: string
+    worktree: string
   }) => Promise<T>
-  return factory({ client })
+  return factory({ client, directory: DIR, worktree: DIR })
 }
 
 function account(over: Partial<PoolAccount> = {}): PoolAccount {
@@ -180,8 +196,11 @@ describe('plugin factory', () => {
     const a = await loadHooks(AnthropicLoadBalancerPlugin)
     expect(a.auth.provider).toBe('anthropic')
     expect(typeof a['chat.headers']).toBe('function')
+    expect(typeof a.dispose).toBe('function')
     const o = await loadHooks(OpenAILoadBalancerPlugin)
     expect(o.auth.provider).toBe('openai')
+    expect(typeof o.dispose).toBe('function')
+    await Promise.all([a.dispose(), o.dispose()])
   })
 
   test('loader seeds from existing auth, zeroes model cost, returns a fetch', async () => {
@@ -229,28 +248,78 @@ describe('plugin factory', () => {
     expect((await flow.callback('garbage')).type).toBe('failed')
   })
 
-  test('chat.headers stamps the session id only for the matching provider with a session', async () => {
+  test('chat.headers stamps the session and message ids only for the matching provider', async () => {
     const hooks = await loadHooks(AnthropicLoadBalancerPlugin)
     const match: { headers: Record<string, string> } = { headers: {} }
     await hooks['chat.headers'](
-      { sessionID: 's1', model: { providerID: 'anthropic' } },
+      {
+        sessionID: 's1',
+        model: { providerID: 'anthropic' },
+        message: { id: 'm1' },
+      },
       match,
     )
     expect(match.headers[SESSION_HEADER]).toBe('s1')
+    expect(match.headers[MESSAGE_HEADER]).toBe('m1')
 
     const wrongProvider: { headers: Record<string, string> } = { headers: {} }
     await hooks['chat.headers'](
-      { sessionID: 's1', model: { providerID: 'openai' } },
+      {
+        sessionID: 's1',
+        model: { providerID: 'openai' },
+        message: { id: 'm1' },
+      },
       wrongProvider,
     )
     expect(wrongProvider.headers[SESSION_HEADER]).toBeUndefined()
+    expect(wrongProvider.headers[MESSAGE_HEADER]).toBeUndefined()
 
     const noSession: { headers: Record<string, string> } = { headers: {} }
     await hooks['chat.headers'](
-      { model: { providerID: 'anthropic' } },
+      { model: { providerID: 'anthropic' }, message: { id: 'm1' } },
       noSession,
     )
     expect(noSession.headers[SESSION_HEADER]).toBeUndefined()
+    expect(noSession.headers[MESSAGE_HEADER]).toBeUndefined()
+  })
+
+  test('session.deleted clears all provider pending rows while unrelated events do nothing', async () => {
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin)
+    await sleep(20)
+    const now = Date.now()
+    const shared = {
+      workspace: DIR,
+      sessionID: 'deleted-session',
+      messageID: 'message-a',
+      providerID: 'anthropic',
+    }
+    await upsertPending(shared, {
+      now,
+      nextCheckAt: now + 60_000,
+      resumeAt: now + 60_000,
+    })
+    await upsertPending(
+      { ...shared, messageID: 'message-b', providerID: 'openai' },
+      { now, nextCheckAt: now + 60_000, resumeAt: now + 60_000 },
+    )
+    await upsertPending(
+      { ...shared, sessionID: 'kept-session', messageID: 'message-c' },
+      { now, nextCheckAt: now + 60_000, resumeAt: now + 60_000 },
+    )
+
+    await hooks.event({ event: { type: 'session.updated' } })
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(3)
+    await hooks.event({
+      event: {
+        type: 'session.deleted',
+        properties: { info: { id: 'deleted-session' } },
+      },
+    })
+
+    expect(
+      (await listPendingForWorkspace(DIR)).map((turn) => turn.sessionID),
+    ).toEqual(['kept-session'])
+    await hooks.dispose()
   })
 })
 
@@ -563,9 +632,11 @@ describe('load-balanced fetch — edge paths', () => {
    * assertions (HTTP-date tests build their header string before calling;
    * their ±2 s tolerances absorb the sub-ms `now` skew).
    */
-  async function cooldownAfter429(
-    retryAfter: string,
-  ): Promise<{ now: number; cooldownUntil: number | undefined }> {
+  async function cooldownAfter429(retryAfter: string): Promise<{
+    now: number
+    cooldownUntil: number | undefined
+    cooldownKind: string | undefined
+  }> {
     const now = Date.now()
     await seedAB(now)
     let n = 0
@@ -585,12 +656,17 @@ describe('load-balanced fetch — edge paths', () => {
     })
     expect(res.status).toBe(200)
     const cooled = (await readPool()).accounts.find((x) => x.id === 'A')
-    return { now, cooldownUntil: cooled?.cooldownUntil }
+    return {
+      now,
+      cooldownUntil: cooled?.cooldownUntil,
+      cooldownKind: cooled?.cooldownKind,
+    }
   }
 
   test('honors retry-after when cooling down a rate-limited account', async () => {
-    const { now, cooldownUntil } = await cooldownAfter429('30')
+    const { now, cooldownUntil, cooldownKind } = await cooldownAfter429('30')
     expect(cooldownUntil).toBeGreaterThan(now + 25_000)
+    expect(cooldownKind).toBe('quota')
   })
 
   test('honors retry-after HTTP-date form (RFC 9110) when cooling down', async () => {
@@ -746,6 +822,7 @@ describe('load-balanced fetch — edge paths', () => {
     // regression that swapped the two constants would cool A out to ~5 min and
     // fail this strict upper bound.
     expect(cooled?.cooldownUntil).toBeLessThan(now + 4 * 60_000)
+    expect(cooled?.cooldownKind).toBe('auth')
   })
 
   test('a 5xx service-class response is returned untouched (no rotation, no cooldown)', async () => {
@@ -969,6 +1046,9 @@ describe('load-balanced fetch — edge paths', () => {
         body: '{}',
       }),
     ).rejects.toThrow()
+    expect(
+      (await readPool()).accounts.find((a) => a.id === 'solo')?.cooldownKind,
+    ).toBe('transient')
   })
 
   test('a client-side abort propagates without cooling down or rotating accounts', async () => {
@@ -1658,6 +1738,150 @@ describe('model-tier fallback (Opus/Fable → Sonnet)', () => {
 })
 
 describe('toast on switch + status tool', () => {
+  test('startup restore reports a transient SDK failure and keeps the turn for retry', async () => {
+    const now = Date.now()
+    await upsertPending(
+      {
+        workspace: DIR,
+        providerID: 'anthropic',
+        sessionID: 'restore-session',
+        messageID: 'restore-message',
+      },
+      {
+        now,
+        nextCheckAt: now + 60_000,
+        resumeAt: now + 60_000,
+      },
+    )
+    const toasts: string[] = []
+    let reads = 0
+    const client = {
+      tui: {
+        showToast: async (options: { body: { message: string } }) => {
+          toasts.push(options.body.message)
+        },
+      },
+      session: {
+        message: async () => {
+          reads += 1
+          return { error: new Error('SDK temporarily unavailable') }
+        },
+        messages: async () => ({ data: [] }),
+        prompt: async () => ({ data: {} }),
+      },
+    } as unknown as ToastClient
+
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    for (
+      let i = 0;
+      i < 100 && !toasts.some((message) => message.includes('retrying'));
+      i += 1
+    )
+      await sleep(1)
+
+    expect(toasts).toContain('Restored 1 pending Claude session')
+    expect(toasts).toContain(
+      'Could not restore a pending Claude request yet — retrying automatically',
+    )
+    expect(reads).toBe(1)
+    await hooks.dispose()
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(1)
+  })
+
+  test('a pending loader request resumes automatically when provider usage recovers', async () => {
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({
+          id: 'recovering-acct',
+          label: 'recovering-acct',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 1, resetAt: now + 75 },
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    const toasts: string[] = []
+    const client: ToastClient = {
+      tui: {
+        showToast: async (options) => {
+          toasts.push(options.body.message)
+        },
+      },
+    }
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+
+    const response = await opts.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+      headers: {
+        [SESSION_HEADER]: 'recovering-session',
+        [MESSAGE_HEADER]: 'recovering-message',
+      },
+    })
+
+    expect(response.status).toBe(200)
+    expect(toasts.some((message) => message.includes('usage exhausted'))).toBe(
+      true,
+    )
+    expect(toasts).toContain('Claude usage recovered — resuming request')
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(0)
+    await hooks.dispose()
+  })
+
+  test('the loader announces a durable provider pending turn and Esc clears it', async () => {
+    const now = Date.now()
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({
+          id: 'pending-acct',
+          label: 'pending-acct',
+          usage: {
+            hourly: null,
+            weekly: { utilization: 1, resetAt: now + 60 * 60_000 },
+            capturedAt: now,
+          },
+        }),
+      )
+    })
+    const toasts: string[] = []
+    const client: ToastClient = {
+      tui: {
+        showToast: async (options) => {
+          toasts.push(options.body.message)
+        },
+      },
+    }
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
+      models: {},
+    })
+    const controller = new AbortController()
+    const request = opts.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{}',
+      headers: {
+        [SESSION_HEADER]: 'pending-session',
+        [MESSAGE_HEADER]: 'pending-message',
+      },
+      signal: controller.signal,
+    })
+    for (let i = 0; i < 100 && toasts.length === 0; i += 1) await sleep(1)
+
+    expect(toasts[0]).toContain('usage exhausted')
+    expect(toasts[0]).toContain('Esc to cancel')
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(1)
+    controller.abort()
+    await expect(request).rejects.toHaveProperty('name', 'AbortError')
+    expect(await listPendingForWorkspace(DIR)).toHaveLength(0)
+    await hooks.dispose()
+  })
+
   test("the loader's fetch toasts the in-use account on a successful request", async () => {
     await mutatePool((pool) => {
       pool.accounts.push(account({ id: 'toast-acct', label: 'toast-acct' }))
@@ -1703,10 +1927,26 @@ describe('toast on switch + status tool', () => {
       pool.lastSelected.anthropic = 'dash'
     })
     const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+    const now = Date.now()
+    await upsertPending(
+      {
+        workspace: DIR,
+        providerID: 'anthropic',
+        sessionID: 'pending-session',
+        messageID: 'pending-message',
+      },
+      {
+        now,
+        nextCheckAt: now + 5 * 60_000,
+        resumeAt: now + 60 * 60_000,
+      },
+    )
     const result = await hooks.tool.auth_lb_status.execute()
     expect(result.title).toBe('Auth Load Balancer')
     expect(result.output).toContain('dash')
     expect(result.output).toContain('in use')
+    expect(result.output).toContain('Pending turns')
+    expect(result.output).toContain('Claude  1 session')
   })
 
   test('auth_lb_rename: no matching account reports the available labels', async () => {

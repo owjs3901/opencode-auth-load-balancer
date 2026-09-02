@@ -7,14 +7,28 @@ import {
   type OpencodeAuthGetter,
 } from './accounts'
 import { createLoadBalancedFetch } from './fetch'
-import { notifyModelFallback, notifyOnSwitch, type ToastClient } from './notify'
+import {
+  notifyModelFallback,
+  notifyOnSwitch,
+  notifyPending,
+  notifyPendingRestored,
+  notifyPendingRestoreError,
+  notifyPendingResumed,
+  type ToastClient,
+} from './notify'
+import {
+  PendingCoordinator,
+  type PendingRestoreClient,
+} from './pending/coordinator'
+import { listPendingForWorkspace } from './pending/store'
 import { mutatePool, readPool } from './pool/store'
 import { primeInUse } from './prime'
 import { anthropicAdapter } from './providers/anthropic/adapter'
 import { openaiAdapter } from './providers/openai/adapter'
 import type { ProviderAdapter } from './providers/types'
-import { SESSION_HEADER } from './session'
-import { readStatus, renderStatus } from './status'
+import { loadConfig } from './scheduler/config'
+import { MESSAGE_HEADER, SESSION_HEADER } from './session'
+import { readStatus, renderPendingStatus, renderStatus } from './status'
 import { MANUAL_DISABLED_REASON } from './types'
 import {
   refreshAllUsageInBackground,
@@ -58,6 +72,7 @@ function zeroOutCost(provider: LoaderProvider): void {
 function buildAuthHook(
   adapter: ProviderAdapter,
   client: ToastClient,
+  pending: PendingCoordinator,
 ): AuthHook {
   const label = PROVIDER_LABELS[adapter.id] ?? adapter.id
   return {
@@ -101,6 +116,7 @@ function buildAuthHook(
           // tier-capped request's downgrade target from models that actually
           // exist here (e.g. a capped fable-5 lands on the newest Opus).
           Object.keys(provider.models),
+          pending,
         ),
       }
     },
@@ -155,12 +171,36 @@ function createProviderPlugin(adapter: ProviderAdapter): Plugin {
   return async (input) => {
     // opencode's SDK client is a superset of the small toast slice we use.
     const client = input.client as unknown as ToastClient
+    const pending = new PendingCoordinator({
+      workspace: input.worktree || input.directory,
+      adapter,
+      config: loadConfig(),
+      dependencies: {
+        onPending: (_ref, recovery) =>
+          notifyPending(client, adapter.id, recovery),
+        onResumed: () => notifyPendingResumed(client, adapter.id),
+        onRestored: (count) => notifyPendingRestored(client, adapter.id, count),
+        onRestoreError: (ref) =>
+          notifyPendingRestoreError(client, adapter.id, ref.messageID),
+      },
+    })
+    void pending
+      .restore(input.client as unknown as PendingRestoreClient)
+      .catch(ignore)
     return {
-      auth: buildAuthHook(adapter, client),
+      auth: buildAuthHook(adapter, client, pending),
       'chat.headers': async (hook, output) => {
         if (hook.model.providerID !== adapter.id) return
-        if (hook.sessionID) output.headers[SESSION_HEADER] = hook.sessionID
+        if (hook.sessionID) {
+          output.headers[SESSION_HEADER] = hook.sessionID
+          output.headers[MESSAGE_HEADER] = hook.message.id
+        }
       },
+      event: async ({ event }) => {
+        if (event.type !== 'session.deleted') return
+        await pending.removeSession(event.properties.info.id)
+      },
+      dispose: () => pending.dispose(),
     }
   }
 }
@@ -178,7 +218,7 @@ const lbResult = (output: string) => ({ title: 'Auth Load Balancer', output })
  * cooldowns, and the ranked next candidates) across ALL providers. Registered once
  * (not per provider) so the tool name doesn't collide.
  */
-export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
+export const AuthLoadBalancerStatusPlugin: Plugin = async (input) => ({
   tool: {
     auth_lb_status: tool({
       description:
@@ -210,7 +250,12 @@ export const AuthLoadBalancerStatusPlugin: Plugin = async () => ({
         // countdowns from the ranks printed beside them. Taken AFTER the
         // awaited refresh so the freshly polled numbers are in this render.
         const renderedAt = Date.now()
-        return lbResult(renderStatus(await readStatus(renderedAt), renderedAt))
+        const status = renderStatus(await readStatus(renderedAt), renderedAt)
+        const pending = renderPendingStatus(
+          await listPendingForWorkspace(input.worktree || input.directory),
+          renderedAt,
+        )
+        return lbResult(pending ? `${status}\n\n${pending}` : status)
       },
     }),
     auth_lb_rename: tool({

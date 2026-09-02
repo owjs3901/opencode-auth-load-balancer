@@ -13,6 +13,7 @@ Selection is **not** round-robin. It is weighted primarily by **weekly** usage, 
 - **Automatic rotation** — on `429`/auth errors an account is cooled down and the next-best is tried; `retry-after` is honored.
 - **Model-tier fallback ladder (Fable, Opus, …)** — Claude Max accounts have *separate* weekly caps per premium model tier. When one is exhausted (a 429 whose `representative-claim` names a tier window, e.g. `seven_day_fable` / `seven_day_opus`), the balancer records a **per-tier** cooldown instead of cooling the whole account down (which used to cascade every account into a false "cooldown" and block *every* model on it). Requests for that tier then **steer to an account with tier headroom** — keeping the model you asked for — and only when the *whole pool* is tier-limited does the request descend **one rung down the fallback ladder**: the next model family in `fable → opus → sonnet → haiku` (order configurable via `OPENCODE_AUTH_LB_ANTHROPIC_FAMILY_ORDER`), picking the **highest-versioned model your provider config actually has** (a capped `claude-fable-5` prefers `claude-opus-4-9` over `claude-opus-4-8`). If that tier is capped too, it descends again (`fable → opus → sonnet`), each step toasted, preferably on the session's pinned account (keeping its prompt cache). Pin a fixed target or disable entirely via `OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`.
 - **Durable provider pending** — after model fallback and account rotation are exhausted, a session-bound turn whose whole provider is blocked by account-wide quota stays pending without sending a guaranteed `429`. It resumes when capacity returns, survives an opencode restart as the same user message, and is removed immediately when you cancel with `Esc`. Sessions wait and resume independently; there is no provider-wide FIFO.
+- **Self-updating Claude Code version** — Anthropic gates new models on the client version the request claims, so a pinned version stops working the day a model ships (`Claude Code 2.1.87 does not support this model; version 2.1.251 or newer is required`). The plugin discovers the current version from npm instead, caches it for a day, and never regresses below a version known to work. See [Claude Code version](#claude-code-version).
 - **Session affinity** — a conversation stays pinned to one account so you keep its prompt cache and don't re-send context on every turn.
 - **Proactive migration** — leaves an account at a configurable soft threshold (~95%) instead of waiting for a hard 100% wall (which can break in-flight subagents).
 - **Single-use refresh-token safety** — per-account singleflight refresh; rotated tokens are persisted immediately.
@@ -94,6 +95,8 @@ The pool lives in a JSON file you can inspect/edit (e.g. to rename labels):
 opencode resolves its data dir via `xdg-basedir`, which is platform-agnostic — it does **not** use `%LOCALAPPDATA%` on Windows or `Application Support` on macOS (verified with `opencode debug paths`).
 
 Durable turn references live beside the pool as `auth-load-balancer-pending.json`. This file contains only workspace/provider/session/message ids and scheduling timestamps — never prompt text, request bodies, attachments, headers, OAuth tokens, or provider responses. Both files use atomic writes and cross-process locks.
+
+A third file, `auth-load-balancer-cc-version.json`, caches the discovered Claude Code version (`{"version","fetchedAt"}` — see [Claude Code version](#claude-code-version)). It holds no account data and is safe to delete; it is rebuilt on the next start.
 
 > **OpenAI/Codex note:** the OpenAI path assumes opencode is configured to use the **Responses API** (the standard ChatGPT/Codex setup); `/responses` requests are routed to the Codex backend.
 
@@ -191,9 +194,30 @@ All knobs are environment variables with sane defaults.
 | `OPENCODE_AUTH_LB_MAX_WAIT_MS` | `305000` | Bounded wait for requests that do **not** carry both an opencode session id and user-message id (provider-internal or external fetches). Session-bound user turns use durable pending instead and wait until provider quota recovers or the user cancels. Auth (`401`/`403`), disabled/re-login accounts, and network failures are never converted into quota waits. `0` makes anonymous requests fail fast. |
 | `OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL` | *(unset — ladder mode)* | Claude Max accounts have **separate weekly caps per premium model tier** (Fable, Opus, …). When one is exhausted, that tier's requests 429 (`anthropic-ratelimit-unified-representative-claim: seven_day_fable` / `seven_day_opus` / …) even though the account's aggregate 5h/7d windows still have headroom and every other model works. Instead of cooling the **whole account** down (which cascaded every account into "cooldown"), the balancer records a **per-tier** cooldown: requests for that tier steer to accounts with tier headroom, and once the whole pool is tier-limited they descend the **fallback ladder** (next family down, best version in your provider's model list; toasted, never silent). **Unset** = ladder mode (recommended). Set to a **model id** to pin a fixed downgrade target (bypassing the ladder). Set to an **empty string** to disable (revert to the account-wide cooldown). The env name keeps `OPUS` for compatibility but applies to **every** tier. |
 | `OPENCODE_AUTH_LB_ANTHROPIC_FAMILY_ORDER` | `fable,opus,sonnet,haiku` | The fallback ladder's model families, **best first**. A tier-capped request downgrades to the highest-versioned configured model of the next family below the capped one (e.g. capped `fable` → newest `opus`; capped `opus` → newest `sonnet`). A family not in the list (a future top tier) is treated as above the first entry — so when Anthropic ships a new premium tier, a config tweak (or nothing at all, if it slots on top) keeps the ladder correct without a code change. |
+| `OPENCODE_AUTH_LB_ANTHROPIC_CLAUDE_CODE_VERSION` | *(unset — auto)* | Pin the Claude Code version the plugin claims to be, bypassing both the npm lookup and the built-in floor. Anthropic **gates new models on this version** — asking for a model newer than the version you report is rejected with `claude_code_version_too_old` — so by default the plugin resolves it automatically (see [Claude Code version](#claude-code-version)). Set this only to pin **forward** (a version npm hasn't tagged `latest` yet) or **back** (to reproduce a failure, or if a future release changes the request fingerprint and the newest version starts failing). Must be a plain `x.y.z`; anything else is ignored. |
 | `OPENCODE_AUTH_LB_DIR` | — | Override the pool-file directory (handy for tests). |
 | `OPENCODE_AUTH_LB_DEBUG` | — | `1`/`true` logs each selection to stderr. |
 | `ANTHROPIC_BASE_URL` | — | Route Anthropic requests through a custom base URL. |
+
+### Claude Code version
+
+Anthropic only accepts OAuth (subscription) requests that look like they came from Claude Code, so the plugin reports a version in the `claude-cli/<version>` User-Agent and in the `cc_version=` billing fingerprint. **That version is a gate, not decoration:** requesting a model newer than the version you claim is rejected outright.
+
+```json
+{"type":"error","error":{"type":"invalid_request_error",
+ "message":"Claude Code 2.1.87 does not support this model; version 2.1.251 or newer is required.",
+ "details":{"error_code":"claude_code_version_too_old"}}}
+```
+
+A hard-coded version therefore breaks on *every* model launch, so the plugin resolves it, best-first:
+
+1. **`OPENCODE_AUTH_LB_ANTHROPIC_CLAUDE_CODE_VERSION`** — an explicit pin. Skips the lookup entirely.
+2. **npm** — the `latest` dist-tag of [`@anthropic-ai/claude-code`](https://www.npmjs.com/package/@anthropic-ai/claude-code), cached in the data dir for 24 h.
+3. **A built-in floor** — a version verified to work, used offline and on a cold first run.
+
+The resolved version only ever moves **up**, so a registry blip or a rolled-back `latest` can never drag the plugin below a version already known to work; use the env pin to go down deliberately. The lookup is a single ~56-byte request fired at startup: the loader awaits only the local cache read, never the network, so neither opencode's startup nor your first request waits on npm — and a registry outage just leaves the previous version in place.
+
+> Only the version *string* is discovered. The request fingerprint's salt is still compiled in, so if Anthropic ever changes that algorithm, pin a known-good version with the env var and open an issue.
 
 ---
 

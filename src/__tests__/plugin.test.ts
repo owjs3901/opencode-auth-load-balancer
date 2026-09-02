@@ -177,6 +177,30 @@ async function waitForAccount(
 }
 
 /**
+ * Poll until a toast has been emitted, then return the FIRST one. Same
+ * contract as `waitForAccount` above, and for the same reason: the pending
+ * toast is produced by a fire-and-forget chain (pool read → durable reference
+ * write, both behind the cross-process file lock) that the request path
+ * deliberately does NOT await, so a FIXED number of `sleep(1)` turns is a race
+ * rather than a deadline — it passes on an idle laptop and loses on a loaded
+ * CI runner. Throws on timeout so a genuinely broken wiring fails loudly,
+ * instead of `expect(toasts[0]).toContain(...)` reporting the useless
+ * "Received value must be an array type" that an `undefined` element yields.
+ */
+async function waitForToast(
+  toasts: readonly string[],
+  timeoutMs = 5_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const first = toasts[0]
+    if (first !== undefined) return first
+    if (Date.now() > deadline) throw new Error('timed out waiting for a toast')
+    await sleep(10)
+  }
+}
+
+/**
  * Shared two-account fixture for the rotation/cooldown tests: account A
  * (fresh, usage-less) plus account B (weekly 50%, resets in 30 h) so the
  * scheduler tries A first and has B to rotate onto.
@@ -1879,10 +1903,10 @@ describe('toast on switch + status tool', () => {
       },
       signal: controller.signal,
     })
-    for (let i = 0; i < 100 && toasts.length === 0; i += 1) await sleep(1)
+    const pendingToast = await waitForToast(toasts)
 
-    expect(toasts[0]).toContain('usage exhausted')
-    expect(toasts[0]).toContain('Esc to cancel')
+    expect(pendingToast).toContain('usage exhausted')
+    expect(pendingToast).toContain('Esc to cancel')
     expect(await listPendingForWorkspace(DIR)).toHaveLength(1)
     controller.abort()
     await expect(request).rejects.toHaveProperty('name', 'AbortError')

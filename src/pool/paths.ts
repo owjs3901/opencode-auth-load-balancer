@@ -47,6 +47,12 @@ let cachedPending: {
   path: string
 } | null = null
 
+let cachedVersion: {
+  override: string | undefined
+  xdg: string | undefined
+  path: string
+} | null = null
+
 /** Path to the load-balancer's credential pool file. */
 export function poolFilePath(): string {
   const override = process.env.OPENCODE_AUTH_LB_DIR
@@ -81,5 +87,30 @@ export function pendingFilePath(): string {
     'auth-load-balancer-pending.json',
   )
   cachedPending = { override, xdg, path }
+  return path
+}
+
+/**
+ * Path to the cached Claude Code version discovered from the npm registry
+ * (see `providers/anthropic/version.ts`). A THIRD file rather than a field in
+ * the pool: the pool's every read-modify-write takes a cross-process lock, and
+ * this cache is a best-effort, provider-owned scratch value that must never
+ * contend with — let alone fail — a credential/usage write. Same data dir and
+ * same env-keyed memo as the two files above.
+ */
+export function versionCacheFilePath(): string {
+  const override = process.env.OPENCODE_AUTH_LB_DIR
+  const xdg = process.env.XDG_DATA_HOME
+  if (
+    cachedVersion &&
+    cachedVersion.override === override &&
+    cachedVersion.xdg === xdg
+  )
+    return cachedVersion.path
+  const path = join(
+    resolveDataDir({ override, xdgDataHome: xdg }, homedir()),
+    'auth-load-balancer-cc-version.json',
+  )
+  cachedVersion = { override, xdg, path }
   return path
 }

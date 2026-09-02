@@ -80,6 +80,13 @@ function buildAuthHook(
     async loader(getAuth: OpencodeAuthGetter, provider: LoaderProvider) {
       await bootstrapFromOpencodeAuth(adapter.id, getAuth)
       zeroOutCost(provider)
+      // AWAITED (unlike the usage seed below) because it shapes every request
+      // this loader's fetch will send — Anthropic rejects a new model when the
+      // claimed Claude Code version is too old, so the version must be resolved
+      // BEFORE the first request, not concurrently with it. The hook is
+      // contractually cheap/local and pushes its network work to the
+      // background; `.catch` keeps a warm-up fault from failing the loader.
+      await adapter.prime?.(Date.now()).catch(ignore)
       // Seed usage for this provider's accounts at startup so the dashboard shows usage
       // even for a provider you don't immediately request (e.g. Codex while you work in
       // Claude); then point the in-use marker at the top-ranked account — startup is a

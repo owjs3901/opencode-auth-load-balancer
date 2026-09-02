@@ -40,6 +40,13 @@ let respond: Responder
 
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_LB_DIR = DIR
+  // Pin the Claude Code version so the auth loader's `adapter.prime` hook
+  // short-circuits (see providers/anthropic/version.ts): unpinned it would
+  // consult the npm registry, and that request lands on the `respond` shim
+  // below — inflating every call count asserted here and throwing inside the
+  // responders that JSON.parse the (absent) request body. Version DISCOVERY
+  // itself is covered by version.test.ts.
+  process.env.OPENCODE_AUTH_LB_ANTHROPIC_CLAUDE_CODE_VERSION = '2.1.258'
   await rm(POOL, { force: true })
   await rm(PENDING, { force: true })
   respond = () => new Response('{}', { status: 200 })
@@ -47,6 +54,7 @@ beforeEach(async () => {
 })
 afterEach(() => {
   globalThis.fetch = realFetch
+  delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_CLAUDE_CODE_VERSION
 })
 
 // Minimal structural views of the (untyped-in-public-API) hook shape.

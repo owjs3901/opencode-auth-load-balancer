@@ -82,11 +82,33 @@ function routeSessionId(api: TuiPluginApi): string | undefined {
 // shared with auth-load-balancer-tui.logic.ts (imported above as `cfg`) so it is
 // computed exactly once.
 
+/** One poll sample: the pool, plus the instant it was read. */
+interface PoolSample {
+  pool: PoolShape
+  now: number
+}
+
+/**
+ * Capture the pool AND the clock together, beside each other.
+ *
+ * The timestamp deliberately lives HERE rather than in each consuming memo.
+ * A memo that calls `Date.now()` itself is impure — it depends on something
+ * Solid cannot track, so its countdowns refresh only by the coincidence that
+ * the poll signal happens to change on the same tick — and it measures every
+ * `until()` against an instant slightly LATER than the snapshot it is
+ * describing. Sampling both at once makes the memos pure functions of one
+ * reactive input and keeps each countdown consistent with the pool state it
+ * is rendered from.
+ */
+function pollSample(): PoolSample {
+  return { pool: readPool(), now: Date.now() }
+}
+
 function usePool() {
-  const [pool, setPool] = createSignal<PoolShape>(readPool())
-  const timer = setInterval(() => setPool(readPool()), POLL_MS)
+  const [sample, setSample] = createSignal<PoolSample>(pollSample())
+  const timer = setInterval(() => setSample(pollSample()), POLL_MS)
   onCleanup(() => clearInterval(timer))
-  return pool
+  return sample
 }
 
 /** Shared theme-color accessor used identically by `BottomBar` and `SidebarPanel`. */
@@ -111,12 +133,11 @@ interface Chip extends WindowDisplay {
 
 /** Always-visible bottom bar (app_bottom): the in-use account per provider. */
 function BottomBar(props: { api: TuiPluginApi }) {
-  const pool = usePool()
+  const sample = usePool()
   const color = themeColor(props.api)
   const chips = createMemo<Chip[]>(() => {
-    const p = pool()
+    const { pool: p, now } = sample()
     const accounts = p.accounts ?? []
-    const now = Date.now()
     const out: Chip[] = []
     const sid = routeSessionId(props.api)
     // Show the account THIS session is using per provider — NOT the global
@@ -190,12 +211,11 @@ function SidebarPanel(props: {
   api: TuiPluginApi
   sessionId: string | undefined
 }) {
-  const pool = usePool()
+  const sample = usePool()
   const color = themeColor(props.api)
   const groups = createMemo<Group[]>(() => {
-    const p = pool()
+    const { pool: p, now } = sample()
     const accounts = p.accounts ?? []
-    const now = Date.now()
     const providerIds = [...new Set(accounts.map((a) => a.providerID))].sort(
       compareAscii,
     )
@@ -314,7 +334,8 @@ function SidebarPanel(props: {
         return
       }
 
-      setReloginTargetInPool(id, providerID, Date.now())
+      // Timestamp intentionally left to the callee's default — see its doc.
+      setReloginTargetInPool(id, providerID)
 
       const completeRelogin = async (code?: string): Promise<void> => {
         try {

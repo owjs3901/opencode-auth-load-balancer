@@ -9,8 +9,8 @@ import {
   REQUIRED_BETAS,
   TEXT_REPLACEMENTS,
   TOOL_PREFIX,
-  USER_AGENT,
 } from './constants'
+import { userAgent } from './version'
 
 /**
  * Claude Code request shaping, vendored from ex-machina-co/opencode-anthropic-auth.
@@ -69,7 +69,7 @@ export function mergeBetaHeaders(headers: Headers): string {
 export function setOAuthHeaders(headers: Headers, accessToken: string): void {
   headers.set('authorization', `Bearer ${accessToken}`)
   headers.set('anthropic-beta', mergeBetaHeaders(headers))
-  headers.set('user-agent', USER_AGENT)
+  headers.set('user-agent', userAgent())
   headers.delete('x-api-key')
 }
 

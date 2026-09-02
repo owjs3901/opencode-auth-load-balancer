@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 
 import { setBounded } from '../../util'
-import { CCH_POSITIONS, CCH_SALT, CLAUDE_CODE_VERSION } from './constants'
+import { CCH_POSITIONS, CCH_SALT } from './constants'
+import { claudeCodeVersion } from './version'
 
 interface Message {
   role?: string
@@ -44,7 +45,7 @@ export function computeCCH(messageText: string): string {
 /** Compute the 3-char version suffix from the sampled message characters. */
 export function computeVersionSuffix(
   text: string,
-  version: string = CLAUDE_CODE_VERSION,
+  version: string = claudeCodeVersion(),
 ): string {
   const chars = CCH_POSITIONS.map((index) => text[index] || '0').join('')
   return createHash('sha256')
@@ -97,14 +98,21 @@ export function buildBillingHeaderValue(
   if (!userMsg) return null
 
   const text = messageText(userMsg)
-  const key = `${entrypoint}\u0000${text}`
+  // The VERSION is part of the key, not just the value: it is resolved at
+  // runtime (env override / npm registry — see version.ts) and can change
+  // mid-process the moment a background refresh lands. Keying on entrypoint +
+  // text alone would pin every already-seen conversation to the header built
+  // from the OLD version for the life of the process — exactly the stale
+  // `cc_version` that makes Anthropic reject a newly launched model.
+  const version = claudeCodeVersion()
+  const key = `${version}\u0000${entrypoint}\u0000${text}`
   const hit = cachedHeader.get(key)
   if (hit !== undefined) return hit
-  const suffix = computeVersionSuffix(text)
+  const suffix = computeVersionSuffix(text, version)
   const cch = computeCCH(text)
   const value =
     'x-anthropic-billing-header: ' +
-    `cc_version=${CLAUDE_CODE_VERSION}.${suffix}; ` +
+    `cc_version=${version}.${suffix}; ` +
     `cc_entrypoint=${entrypoint}; ` +
     `cch=${cch};`
   setBounded(cachedHeader, key, value, CACHED_HEADER_MAX)

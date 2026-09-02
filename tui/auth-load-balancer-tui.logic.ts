@@ -242,10 +242,18 @@ export const MANUAL_DISABLED_REASON = 'manually disabled'
  */
 export const RELOGIN_TTL_MS = 600_000
 
+/**
+ * `now` DEFAULTS to the wall clock so the view can fire this without reading
+ * the clock itself: the call sits in an async re-login handler, and a bare
+ * `Date.now()` written inside a component body is flagged by `react(purity)`
+ * even on a non-render path the rule cannot distinguish. Tests still pass an
+ * explicit `now` — stamping the TTL from an injectable instant is what keeps
+ * the expiry assertion deterministic.
+ */
 export function setReloginTargetInPool(
   accountId: string,
   providerID: string,
-  now: number,
+  now: number = Date.now(),
   path: string = POOL_FILE,
 ): void {
   mutatePoolFile((pool) => {

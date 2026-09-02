@@ -130,6 +130,20 @@ export interface ProviderAdapter {
   /** Classify an HTTP status for rotation decisions. */
   classifyError(status: number): ErrorClass
 
+  /**
+   * One-time startup warm-up, awaited by the auth loader BEFORE it returns the
+   * load-balanced fetch — so anything a request's shaping depends on is in
+   * place before the first request is served. Anthropic uses it to resolve the
+   * Claude Code version it must claim (Anthropic gates new models on it; see
+   * `providers/anthropic/version.ts`); OpenAI leaves it unset, and the loader
+   * treats an absent hook as "nothing to warm up".
+   *
+   * MUST stay cheap and MUST NOT throw — it sits on opencode's startup path.
+   * Implementations do local I/O only and push anything network-bound into the
+   * background themselves.
+   */
+  prime?(now: number): Promise<void>
+
   // --- model-tier fallback (optional; Anthropic Opus/Fable→Sonnet) ---------
   /**
    * The model TIER `body` asks for (the `modelCooldownsUntil` key the fetch

@@ -18,6 +18,7 @@ import {
   setOAuthHeaders,
 } from './transform'
 import { fetchUsage, parseUsageHeaders } from './usage'
+import { primeClaudeCodeVersion } from './version'
 
 /**
  * Anthropic (Claude Pro/Max OAuth) provider adapter.
@@ -45,6 +46,10 @@ export const anthropicAdapter: ProviderAdapter = {
   fetchUsage,
 
   classifyError: classifyHttpStatus,
+
+  // Resolve the Claude Code version to claim before the first request goes out
+  // — Anthropic rejects a too-new model with a too-old version.
+  prime: primeClaudeCodeVersion,
 
   // Model-tier fallback (Opus/Fable → Sonnet). OpenAI leaves these unset —
   // the fetch loop treats absent hooks as "no tier logic".

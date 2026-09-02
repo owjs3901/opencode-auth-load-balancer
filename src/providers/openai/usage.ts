@@ -5,7 +5,7 @@ import {
   parseWindowPairHeaders,
   type WindowPairHeaderSpec,
 } from '../usage-headers'
-import { fetchUsageJson } from '../usage-http'
+import { fetchJson } from '../usage-http'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 import { resolveAccountId } from './jwt'
 
@@ -144,7 +144,7 @@ export async function fetchUsage(
   const accountId = resolveAccountId(account)
   if (accountId) headers['chatgpt-account-id'] = accountId
 
-  const json = await fetchUsageJson<UsageEndpointResponse>(
+  const json = await fetchJson<UsageEndpointResponse>(
     USAGE_URL,
     headers,
     USAGE_HTTP_TIMEOUT_MS,

@@ -5,8 +5,9 @@ import {
   parseWindowPairHeaders,
   type WindowPairHeaderSpec,
 } from '../usage-headers'
-import { fetchUsageJson } from '../usage-http'
-import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
+import { fetchJson } from '../usage-http'
+import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL } from './constants'
+import { usageUserAgent } from './version'
 
 /** Header utilization is a 0..1 FRACTION (divisor 1); reset is epoch SECONDS. */
 const HEADER_SPEC: WindowPairHeaderSpec = {
@@ -132,12 +133,12 @@ export async function fetchUsage(
   account: PoolAccount,
   now: number,
 ): Promise<UsageSnapshot | null> {
-  const json = await fetchUsageJson<UsageEndpointResponse>(
+  const json = await fetchJson<UsageEndpointResponse>(
     USAGE_URL,
     {
       authorization: `Bearer ${account.access}`,
       'anthropic-beta': 'oauth-2025-04-20',
-      'user-agent': USAGE_USER_AGENT,
+      'user-agent': usageUserAgent(),
       'content-type': 'application/json',
     },
     USAGE_HTTP_TIMEOUT_MS,

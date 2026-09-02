@@ -88,17 +88,62 @@ export const CLAUDE_CODE_IDENTITY =
 
 export const CCH_SALT = '59cf53e54c78'
 export const CCH_POSITIONS = [4, 7, 20]
-export const CLAUDE_CODE_VERSION = '2.1.87'
 export const CLAUDE_CODE_ENTRYPOINT = 'sdk-cli'
 
-/** User-Agent for /v1/messages (matches the reference plugin's validated value). */
-export const USER_AGENT = `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`
+/**
+ * Version used when nothing better is known — the floor the resolver in
+ * `version.ts` never goes below.
+ *
+ * Anthropic GATES NEW MODELS ON THE CLIENT VERSION we report (in the
+ * `claude-cli/<version>` UA and the `cc_version=` billing header): requesting a
+ * too-new model with a too-old version is rejected outright with
+ * `{"error_code":"claude_code_version_too_old"}` — e.g. `claude-fable-5-1`
+ * requires ≥ 2.1.251. A hard-pinned constant therefore BREAKS on every future
+ * model launch, which is why the live value is resolved from the npm registry
+ * (`version.ts`) and this is only the offline floor.
+ *
+ * Verified against the real API: `claude-fable-5-1` returns 400
+ * (`claude_code_version_too_old`) at `2.1.87` and 200 at this value, using the
+ * SAME `CCH_SALT`/`CCH_POSITIONS` above — the fingerprint algorithm did not
+ * change across that range, so bumping the version string alone is sufficient.
+ * Keep this at a version confirmed to work; the resolver only ever moves UP
+ * from here.
+ */
+export const FALLBACK_CLAUDE_CODE_VERSION = '2.1.258'
 
 /**
- * User-Agent for the /api/oauth/usage endpoint. This endpoint hard-rejects
- * (429) requests whose UA is not `claude-code/<version>`.
+ * Pin the reported Claude Code version explicitly, bypassing BOTH the npm
+ * lookup and the `FALLBACK_CLAUDE_CODE_VERSION` floor — the escape hatch for
+ * the two directions the resolver cannot guess: pinning FORWARD to a version
+ * npm has not tagged `latest` yet, or pinning BACK (e.g. to reproduce this
+ * `claude_code_version_too_old` failure, or if a future release changes the
+ * `cch` fingerprint algorithm and the newest version starts 400ing).
  */
-export const USAGE_USER_AGENT = `claude-code/${CLAUDE_CODE_VERSION}`
+export const CLAUDE_CODE_VERSION_ENV =
+  'OPENCODE_AUTH_LB_ANTHROPIC_CLAUDE_CODE_VERSION'
+
+/**
+ * npm dist-tags for the Claude Code CLI — `{"latest":"2.1.258",…}`, ~56 bytes.
+ * Deliberately NOT `/@anthropic-ai/claude-code/latest`, which returns the whole
+ * 3.3 KB version packument for the one field we read.
+ */
+export const CLAUDE_CODE_REGISTRY_URL =
+  'https://registry.npmjs.org/-/package/@anthropic-ai%2Fclaude-code/dist-tags'
+
+/**
+ * How long a registry answer stays authoritative on disk. Claude Code ships
+ * roughly daily, and a stale-by-a-day version only matters on the day a new
+ * model launches — so a day-long TTL keeps startup network-free almost always
+ * while still converging well inside the window that matters.
+ */
+export const CLAUDE_CODE_VERSION_TTL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Bound the registry lookup. Shorter than the 30 s OAuth/usage budgets because
+ * nothing waits on this: it runs fire-and-forget at startup and a miss simply
+ * leaves the previous (cached or fallback) version in place.
+ */
+export const REGISTRY_HTTP_TIMEOUT_MS = 10_000
 
 export const PARAGRAPH_REMOVAL_ANCHORS = [
   'github.com/anomalyco/opencode',

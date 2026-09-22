@@ -33,6 +33,7 @@ import { MANUAL_DISABLED_REASON, type PoolAccount } from '../types'
 import { refreshUsageInBackground } from '../usage-refresh'
 import { sleep } from '../util'
 import { testAccount } from './fixtures/account'
+import { fakeAdapter } from './fixtures/adapter'
 import { type Responder, responderFetch } from './fixtures/fetch-mock'
 
 const realFetch = globalThis.fetch
@@ -436,6 +437,134 @@ describe('load-balanced fetch — edge paths', () => {
     } finally {
       delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
     }
+  })
+
+  /**
+   * A CLIENT-VERSION gate answers 400, which classifies as `ok` — so before the
+   * reactive recovery the turn failed outright, and kept failing for as long as
+   * the version resolver's TTL had left to run.
+   *
+   * Driven through `fakeAdapter` rather than the real Anthropic one on purpose:
+   * the resolved version is monotonic module state SHARED across test files in
+   * bun's single process, so recovering for real here would silently break
+   * `version.test.ts`'s ascending ladder. What the fetch loop owes the adapter
+   * — restart once, re-stamp the body, hand back an unread response otherwise —
+   * is exactly what a stub can prove. The recovery ITSELF is version.test.ts's.
+   */
+  test('a client-version gate restarts the request with a RE-STAMPED body', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+    })
+    // `stamp` stands in for Anthropic's `cc_version=` billing header: the
+    // version is written INTO THE BODY, not just the headers, so a retry that
+    // reused the sent body would pair a new UA with a stale fingerprint.
+    let stamp = 1
+    let recoveries = 0
+    const sent: string[] = []
+    let n = 0
+    respond = (_url, init) => {
+      n += 1
+      sent.push(String(init?.body))
+      return n === 1
+        ? new Response('too old', { status: 400 })
+        : new Response('ok', { status: 200 })
+    }
+    const lb = createLoadBalancedFetch(
+      fakeAdapter({
+        transformBody: (b) => JSON.stringify({ body: JSON.parse(b), stamp }),
+        recoverClientVersion: async () => {
+          recoveries += 1
+          stamp += 1
+          return true
+        },
+      }),
+    )
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{"model":"m"}',
+    })
+    expect(res.status).toBe(200)
+    expect(n).toBe(2) // the rejection, then the relearned retry
+    expect(recoveries).toBe(1)
+    expect((JSON.parse(sent[0] ?? '') as { stamp: number }).stamp).toBe(1)
+    expect((JSON.parse(sent[1] ?? '') as { stamp: number }).stamp).toBe(2)
+  })
+
+  test('the retry budget is ONE — the hook is not consulted a second time', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+    })
+    let recoveries = 0
+    let n = 0
+    respond = () => {
+      n += 1
+      return new Response(`too old #${n}`, { status: 400 })
+    }
+    const lb = createLoadBalancedFetch(
+      fakeAdapter({
+        recoverClientVersion: async () => {
+          recoveries += 1
+          return true // claims a newer version every single time
+        },
+      }),
+    )
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{"model":"m"}',
+    })
+    // A provider still rejecting after the version moved is rejecting for some
+    // other reason, and re-uploading the whole conversation to rediscover that
+    // is pure cost — so the second rejection reaches the caller intact.
+    expect(n).toBe(2)
+    expect(recoveries).toBe(1)
+    expect(res.status).toBe(400)
+    expect(await res.text()).toBe('too old #2')
+  })
+
+  test('a hook that learns nothing gets the response back with its body intact', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      return new Response('{"error":"bad request"}', { status: 400 })
+    }
+    const lb = createLoadBalancedFetch(
+      fakeAdapter({
+        // Consumes its argument fully. The caller's copy must survive that,
+        // which is the entire reason the loop hands over a clone.
+        recoverClientVersion: async (given) => {
+          await given.text()
+          return false
+        },
+      }),
+    )
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{"model":"m"}',
+    })
+    expect(n).toBe(1)
+    expect(res.status).toBe(400)
+    expect(await res.text()).toBe('{"error":"bad request"}')
+  })
+
+  test('a provider with no version gate passes a 400 straight through', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+    })
+    let n = 0
+    respond = () => {
+      n += 1
+      return new Response('nope', { status: 400 })
+    }
+    const lb = createLoadBalancedFetch(fakeAdapter())
+    const res = await lb('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      body: '{"model":"m"}',
+    })
+    expect(n).toBe(1)
+    expect(res.status).toBe(400)
   })
 
   test('fails fast (no wait) when the soonest cooldown is beyond maxWaitMs', async () => {

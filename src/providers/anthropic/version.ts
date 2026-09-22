@@ -6,7 +6,9 @@ import { ignore, isPlainObject } from '../../util'
 import { fetchJson } from '../usage-http'
 import {
   CLAUDE_CODE_REGISTRY_URL,
+  CLAUDE_CODE_REQUIRED_VERSION_RE,
   CLAUDE_CODE_VERSION_ENV,
+  CLAUDE_CODE_VERSION_GATE_CODE,
   CLAUDE_CODE_VERSION_TTL_MS,
   FALLBACK_CLAUDE_CODE_VERSION,
   REGISTRY_HTTP_TIMEOUT_MS,
@@ -24,10 +26,15 @@ import {
  *   2. the newest version seen from the npm registry (cached on disk),
  *   3. `FALLBACK_CLAUDE_CODE_VERSION` — the offline floor.
  *
+ * Route 2 is only as fresh as its TTL, so `recoverClaudeCodeVersion` closes the
+ * window from the other side: a request the gate REJECTS carries the version it
+ * wanted, and adopting that beats any polling cadence — it is the one source
+ * that cannot lag the gate, because it IS the gate.
+ *
  * The accessor is SYNCHRONOUS and allocation-light because it runs on the
  * request hot path (`setOAuthHeaders`, `buildBillingHeaderValue`); all I/O
- * happens in `primeClaudeCodeVersion`, which the plugin loader runs once at
- * startup before any request is served.
+ * happens in `primeClaudeCodeVersion` (startup) and `recoverClaudeCodeVersion`
+ * (once per gate rejection), never in `claudeCodeVersion` itself.
  */
 
 /**
@@ -146,13 +153,74 @@ export async function refreshClaudeCodeVersion(now: number): Promise<void> {
   )
   if (!isPlainObject(tags) || typeof tags.latest !== 'string') return
   adopt(tags.latest)
-  // Persist `current`, not the raw answer: `current` is the max of everything
-  // seen, so a regressed registry answer refreshes the TTL without ever
-  // writing the plugin back down to it.
+  await persist(now)
+}
+
+/**
+ * Write the resolved version to the cache. Persists `current`, NOT whichever
+ * candidate a caller just supplied: `current` is the max of everything seen,
+ * so a regressed registry answer refreshes the TTL without ever writing the
+ * plugin back down to it. Unwritable data dir → swallowed, exactly like every
+ * other best-effort write here (the in-memory value still serves requests).
+ */
+async function persist(now: number): Promise<void> {
   await writeJsonAtomic(
     versionCacheFilePath(),
     JSON.stringify({ version: current, fetchedAt: now } satisfies VersionCache),
   ).catch(ignore)
+}
+
+/**
+ * REACTIVE recovery, driven by the gate's own rejection.
+ *
+ * `primeClaudeCodeVersion` resolves once at startup and then trusts the cache
+ * for `CLAUDE_CODE_VERSION_TTL_MS`. A model that launches INSIDE that window is
+ * therefore rejected for as long as the TTL has left to run — up to a full day
+ * of hard failures — even when npm already tags the version Anthropic is asking
+ * for, and even though the rejection itself NAMES that version. No polling
+ * cadence fixes this in general either: Anthropic can gate a model before npm
+ * tags the release, which is why the env pin exists as a manual escape hatch.
+ *
+ * So learn from the rejection instead. Adopt the minimum it demands, then ask
+ * npm for the real `latest` in the same breath — the minimum only clears the
+ * model that just failed, whereas `latest` is what the NEXT launch will want.
+ *
+ * Returns whether the reported version actually MOVED, which is precisely the
+ * condition under which a retry can succeed; the caller spends a second
+ * round-trip on true and passes the rejection through untouched on false.
+ * `res` is consumed, so callers that still need the body must pass a clone.
+ */
+export async function recoverClaudeCodeVersion(
+  res: Response,
+  now: number,
+): Promise<boolean> {
+  // A pin outranks anything the server could teach us and `claudeCodeVersion`
+  // would keep returning it, so a retry is provably identical to the request
+  // that just failed — same reason `primeClaudeCodeVersion` skips its lookup.
+  if (envOverride()) return false
+  let text: string
+  try {
+    text = await res.text()
+  } catch {
+    // A body that cannot be read cannot be classified as the gate; leave the
+    // response to its normal pass-through.
+    return false
+  }
+  if (!text.includes(CLAUDE_CODE_VERSION_GATE_CODE)) return false
+  const before = current
+  // Undefined when Anthropic rewords the message. The registry round-trip
+  // below is then the ONLY route forward, which is why it is awaited rather
+  // than fired into the background: this request is already failing, and a
+  // bounded (REGISTRY_HTTP_TIMEOUT_MS) lookup is its one chance to recover.
+  const required = CLAUDE_CODE_REQUIRED_VERSION_RE.exec(text)?.[1]
+  if (required !== undefined) adopt(required)
+  await refreshClaudeCodeVersion(now).catch(ignore)
+  if (current === before) return false
+  // `refreshClaudeCodeVersion` persists only when the registry ANSWERED. A
+  // registry miss must still write what the rejection taught us, or the next
+  // process start would relearn it by failing a live request all over again.
+  await persist(now)
+  return true
 }
 
 /**

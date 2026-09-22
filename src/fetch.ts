@@ -547,8 +547,18 @@ export function createLoadBalancedFetch(
     // `JSON.parse` + `applyInstructions` + `include` Set merge + `JSON.stringify`
     // + `new URL(...)` + `/responses` rewrite. With this hoist that work runs
     // once per request, not once per attempt of a 429/401 rotation round.
-    const transformedBody =
+    // Kept as a THUNK rather than a value only so the client-version retry
+    // below can rebuild it: that path's whole purpose is to re-stamp the
+    // provider fingerprint `transformBody` embeds (Anthropic writes the
+    // resolved version into the body's `cc_version=` billing header as well as
+    // the UA). Invoked once per REQUEST on every other path — the hoist above
+    // is intact.
+    const buildBody = () =>
       bodyStr !== undefined ? adapter.transformBody(bodyStr) : init?.body
+    const buildTier = () =>
+      typeof bodyStr === 'string'
+        ? (adapter.requestModelTier?.(bodyStr) ?? null)
+        : null
     const transformedUrl = adapter.transformUrl(input)
 
     // --- model-tier fallback state (request-scoped) -------------------------
@@ -556,7 +566,7 @@ export function createLoadBalancedFetch(
     // (fable → opus → sonnet …) each time every candidate account proves
     // limited for its current tier. Each rewrite descends at least one model
     // family (guaranteed by the adapter's ladder), so the walk terminates.
-    let currentBody = transformedBody
+    let currentBody = buildBody()
     // The tier `currentBody`'s model belongs to (e.g. "fable", "opus"), when
     // the adapter can tell — the `modelCooldownsUntil` key the proactive skip
     // below consults. Recomputed on every downgrade; OpenAI leaves
@@ -568,10 +578,7 @@ export function createLoadBalancedFetch(
     // to the same `.model` — but `currentBody` is provably larger (identity
     // block + billing header + tool-name prefixing appended), so parsing
     // `bodyStr` here does the identical lookup on fewer bytes.
-    let currentTier =
-      typeof bodyStr === 'string'
-        ? (adapter.requestModelTier?.(bodyStr) ?? null)
-        : null
+    let currentTier = buildTier()
     // Lazily-computed downgrade plan for `currentBody` (null = disabled via
     // env, non-JSON body, or no lower family to fall to). Memoized per RUNG —
     // keyed by the body it was computed for — because the skip branch consults
@@ -602,6 +609,13 @@ export function createLoadBalancedFetch(
     // candidates again — preferably the session's pinned account (keeping its
     // prompt cache).
     let tierSkipped: Set<string> | null = null
+
+    // Whether this request already spent its ONE client-version restart. The
+    // budget is one because the restart is only justified by the version
+    // having MOVED (the adapter reports that): a provider that keeps rejecting
+    // afterwards is rejecting for some other reason, and re-uploading the
+    // whole conversation to rediscover that is pure cost.
+    let clientVersionRetried = false
 
     // Cold-start / staleness seeding fires once per request, inside the loop —
     // reusing the loop's own pool read instead of paying a second serialized
@@ -919,6 +933,44 @@ export function createLoadBalancedFetch(
           // don't build the template literal during a rate-limit storm.
           // prettier-ignore
           if (DEBUG) log(`!! ${account.label} ${res.status} (${cls}) -> rotating`)
+          continue
+        }
+
+        // REACTIVE CLIENT-VERSION RECOVERY. A provider can gate features on the
+        // client version this plugin claims to be, rejecting an otherwise valid
+        // request until a newer one is reported — Anthropic answers a too-new
+        // model with 400 `claude_code_version_too_old`. That status classifies
+        // as `ok`, so it is ONE statement away from reaching the caller as a
+        // failed turn, and it would keep failing for as long as the version
+        // resolver's TTL has left to run. The rejection names the version it
+        // wants, so let the adapter learn from it and start the request over.
+        //
+        // The clone keeps `res` intact for the pass-through path (the hook
+        // consumes only the tee), and the `!res.ok` gate confines cloning to a
+        // rejection's small error body — never a streamed success.
+        if (
+          !res.ok &&
+          !clientVersionRetried &&
+          (await adapter.recoverClientVersion?.(res.clone(), Date.now())) ===
+            true
+        ) {
+          clientVersionRetried = true
+          await res.body?.cancel().catch(ignore)
+          // Rebuild from the ORIGINAL body: the version is stamped INTO the
+          // body as well as the headers (Anthropic's `cc_version=`), so reusing
+          // `currentBody` would pair a new UA with the old fingerprint. The
+          // request-scoped tier state resets with it — every tier cooldown this
+          // round established is already PERSISTED, so the proactive skip
+          // rebuilds the same ladder position from the pool without re-paying a
+          // single 429.
+          currentBody = buildBody()
+          currentTier = buildTier()
+          fallbackInfo = null
+          pendingTierFallback = null
+          tierSkipped = null
+          tried.clear()
+          // prettier-ignore
+          if (DEBUG) log(`~~ ${adapter.id} rejected our client version -> relearned, restarting`)
           continue
         }
 

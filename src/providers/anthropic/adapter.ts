@@ -18,7 +18,7 @@ import {
   setOAuthHeaders,
 } from './transform'
 import { fetchUsage, parseUsageHeaders } from './usage'
-import { primeClaudeCodeVersion } from './version'
+import { primeClaudeCodeVersion, recoverClaudeCodeVersion } from './version'
 
 /**
  * Anthropic (Claude Pro/Max OAuth) provider adapter.
@@ -56,4 +56,8 @@ export const anthropicAdapter: ProviderAdapter = {
   requestModelTier,
   planModelFallback: downgradeModel,
   planReactiveFallback,
+
+  // Relearn the version from a gate rejection instead of waiting out the
+  // resolver's TTL — Anthropic names the minimum it wants in the 400 body.
+  recoverClientVersion: recoverClaudeCodeVersion,
 }

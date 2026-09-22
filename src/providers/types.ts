@@ -179,4 +179,26 @@ export interface ProviderAdapter {
     now: number,
     models: readonly string[],
   ): ReactiveModelFallback | null
+
+  // --- client-version gate (optional; Anthropic) ---------------------------
+  /**
+   * REACTIVE recovery from a CLIENT-VERSION gate: a provider may reject an
+   * otherwise-valid request until the plugin claims to be a newer client
+   * (Anthropic answers a too-new model with 400 `claude_code_version_too_old`,
+   * naming the minimum it wants). Such a status classifies as `ok` — the fetch
+   * loop is one statement away from handing it to the caller — so this is the
+   * last point at which it can become a recoverable event instead of a failed
+   * turn.
+   *
+   * Return true ONLY when the version the adapter will now report actually
+   * changed: the fetch loop reads that as "a retry can succeed" and restarts
+   * the request once. Returning true without a change would buy a second,
+   * byte-identical round-trip and the same rejection.
+   *
+   * `res` is a CLONE the implementation may consume freely; the original is
+   * still returned to the caller when this resolves false. Absent on providers
+   * with no such gate (OpenAI) — the fetch loop treats that as "nothing to
+   * recover".
+   */
+  recoverClientVersion?(res: Response, now: number): Promise<boolean>
 }

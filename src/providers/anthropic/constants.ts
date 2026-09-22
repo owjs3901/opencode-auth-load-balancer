@@ -123,6 +123,36 @@ export const CLAUDE_CODE_VERSION_ENV =
   'OPENCODE_AUTH_LB_ANTHROPIC_CLAUDE_CODE_VERSION'
 
 /**
+ * The structured error code Anthropic answers a version-gated model with:
+ *
+ * ```json
+ * {"type":"error","error":{"type":"invalid_request_error",
+ *  "message":"Claude Code 2.1.278 does not support this model; version 2.1.280 or newer is required.",
+ *  "details":{"error_code":"claude_code_version_too_old"}}}
+ * ```
+ *
+ * Matched as a SUBSTRING of the raw body rather than through a parsed path
+ * (`error.details.error_code`): the envelope's shape is Anthropic's to change,
+ * and this string appearing anywhere in a rejection is both sufficient — no
+ * other error carries it — and immune to a reshuffle that would silently break
+ * a path lookup. See `recoverClaudeCodeVersion` in version.ts.
+ */
+export const CLAUDE_CODE_VERSION_GATE_CODE = 'claude_code_version_too_old'
+
+/**
+ * The MINIMUM version that rejection's human-readable message demands.
+ *
+ * Anchored on the `or newer is required` tail rather than the first version in
+ * the string, because the message names TWO: the one we just sent ("Claude
+ * Code 2.1.278 does not support this model") and the one being asked for
+ * ("version 2.1.280 or newer is required"). Capturing the leading one would
+ * adopt the version that just failed — a no-op the recovery would correctly
+ * refuse to retry, i.e. a silent regression to the old stuck behavior.
+ */
+export const CLAUDE_CODE_REQUIRED_VERSION_RE =
+  /(\d+\.\d+\.\d+) or newer is required/
+
+/**
  * npm dist-tags for the Claude Code CLI — `{"latest":"2.1.258",…}`, ~56 bytes.
  * Deliberately NOT `/@anthropic-ai/claude-code/latest`, which returns the whole
  * 3.3 KB version packument for the one field we read.

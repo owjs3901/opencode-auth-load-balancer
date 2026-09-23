@@ -1,0 +1,7 @@
+{
+  "changes": {
+    "package.json": "Patch"
+  },
+  "note": "Accept the bare authorization code as well as the full callback URL when logging in to Codex",
+  "date": "2026-09-23T05:48:06.065842200Z"
+}

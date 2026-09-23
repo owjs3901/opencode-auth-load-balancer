@@ -676,11 +676,65 @@ describe('openai oauth', () => {
   })
 
   test('exchange returns null on bad input and non-ok', async () => {
-    expect(await oExchange('garbage', 'v', 'cb', 'S')).toBeNull()
+    expect(await oExchange('not a code', 'v', 'cb', 'S')).toBeNull()
     respond = () => new Response('x', { status: 400 })
     expect(
       await oExchange('https://cb?code=C&state=S', 'v', 'cb', 'S'),
     ).toBeNull()
+  })
+
+  test('exchange accepts the bare authorization code as well as the callback URL', async () => {
+    const bodies: URLSearchParams[] = []
+    respond = (_url, init) => {
+      bodies.push(new URLSearchParams(String(init?.body)))
+      return new Response(
+        JSON.stringify({
+          access_token: 'a',
+          refresh_token: 'r',
+          expires_in: 3600,
+        }),
+        { status: 200 },
+      )
+    }
+    // Just the `code` value — what the prompt asks for — padded as pasted.
+    const bare = await oExchange('  ac_Bare.Code-1~x  ', 'v', 'https://cb', 'S')
+    expect(bare?.access).toBe('a')
+    expect(bodies[0]?.get('code')).toBe('ac_Bare.Code-1~x')
+    expect(bodies[0]?.get('code_verifier')).toBe('v')
+    // The whole address-bar URL keeps working exactly as before.
+    const full = await oExchange(
+      'http://localhost:1455/auth/callback?code=C&scope=openid&state=S',
+      'v',
+      'https://cb',
+      'S',
+    )
+    expect(full?.access).toBe('a')
+    expect(bodies[1]?.get('code')).toBe('C')
+  })
+
+  test('exchange rejects a mismatched state or a non-code paste before any network call', async () => {
+    let calls = 0
+    respond = () => {
+      calls++
+      return new Response('{}', { status: 200 })
+    }
+    // A pasted state is still enforced — only a bare code has none to compare.
+    expect(
+      await oExchange('https://cb?code=C&state=X', 'v', 'cb', 'S'),
+    ).toBeNull()
+    expect(await oExchange('code=C&state=X', 'v', 'cb', 'S')).toBeNull()
+    // Neither a full callback nor a bare code: a URL or query missing its
+    // state, a hash pair, whitespace, or nothing at all.
+    for (const input of [
+      'https://cb?code=C',
+      'code=C',
+      'C#S',
+      'two words',
+      '   ',
+      '',
+    ])
+      expect(await oExchange(input, 'v', 'cb', 'S')).toBeNull()
+    expect(calls).toBe(0)
   })
 
   test('exchange returns null (not throw) on a malformed 200 body', async () => {

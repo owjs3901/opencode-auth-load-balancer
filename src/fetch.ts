@@ -197,6 +197,11 @@ async function applyCooldown(
  * for the usage stamp so the write is internally consistent. `bestEffort` still
  * swallows `LockTimeoutError` / `PoolReadError` / `PoolWriteError` so a
  * bookkeeping failure never fails an already-served response.
+ *
+ * `revokedKey` is the static API key a 401 just rejected. No refresh can
+ * replace a revoked key, so the row is parked for a re-login rather than
+ * retried every AUTH_COOLDOWN_MS forever — but only while it still holds that
+ * key, so a re-login that replaced it mid-request is never disabled.
  */
 async function recordRotation(
   adapter: ProviderAdapter,
@@ -205,6 +210,7 @@ async function recordRotation(
   fallbackMs: number,
   now: number,
   kind: CooldownKind,
+  revokedKey?: string,
 ): Promise<void> {
   const partial = adapter.parseUsageHeaders(res.headers)
   const until = cooldownUntilFrom(res, fallbackMs, now)
@@ -217,6 +223,8 @@ async function recordRotation(
         account.cooldownUntil = until
         account.cooldownKind = kind
       }
+      if (revokedKey !== undefined && account.access === revokedKey)
+        account.disabledReason = `invalid API key: re-login required (${adapter.id}:${account.label})`
     }),
   )
 }
@@ -919,6 +927,9 @@ export function createLoadBalancedFetch(
             ms,
             Date.now(),
             cls === 'auth' ? 'auth' : 'quota',
+            res.status === 401 && adapter.tokensFromApiKey
+              ? account.access
+              : undefined,
           )
           // Only an `account`-class (429/402) cooldown is worth waiting out; an auth
           // (401/403) failure needs a re-login, not time, so it stays out of the set.

@@ -1,6 +1,6 @@
 # opencode-auth-load-balancer
 
-Load-balance [opencode](https://opencode.ai) across **multiple Claude (Anthropic) and Codex (OpenAI/ChatGPT) OAuth accounts** so you never have to stop and re-login when one account runs out of quota.
+Load-balance [opencode](https://opencode.ai) across **multiple Claude (Anthropic) and Codex (OpenAI/ChatGPT) OAuth accounts and Kimi Code API keys** so you never have to stop and re-login when one account runs out of quota.
 
 Selection is **not** round-robin. It is weighted primarily by **weekly** usage, with a continuous "drain the soonest-resetting account first" rule, per-conversation **session affinity** (to preserve prompt caching), and a proactive switch **before** an account hits 100%.
 
@@ -8,7 +8,7 @@ Selection is **not** round-robin. It is weighted primarily by **weekly** usage, 
 
 ## Features
 
-- **Account pool** — register many Claude / Codex OAuth accounts; the plugin manages and rotates them.
+- **Account pool** — register many Claude / Codex OAuth accounts and Kimi Code API keys; the plugin manages and rotates them.
 - **Weekly-usage-weighted scheduling** — `urgency = weeklyRemaining / daysUntilWeeklyReset`. A sooner reset (e.g. 3 days) outranks a later one (7 days) at equal headroom; perishable quota is drained progressively, never crammed into the final hour.
 - **Automatic rotation** — on `429`/auth errors an account is cooled down and the next-best is tried; `retry-after` is honored.
 - **Model-tier fallback ladder (Fable, Opus, …)** — Claude Max accounts have *separate* weekly caps per premium model tier. When one is exhausted (a 429 whose `representative-claim` names a tier window, e.g. `seven_day_fable` / `seven_day_opus`), the balancer records a **per-tier** cooldown instead of cooling the whole account down (which used to cascade every account into a false "cooldown" and block *every* model on it). Requests for that tier then **steer to an account with tier headroom** — keeping the model you asked for — and only when the *whole pool* is tier-limited does the request descend **one rung down the fallback ladder**: the next model family in `fable → opus → sonnet → haiku` (order configurable via `OPENCODE_AUTH_LB_ANTHROPIC_FAMILY_ORDER`), picking the **highest-versioned model your provider config actually has** (a capped `claude-fable-5` prefers `claude-opus-4-9` over `claude-opus-4-8`). If that tier is capped too, it descends again (`fable → opus → sonnet`), each step toasted, preferably on the session's pinned account (keeping its prompt cache). Pin a fixed target or disable entirely via `OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`.
@@ -24,7 +24,7 @@ Selection is **not** round-robin. It is weighted primarily by **weekly** usage, 
 ## Requirements
 
 - [Bun](https://bun.com) ≥ 1.3
-- opencode (TUI), with the Anthropic and/or OpenAI providers available
+- opencode (TUI), with the Anthropic, OpenAI, and/or Kimi For Coding providers available
 
 ---
 
@@ -99,6 +99,16 @@ Durable turn references live beside the pool as `auth-load-balancer-pending.json
 A third file, `auth-load-balancer-cc-version.json`, caches the discovered Claude Code version (`{"version","fetchedAt"}` — see [Claude Code version](#claude-code-version)). It holds no account data and is safe to delete; it is rebuilt on the next start.
 
 > **OpenAI/Codex note:** the OpenAI path assumes opencode is configured to use the **Responses API** (the standard ChatGPT/Codex setup); `/responses` requests are routed to the Codex backend.
+
+### Kimi Code (API keys)
+
+Kimi Code subscriptions authenticate with a **static API key**, not OAuth. The plugin hooks both deployments in opencode's model catalog, each with its own pool: **Kimi For Coding (kimi.com)** (`kimi-code-plan-cn`, `api.kimi.com/coding/v1`) and **Kimi For Coding (kimi.ai)** (`kimi-code-plan-global`, `api.kimi.ai/coding/v1`).
+
+1. `opencode auth login` → **Kimi For Coding (kimi.com)** (or **(kimi.ai)**) → **"Kimi Code API key (…) (add account to load balancer)"**.
+2. Create a key in the console the login links to ([kimi.com](https://www.kimi.com/code/console) / [kimi.ai](https://www.kimi.ai/code/console)) and paste it at the prompt — the CLI labels it "authorization code"; paste the key.
+3. Repeat for every subscription.
+
+The key is checked against `GET /usages` before it joins the pool, then stored in opencode as a plain `api` credential; pasting the same key again updates its row instead of duplicating it, and a key opencode already stores for the provider is imported on first start. Usage (5h + weekly) comes from `/usages` alone — Kimi's inference responses carry no quota headers — polled at most every 5 minutes while requests flow. A `401` means the key was revoked, so the row switches to `re-login` (paste a new key with the TUI's re-login) instead of being retried.
 
 ---
 
@@ -270,7 +280,7 @@ opencode loads plugins once at startup, so the loop is:
 
 ```
 src/
-  index.ts              # plugin entry: 3 exports (Anthropic, OpenAI, Status-tool)
+  index.ts              # plugin entry: 5 exports (Anthropic, OpenAI, Kimi Code ×2, Status-tool)
   fetch.ts              # load-balanced fetch — the per-request choke point
   refresh.ts            # singleflight OAuth refresh, invalid_grant handling
   accounts.ts           # append / bootstrap accounts into the pool
@@ -288,6 +298,7 @@ src/
   providers/            # ProviderAdapter contract + headers
     anthropic/          #   Claude OAuth + Claude Code request transforms + usage
     openai/             #   ChatGPT/Codex OAuth + Responses transforms + usage
+    kimi/               #   Kimi Code API-key login + /usages parsing (kimi.com + kimi.ai)
   cli/status.ts         # `bun run status`
   __tests__/            # all tests
 tui/
@@ -321,6 +332,7 @@ The account pool and durable pending references are separate JSON files (opencod
 
 - **Bottom status bar** ([`tui/auth-load-balancer-tui.ts`](tui/auth-load-balancer-tui.ts) + [`.view.tsx`](tui/auth-load-balancer-tui.view.tsx) + [`.logic.ts`](tui/auth-load-balancer-tui.logic.ts) + [`auth-load-balancer-scoring.ts`](tui/auth-load-balancer-scoring.ts)) is a SolidJS TUI artifact compiled by opencode (its JSX deps — `solid-js` + `@opentui/*` — are installed as devDependencies, so the `.tsx` view **is** typechecked via `tsconfig.tui.json` and linted, though not render-tested here since that needs a live opencode TUI; its scorer is a byte-identical copy of the unit-tested [`src/scheduler/score-core.ts`](src/scheduler/score-core.ts), enforced by a sync test). It is written against opencode `>=1.18.26` internals (the `app_bottom` slot + the `subagent-footer` usage computation, verified against source); confirm it renders in your opencode build. The toast/tool/CLI cover the account info regardless.
 - **OpenAI/Codex** assumes the Responses API; chat-completions → responses conversion is out of scope.
+- **Kimi Code** is API keys only — Kimi's OAuth device login is not supported yet. The pool dedups by key, not by account, so two keys of the same subscription count as two accounts: add each subscription once.
 - **Plugin reloads require restart**: opencode loads server plugins once at process startup. After installing a new build, restart the running opencode process once; durable turns are restored on that next start and are never sent while opencode is closed.
 - **Cross-process refresh**: per-process singleflight protects token rotation within one opencode instance. Running two opencode instances at once could still race the single-use refresh token.
 - **TUI pool writes**: the TUI sidebar's Rename / Delete actions write the pool file atomically (temp + rename) but WITHOUT the cross-process file lock the server uses around its own read-modify-write — so a server usage / cooldown / session / `tokenGen` update committed between the TUI's `readFileSync` and `renameSync` can be silently overwritten. Impact is bounded: the next request re-records usage from response headers, so the window is one cycle of staleness on the affected account; correctness recovers on its own.

@@ -1,4 +1,5 @@
 import { anthropicAdapter } from './anthropic/adapter'
+import { kimiCodeAdapter, kimiCodeGlobalAdapter } from './kimi/adapter'
 import { openaiAdapter } from './openai/adapter'
 import type { ProviderAdapter } from './types'
 
@@ -21,6 +22,8 @@ import type { ProviderAdapter } from './types'
 export const ADAPTERS: readonly ProviderAdapter[] = [
   anthropicAdapter,
   openaiAdapter,
+  kimiCodeAdapter,
+  kimiCodeGlobalAdapter,
 ]
 
 /**

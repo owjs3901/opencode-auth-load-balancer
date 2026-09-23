@@ -57,6 +57,8 @@ import {
 const PROVIDER_NAMES: Record<string, string> = {
   anthropic: 'Claude',
   openai: 'Codex',
+  'kimi-code-plan-cn': 'Kimi',
+  'kimi-code-plan-global': 'Kimi (kimi.ai)',
 }
 /** Shared fallback lookup used by both the bottom bar and sidebar group labels. */
 function providerLabel(id: string): string {

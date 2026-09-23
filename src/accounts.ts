@@ -3,13 +3,17 @@ import { randomUUID } from 'node:crypto'
 import { mutatePool, readPool } from './pool/store'
 import { emptyUsage, type PoolAccount, type TokenSet } from './types'
 
-/** The credential getter opencode passes to an auth loader. */
-export type OpencodeAuthGetter = () => Promise<{
+/** A credential from opencode's auth store (`oauth` token pair or `api` key). */
+interface OpencodeAuth {
   type: string
   access?: string
   refresh?: string
   expires?: number
-}>
+  key?: string
+}
+
+/** The credential getter opencode passes to an auth loader. */
+export type OpencodeAuthGetter = () => Promise<OpencodeAuth>
 
 function makeAccount(
   providerID: string,
@@ -119,17 +123,40 @@ export async function addAccount(
 }
 
 /**
- * Seed the pool from opencode's existing single-slot OAuth credential (e.g. left by
- * the single-account anthropic-auth plugin) so the user keeps working without
- * re-login. No-op once the pool already has an account for this provider.
+ * The pool tokens an opencode credential can seed, or null. An OAuth provider
+ * imports only an `oauth` token pair and a static-key provider (one passing
+ * `tokensFromApiKey`) only an `api` key — never the other kind, which would
+ * go out under the wrong auth scheme and only ever 401.
+ */
+function importableTokens(
+  auth: OpencodeAuth,
+  tokensFromApiKey?: (key: string) => TokenSet,
+): TokenSet | null {
+  if (tokensFromApiKey)
+    return auth.type === 'api' && auth.key ? tokensFromApiKey(auth.key) : null
+  if (auth.type !== 'oauth' || !auth.access || !auth.refresh) return null
+  return {
+    access: auth.access,
+    refresh: auth.refresh,
+    expires: auth.expires ?? 0,
+  }
+}
+
+/**
+ * Seed the pool from opencode's existing single-slot credential (e.g. an OAuth
+ * login left by the single-account anthropic-auth plugin, or a Kimi Code API
+ * key saved before this plugin was installed) so the user keeps working
+ * without re-login. No-op once the pool already has an account for this
+ * provider.
  */
 export async function bootstrapFromOpencodeAuth(
   providerID: string,
   getAuth: OpencodeAuthGetter,
+  tokensFromApiKey?: (key: string) => TokenSet,
 ): Promise<void> {
   const auth = await getAuth().catch(() => null)
-  if (!auth || auth.type !== 'oauth' || !auth.access || !auth.refresh) return
-  const { access, refresh, expires } = auth
+  const tokens = auth && importableTokens(auth, tokensFromApiKey)
+  if (!tokens) return
   // Fast path: in the steady state (every startup after the first) the provider
   // already has an account, so skip the full lock + atomic rewrite mutatePool
   // pays even for a no-op. The inner guard below is RETAINED — it runs under
@@ -138,12 +165,6 @@ export async function bootstrapFromOpencodeAuth(
     return
   await mutatePool((pool) => {
     if (pool.accounts.some((a) => a.providerID === providerID)) return
-    pool.accounts.push(
-      makeAccount(providerID, `${providerID}-1`, {
-        access,
-        refresh,
-        expires: expires ?? 0,
-      }),
-    )
+    pool.accounts.push(makeAccount(providerID, `${providerID}-1`, tokens))
   })
 }

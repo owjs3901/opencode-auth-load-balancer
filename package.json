@@ -1,7 +1,7 @@
 {
   "name": "opencode-auth-load-balancer",
   "version": "0.4.1",
-  "description": "Load-balance opencode requests across multiple Anthropic (Claude) and OpenAI (Codex) OAuth accounts and Kimi Code API keys, weighted primarily by weekly usage with drain-before-reset scheduling.",
+  "description": "Load-balance opencode requests across multiple Anthropic (Claude) and OpenAI (Codex) OAuth accounts and Kimi Code subscriptions, weighted primarily by weekly usage with drain-before-reset scheduling.",
   "type": "module",
   "license": "MIT",
   "author": "owjs3901",

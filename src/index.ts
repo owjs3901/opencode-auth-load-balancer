@@ -33,7 +33,7 @@ import type { ProviderAdapter } from './providers/types'
 import { loadConfig } from './scheduler/config'
 import { MESSAGE_HEADER, SESSION_HEADER } from './session'
 import { readStatus, renderPendingStatus, renderStatus } from './status'
-import { MANUAL_DISABLED_REASON } from './types'
+import { MANUAL_DISABLED_REASON, type TokenSet } from './types'
 import {
   refreshAllUsageInBackground,
   refreshUsageInBackground,
@@ -43,8 +43,8 @@ import { ignore } from './util'
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: 'Claude Pro/Max',
   openai: 'ChatGPT/Codex',
-  'kimi-code-plan-cn': 'Kimi Code API key (kimi.com)',
-  'kimi-code-plan-global': 'Kimi Code API key (kimi.ai)',
+  'kimi-code-plan-cn': 'Kimi Code (kimi.com)',
+  'kimi-code-plan-global': 'Kimi Code (kimi.ai)',
 }
 
 interface ModelCost {
@@ -72,9 +72,9 @@ function zeroOutCost(provider: LoaderProvider): void {
  * Build an opencode auth hook for one provider:
  *  - `loader`: seeds the pool from any existing opencode credential, then returns
  *    the load-balanced fetch so every request flows through the scheduler.
- *  - `methods`: a login that APPENDS each account to the pool (instead of
- *    overwriting opencode's single auth slot) — OAuth for Claude/Codex, a pasted
- *    API key for Kimi Code.
+ *  - `methods`: logins that APPEND each account to the pool (instead of
+ *    overwriting opencode's single auth slot) — a pasted OAuth code for
+ *    Claude/Codex; for Kimi Code a device-code OAuth login, then a pasted key.
  */
 function buildAuthHook(
   adapter: ProviderAdapter,
@@ -82,6 +82,20 @@ function buildAuthHook(
   pending: PendingCoordinator,
 ): AuthHook {
   const label = PROVIDER_LABELS[adapter.id] ?? adapter.id
+  const startDeviceLogin = adapter.startDeviceLogin
+  // Seed the just-registered account's usage right away — awaited so the
+  // dashboard shows usage immediately after login (no extra latency on the
+  // request path; this is the one-time login flow). Throttled inside.
+  const register = async (tokens: TokenSet): Promise<void> => {
+    await addAccount(adapter.id, tokens)
+    await refreshUsageInBackground(adapter, Date.now()).catch(ignore)
+  }
+  const oauthSuccess = (tokens: TokenSet) => ({
+    type: 'success' as const,
+    refresh: tokens.refresh,
+    access: tokens.access,
+    expires: tokens.expires,
+  })
   return {
     provider: adapter.id,
     async loader(getAuth: OpencodeAuthGetter, provider: LoaderProvider) {
@@ -139,8 +153,32 @@ function buildAuthHook(
       }
     },
     methods: [
+      // A device-code login where the provider has one (Kimi Code): opencode
+      // shows the URL, and the callback waits while the user approves it.
+      ...(startDeviceLogin
+        ? [
+            {
+              label: `${label} (add account to load balancer)`,
+              type: 'oauth' as const,
+              authorize: async () => {
+                const login = await startDeviceLogin()
+                return {
+                  url: login.url,
+                  instructions: login.instructions,
+                  method: 'auto' as const,
+                  callback: async () => {
+                    const tokens = await login.complete()
+                    if (!tokens) return { type: 'failed' as const }
+                    await register(tokens)
+                    return oauthSuccess(tokens)
+                  },
+                }
+              },
+            },
+          ]
+        : []),
       {
-        label: `${label} (add account to load balancer)`,
+        label: `${adapter.tokensFromApiKey ? `${label} API key` : label} (add account to load balancer)`,
         type: 'oauth' as const,
         authorize: async () => {
           const result = await adapter.authorize()
@@ -157,23 +195,14 @@ function buildAuthHook(
                 result.state,
               )
               if (!tokens) return { type: 'failed' as const }
-              await addAccount(adapter.id, tokens)
-              // Seed the just-registered account's usage right away — awaited so the
-              // dashboard shows usage immediately after login (no extra latency on the
-              // request path; this is the one-time login flow). Throttled inside.
-              await refreshUsageInBackground(adapter, Date.now()).catch(ignore)
+              await register(tokens)
               // A static API key goes back to opencode as a plain `api`
               // credential: it still satisfies opencode's "provider has a
               // credential" gate on this loader, and keeps working as an
               // ordinary key should the plugin be removed.
               if (adapter.tokensFromApiKey)
                 return { type: 'success' as const, key: tokens.access }
-              return {
-                type: 'success' as const,
-                refresh: tokens.refresh,
-                access: tokens.access,
-                expires: tokens.expires,
-              }
+              return oauthSuccess(tokens)
             },
           }
         },

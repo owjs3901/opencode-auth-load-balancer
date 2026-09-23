@@ -927,7 +927,9 @@ export function createLoadBalancedFetch(
             ms,
             Date.now(),
             cls === 'auth' ? 'auth' : 'quota',
-            res.status === 401 && adapter.tokensFromApiKey
+            // A key row is one without a refresh token: OAuth rows of the
+            // same provider keep the normal cooldown and refresh path.
+            res.status === 401 && adapter.tokensFromApiKey && !account.refresh
               ? account.access
               : undefined,
           )

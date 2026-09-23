@@ -123,17 +123,17 @@ export async function addAccount(
 }
 
 /**
- * The pool tokens an opencode credential can seed, or null. An OAuth provider
- * imports only an `oauth` token pair and a static-key provider (one passing
- * `tokensFromApiKey`) only an `api` key — never the other kind, which would
- * go out under the wrong auth scheme and only ever 401.
+ * The pool tokens an opencode credential can seed, or null. An `oauth` pair
+ * seeds any provider; an `api` key only one that takes keys (passing
+ * `tokensFromApiKey`) — sent to an OAuth-only provider as its bearer, a key
+ * would only ever 401.
  */
 function importableTokens(
   auth: OpencodeAuth,
   tokensFromApiKey?: (key: string) => TokenSet,
 ): TokenSet | null {
-  if (tokensFromApiKey)
-    return auth.type === 'api' && auth.key ? tokensFromApiKey(auth.key) : null
+  if (auth.type === 'api')
+    return tokensFromApiKey && auth.key ? tokensFromApiKey(auth.key) : null
   if (auth.type !== 'oauth' || !auth.access || !auth.refresh) return null
   return {
     access: auth.access,

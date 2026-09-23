@@ -202,6 +202,8 @@ interface Row extends WindowDisplay {
   rank: number | null
   state: string
   manuallyDisabled: boolean
+  /** A static API-key row: re-login asks for a new key, not an OAuth sign-in. */
+  apiKey: boolean
 }
 interface Group {
   provider: string
@@ -266,6 +268,7 @@ function SidebarPanel(props: {
           // tier annotation forever until the server heals the file.
           state: stateOf(sa, tierResets(a, now), now),
           manuallyDisabled: a.disabledReason === MANUAL_DISABLED_REASON,
+          apiKey: a.refresh === '',
         }
       })
       return { provider: providerLabel(providerID), rows }
@@ -308,12 +311,13 @@ function SidebarPanel(props: {
     id: string,
     label: string,
     providerID: string,
+    apiKey: boolean,
   ): Promise<void> {
     try {
       const methods = (await props.api.client.provider.auth()).data?.[
         providerID
       ]
-      const method = pickAuthMethodIndex(methods)
+      const method = pickAuthMethodIndex(methods, apiKey)
       if (method === null) {
         props.api.ui.toast({
           variant: 'error',
@@ -374,6 +378,15 @@ function SidebarPanel(props: {
       }
 
       if (auth.method === 'auto') {
+        // A device-code login (Kimi Code) completes in the browser: show where
+        // to approve it for as long as the callback waits.
+        dialog().replace(() =>
+          props.api.ui.DialogAlert({
+            title: `Re-login "${label}"`,
+            message: `${auth.instructions}\n\n${auth.url}`,
+            onConfirm: () => dialog().clear(),
+          }),
+        )
         await completeRelogin()
         return
       }
@@ -425,6 +438,7 @@ function SidebarPanel(props: {
     label: string,
     providerID: string,
     manuallyDisabled: boolean,
+    apiKey: boolean,
   ): void {
     const items: { title: string; run: () => void }[] = [
       { title: 'Rename', run: () => openRename(id, label) },
@@ -442,7 +456,7 @@ function SidebarPanel(props: {
       {
         title: 'Re-login — re-authorize with the provider',
         run: () => {
-          void openRelogin(id, label, providerID)
+          void openRelogin(id, label, providerID, apiKey)
         },
       },
       { title: 'Delete — remove from pool', run: () => openDelete(id, label) },
@@ -505,7 +519,13 @@ function SidebarPanel(props: {
                 {(r) => (
                   <box
                     onMouseUp={() =>
-                      openMenu(r.id, r.label, r.providerID, r.manuallyDisabled)
+                      openMenu(
+                        r.id,
+                        r.label,
+                        r.providerID,
+                        r.manuallyDisabled,
+                        r.apiKey,
+                      )
                     }
                   >
                     <text

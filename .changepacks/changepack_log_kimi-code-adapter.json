@@ -2,6 +2,6 @@
   "changes": {
     "package.json": "Minor"
   },
-  "note": "Add Kimi Code (kimi.com / kimi.ai) API-key accounts, scheduled on the 5h + weekly windows from /usages",
+  "note": "Add Kimi Code (kimi.com / kimi.ai) accounts - device-code OAuth sign-in or API key - scheduled on the 5h + weekly windows from /usages",
   "date": "2026-09-23T06:02:25.761384700Z"
 }

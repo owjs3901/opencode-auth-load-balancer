@@ -186,3 +186,30 @@ export function parseCallbackInput(
 
   return null
 }
+
+/**
+ * A bare authorization code: RFC 3986 unreserved characters only (the
+ * base64url alphabet plus `.` and `~`). Anything carrying URL structure
+ * (`:`, `/`, `?`, `&`, `=`, `#`) or whitespace is a malformed paste, not a
+ * code — rejecting it here keeps garbage off the token endpoint.
+ */
+const BARE_CODE_RE = /^[\w.~-]+$/
+
+/**
+ * `parseCallbackInput`, plus the authorization code on its own — what a user
+ * naturally copies out of the callback's `?code=…` when the login prompt asks
+ * for "the authorization code". A bare code carries no `state`, so it comes
+ * back as `state: null` and the caller skips its CSRF comparison for it. PKCE
+ * keeps that safe: a code only redeems together with the `code_verifier`
+ * generated for THIS login attempt, so a code minted for any other attempt is
+ * useless here. A pasted callback still returns its `state` for the caller to
+ * enforce.
+ */
+export function parseCodeInput(
+  input: string,
+): { code: string; state: string | null } | null {
+  const callback = parseCallbackInput(input)
+  if (callback) return callback
+  const bare = input.trim()
+  return BARE_CODE_RE.test(bare) ? { code: bare, state: null } : null
+}

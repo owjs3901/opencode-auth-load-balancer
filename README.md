@@ -80,7 +80,7 @@ Run opencode's auth flow once **per account**:
 
 1. `opencode auth login`
 2. Choose **"Claude Pro/Max (add account to load balancer)"** (or **"ChatGPT/Codex …"**).
-3. Open the URL, authorize, and paste the resulting code/URL back.
+3. Open the URL, authorize, and paste the result back. For Codex, the browser lands on a `localhost:1455` page that does not load — paste either its whole address-bar URL or just the `code` value from it; both work.
 4. Repeat for every account you want in the pool.
 
 Each login **appends** to the pool (it does not overwrite opencode's single auth slot). If you already logged in with the upstream `opencode-anthropic-auth` plugin, that credential is imported automatically on first run.

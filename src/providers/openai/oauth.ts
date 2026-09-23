@@ -2,7 +2,7 @@ import type { TokenSet } from '../../types'
 import {
   type BaseTokenResponse,
   generateState,
-  parseCallbackInput,
+  parseCodeInput,
   readExchangeResponse,
   readRefreshResponse,
   toTokenSet as baseTokenSet,
@@ -70,9 +70,12 @@ export async function authorize(): Promise<AuthorizeRequest> {
 }
 
 /**
- * Exchange a pasted callback URL (or `code#state`) for tokens. Returns null on
- * failure. The redirect lands on http://localhost:1455/auth/callback — the user
- * copies that URL from the browser address bar and pastes it here.
+ * Exchange the pasted login result for tokens. Returns null on failure. The
+ * redirect lands on http://localhost:1455/auth/callback, a page that never
+ * loads — so the user pastes either that whole URL from the address bar (or
+ * its `code=…&state=…` query) or just the authorization code itself, which is
+ * what the login prompt asks for. A pasted `state` must match this attempt's;
+ * a bare code has none to compare (see `parseCodeInput`).
  */
 export async function exchange(
   input: string,
@@ -80,9 +83,14 @@ export async function exchange(
   redirectUri: string,
   expectedState?: string,
 ): Promise<TokenSet | null> {
-  const callback = parseCallbackInput(input)
+  const callback = parseCodeInput(input)
   if (!callback) return null
-  if (expectedState && callback.state !== expectedState) return null
+  if (
+    expectedState &&
+    callback.state !== null &&
+    callback.state !== expectedState
+  )
+    return null
 
   const body = new URLSearchParams({
     grant_type: 'authorization_code',

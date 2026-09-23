@@ -45,6 +45,8 @@ export interface AuthorizeRequest {
   verifier: string
   state: string
   redirectUri: string
+  /** Login prompt text; absent = the OAuth default ("Paste the authorization code here:"). */
+  instructions?: string
 }
 
 /**
@@ -106,6 +108,19 @@ export interface ProviderAdapter {
   ): Promise<TokenSet | null>
   /** Refresh an access token. Throws on failure (callers handle invalid_grant). */
   refresh(refreshToken: string): Promise<TokenSet>
+  /**
+   * Present on providers whose credential is a static API key rather than an
+   * OAuth token pair (Kimi Code): maps a key onto the pool's TokenSet. Its
+   * presence switches three credential paths, because a key has no refresh
+   * token behind it:
+   *  - the login callback hands opencode `{ key }`, stored as a plain `api`
+   *    credential (`authorize`/`exchange` collect and verify the key);
+   *  - the auth loader imports opencode's existing `api` credential into the
+   *    pool, where OAuth providers import an `oauth` one;
+   *  - a 401 parks the row for a re-login instead of cooling it down — no
+   *    refresh can repair a revoked key.
+   */
+  tokensFromApiKey?(key: string): TokenSet
 
   // --- request shaping -----------------------------------------------------
   /** Set auth + provider headers on an outgoing request for the chosen account. */

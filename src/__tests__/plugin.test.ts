@@ -13,6 +13,8 @@ import { bestEffort, createLoadBalancedFetch } from '../fetch'
 import {
   AnthropicLoadBalancerPlugin,
   AuthLoadBalancerStatusPlugin,
+  KimiCodeGlobalLoadBalancerPlugin,
+  KimiCodeLoadBalancerPlugin,
   OpenAILoadBalancerPlugin,
 } from '../index'
 import type { ToastClient } from '../notify'
@@ -26,6 +28,7 @@ import {
 } from '../pool/store'
 import { primeInUse } from '../prime'
 import { anthropicAdapter } from '../providers/anthropic/adapter'
+import { kimiCodeAdapter } from '../providers/kimi/adapter'
 import { openaiAdapter } from '../providers/openai/adapter'
 import { loadConfig } from '../scheduler/config'
 import { MESSAGE_HEADER, SESSION_HEADER } from '../session'
@@ -66,7 +69,7 @@ interface AuthMethod {
     url: string
     instructions: string
     method: string
-    callback: (code: string) => Promise<{ type: string }>
+    callback: (code: string) => Promise<{ type: string; key?: string }>
   }>
 }
 interface PluginHooks {
@@ -78,6 +81,7 @@ interface PluginHooks {
         access?: string
         refresh?: string
         expires?: number
+        key?: string
       }>,
       provider: { models: Record<string, { cost: unknown }> },
     ) => Promise<{ apiKey: string; fetch: typeof fetch }>
@@ -2586,5 +2590,153 @@ describe('bestEffort bookkeeping', () => {
         throw new Error('genuine bug')
       }),
     ).rejects.toThrow('genuine bug')
+  })
+})
+
+describe('kimi code plugins', () => {
+  const inHours = (h: number) =>
+    new Date(Date.now() + h * 60 * 60 * 1000).toISOString()
+
+  function kimiRow(access: string): PoolAccount {
+    return account({
+      id: 'K',
+      providerID: 'kimi-code-plan-cn',
+      access,
+      refresh: '',
+      expires: Number.MAX_SAFE_INTEGER,
+    })
+  }
+
+  const sendKimi = () =>
+    createLoadBalancedFetch(kimiCodeAdapter)(
+      'https://api.kimi.com/coding/v1/chat/completions',
+      { method: 'POST', body: '{}' },
+    ).catch((error: unknown) => error)
+
+  test('login verifies the pasted key, pools it once, and stores it as an api credential', async () => {
+    respond = (url) =>
+      url.endsWith('/usages')
+        ? new Response(
+            JSON.stringify({
+              usages: {
+                limit_5h: { used_ratio: 0.25, reset_time: inHours(2) },
+                limit_7d: { used_ratio: 0.5, reset_time: inHours(48) },
+              },
+            }),
+            { status: 200 },
+          )
+        : new Response('{}', { status: 404 })
+    const hooks = await loadHooks(KimiCodeLoadBalancerPlugin)
+    expect(hooks.auth.provider).toBe('kimi-code-plan-cn')
+    const method = hooks.auth.methods[0]!
+    expect(method.label).toBe(
+      'Kimi Code API key (kimi.com) (add account to load balancer)',
+    )
+    const flow = await method.authorize()
+    expect(flow).toMatchObject({
+      url: 'https://www.kimi.com/code/console',
+      instructions: 'Paste your Kimi Code API key here:',
+      method: 'code',
+    })
+    expect(await flow.callback('  sk-kimi-one  ')).toEqual({
+      type: 'success',
+      key: 'sk-kimi-one',
+    })
+    // The same key pasted again updates its row, never a second copy of one quota.
+    expect((await flow.callback('sk-kimi-one')).type).toBe('success')
+    const rows = (await readPool()).accounts
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      providerID: 'kimi-code-plan-cn',
+      access: 'sk-kimi-one',
+      refresh: '',
+    })
+    // Usage is seeded from /usages right after the login.
+    expect(rows[0]?.usage.hourly?.utilization).toBe(0.25)
+    expect(rows[0]?.usage.weekly?.utilization).toBe(0.5)
+    await hooks.dispose()
+  })
+
+  test('kimi.ai is its own provider and console, and a refused key is never pooled', async () => {
+    const hooks = await loadHooks(KimiCodeGlobalLoadBalancerPlugin)
+    expect(hooks.auth.provider).toBe('kimi-code-plan-global')
+    const flow = await hooks.auth.methods[0]!.authorize()
+    expect(flow.url).toBe('https://www.kimi.ai/code/console')
+    respond = () => new Response('{}', { status: 401 })
+    expect((await flow.callback('sk-kimi-bad')).type).toBe('failed')
+    expect((await readPool()).accounts).toHaveLength(0)
+    await hooks.dispose()
+  })
+
+  test('the loader imports the api key opencode already stores, and only that kind', async () => {
+    const kimi = await loadHooks(KimiCodeLoadBalancerPlugin)
+    // An OAuth pair is not a Kimi Code key: nothing to import.
+    await kimi.auth.loader(
+      async () => ({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 }),
+      { models: {} },
+    )
+    expect((await readPool()).accounts).toHaveLength(0)
+    await kimi.auth.loader(
+      async () => ({ type: 'api', key: 'sk-kimi-stored' }),
+      { models: {} },
+    )
+    const [row] = (await readPool()).accounts
+    expect(row).toMatchObject({
+      providerID: 'kimi-code-plan-cn',
+      label: 'kimi-code-plan-cn-1',
+      access: 'sk-kimi-stored',
+    })
+    // The startup seed then marks it in use — settle that background write so
+    // it cannot land in the next test's pool.
+    const deadline = Date.now() + 5_000
+    while ((await readPool()).lastSelected['kimi-code-plan-cn'] !== row?.id) {
+      if (Date.now() > deadline) throw new Error('startup prime never landed')
+      await sleep(10)
+    }
+    // An OAuth provider still ignores an api credential.
+    const claude = await loadHooks(AnthropicLoadBalancerPlugin)
+    await claude.auth.loader(async () => ({ type: 'api', key: 'sk-ant-api' }), {
+      models: {},
+    })
+    const providers = (await readPool()).accounts.map((a) => a.providerID)
+    expect(providers).toEqual(['kimi-code-plan-cn'])
+    await Promise.all([kimi.dispose(), claude.dispose()])
+  })
+
+  test('a 401 parks a static key for re-login; a 403 only cools it down', async () => {
+    await mutatePool((pool) => {
+      pool.accounts = [kimiRow('sk-kimi-dead')]
+    })
+    respond = () => new Response('{}', { status: 403 })
+    await sendKimi()
+    const cooled = (await readPool()).accounts[0]
+    expect(cooled?.disabledReason).toBeNull()
+    expect(cooled?.cooldownKind).toBe('auth')
+
+    await mutatePool((pool) => {
+      pool.accounts = [kimiRow('sk-kimi-dead')]
+    })
+    respond = () => new Response('{}', { status: 401 })
+    await sendKimi()
+    expect((await readPool()).accounts[0]?.disabledReason).toBe(
+      'invalid API key: re-login required (kimi-code-plan-cn:A)',
+    )
+  })
+
+  test("a key replaced by a re-login mid-request survives the old key's 401", async () => {
+    await mutatePool((pool) => {
+      pool.accounts = [kimiRow('sk-kimi-old')]
+    })
+    respond = async () => {
+      await mutatePool((pool) => {
+        const row = pool.accounts.find((a) => a.id === 'K')
+        if (row) row.access = 'sk-kimi-new'
+      })
+      return new Response('{}', { status: 401 })
+    }
+    await sendKimi()
+    const row = (await readPool()).accounts[0]
+    expect(row?.access).toBe('sk-kimi-new')
+    expect(row?.disabledReason).toBeNull()
   })
 })

@@ -24,6 +24,10 @@ import { listPendingForWorkspace } from './pending/store'
 import { mutatePool, readPool } from './pool/store'
 import { primeInUse } from './prime'
 import { anthropicAdapter } from './providers/anthropic/adapter'
+import {
+  kimiCodeAdapter,
+  kimiCodeGlobalAdapter,
+} from './providers/kimi/adapter'
 import { openaiAdapter } from './providers/openai/adapter'
 import type { ProviderAdapter } from './providers/types'
 import { loadConfig } from './scheduler/config'
@@ -39,6 +43,8 @@ import { ignore } from './util'
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: 'Claude Pro/Max',
   openai: 'ChatGPT/Codex',
+  'kimi-code-plan-cn': 'Kimi Code API key (kimi.com)',
+  'kimi-code-plan-global': 'Kimi Code API key (kimi.ai)',
 }
 
 interface ModelCost {
@@ -66,8 +72,9 @@ function zeroOutCost(provider: LoaderProvider): void {
  * Build an opencode auth hook for one provider:
  *  - `loader`: seeds the pool from any existing opencode credential, then returns
  *    the load-balanced fetch so every request flows through the scheduler.
- *  - `methods`: a "Claude Pro/Max" style OAuth login that APPENDS each account to
- *    the pool (instead of overwriting opencode's single auth slot).
+ *  - `methods`: a login that APPENDS each account to the pool (instead of
+ *    overwriting opencode's single auth slot) — OAuth for Claude/Codex, a pasted
+ *    API key for Kimi Code.
  */
 function buildAuthHook(
   adapter: ProviderAdapter,
@@ -78,7 +85,11 @@ function buildAuthHook(
   return {
     provider: adapter.id,
     async loader(getAuth: OpencodeAuthGetter, provider: LoaderProvider) {
-      await bootstrapFromOpencodeAuth(adapter.id, getAuth)
+      await bootstrapFromOpencodeAuth(
+        adapter.id,
+        getAuth,
+        adapter.tokensFromApiKey,
+      )
       zeroOutCost(provider)
       // AWAITED (unlike the usage seed below) because it shapes every request
       // this loader's fetch will send — Anthropic rejects a new model when the
@@ -135,7 +146,8 @@ function buildAuthHook(
           const result = await adapter.authorize()
           return {
             url: result.url,
-            instructions: 'Paste the authorization code here:',
+            instructions:
+              result.instructions ?? 'Paste the authorization code here:',
             method: 'code' as const,
             callback: async (code: string) => {
               const tokens = await adapter.exchange(
@@ -150,6 +162,12 @@ function buildAuthHook(
               // dashboard shows usage immediately after login (no extra latency on the
               // request path; this is the one-time login flow). Throttled inside.
               await refreshUsageInBackground(adapter, Date.now()).catch(ignore)
+              // A static API key goes back to opencode as a plain `api`
+              // credential: it still satisfies opencode's "provider has a
+              // credential" gate on this loader, and keeps working as an
+              // ordinary key should the plugin be removed.
+              if (adapter.tokensFromApiKey)
+                return { type: 'success' as const, key: tokens.access }
               return {
                 type: 'success' as const,
                 refresh: tokens.refresh,
@@ -215,6 +233,10 @@ function createProviderPlugin(adapter: ProviderAdapter): Plugin {
 export const AnthropicLoadBalancerPlugin =
   createProviderPlugin(anthropicAdapter)
 export const OpenAILoadBalancerPlugin = createProviderPlugin(openaiAdapter)
+export const KimiCodeLoadBalancerPlugin = createProviderPlugin(kimiCodeAdapter)
+export const KimiCodeGlobalLoadBalancerPlugin = createProviderPlugin(
+  kimiCodeGlobalAdapter,
+)
 
 /** The tool-result shape shared by every auth_lb_* tool response below. */
 const lbResult = (output: string) => ({ title: 'Auth Load Balancer', output })

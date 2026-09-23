@@ -69,7 +69,7 @@ interface AuthMethod {
     url: string
     instructions: string
     method: string
-    callback: (code: string) => Promise<{ type: string; key?: string }>
+    callback: (code?: string) => Promise<{ type: string; key?: string }>
   }>
 }
 interface PluginHooks {
@@ -2613,26 +2613,84 @@ describe('kimi code plugins', () => {
       { method: 'POST', body: '{}' },
     ).catch((error: unknown) => error)
 
-  test('login verifies the pasted key, pools it once, and stores it as an api credential', async () => {
-    respond = (url) =>
-      url.endsWith('/usages')
-        ? new Response(
-            JSON.stringify({
-              usages: {
-                limit_5h: { used_ratio: 0.25, reset_time: inHours(2) },
-                limit_7d: { used_ratio: 0.5, reset_time: inHours(48) },
-              },
-            }),
-            { status: 200 },
-          )
-        : new Response('{}', { status: 404 })
+  /** Kimi's API and OAuth hosts: `/me` names account u_1, and a device login is approved at once. */
+  function kimiHosts(): void {
+    respond = (url) => {
+      if (url.endsWith('/me')) return Response.json({ user_id: 'u_1' })
+      if (url.endsWith('/usages'))
+        return Response.json({
+          usages: {
+            limit_5h: { used_ratio: 0.25, reset_time: inHours(2) },
+            limit_7d: { used_ratio: 0.5, reset_time: inHours(48) },
+          },
+        })
+      if (url.endsWith('/api/oauth/device_authorization'))
+        return Response.json({
+          device_code: 'dc',
+          user_code: 'ABCD-1234',
+          verification_uri_complete:
+            'https://www.kimi.com/code/authorize_device?user_code=ABCD-1234',
+          expires_in: 1800,
+          interval: 5,
+        })
+      if (url.endsWith('/api/oauth/token'))
+        return Response.json({
+          access_token: 'kimi-at',
+          refresh_token: 'kimi-rt',
+          expires_in: 3600,
+        })
+      return new Response('{}', { status: 404 })
+    }
+  }
+
+  /** Settle the loader's fire-and-forget startup prime so it cannot land in the next test's pool. */
+  async function settleStartup(rowId: string | undefined): Promise<void> {
+    const deadline = Date.now() + 5_000
+    while ((await readPool()).lastSelected['kimi-code-plan-cn'] !== rowId) {
+      if (Date.now() > deadline) throw new Error('startup prime never landed')
+      await sleep(10)
+    }
+  }
+
+  test('a device login signs in through the browser and pools the account with its OAuth tokens', async () => {
+    kimiHosts()
     const hooks = await loadHooks(KimiCodeLoadBalancerPlugin)
     expect(hooks.auth.provider).toBe('kimi-code-plan-cn')
-    const method = hooks.auth.methods[0]!
-    expect(method.label).toBe(
-      'Kimi Code API key (kimi.com) (add account to load balancer)',
+    const [device, key] = hooks.auth.methods
+    expect(device?.label).toBe(
+      'Kimi Code (kimi.com) (add account to load balancer)',
     )
-    const flow = await method.authorize()
+    expect(key?.label).toBe(
+      'Kimi Code (kimi.com) API key (add account to load balancer)',
+    )
+    const flow = await device!.authorize()
+    expect(flow).toMatchObject({
+      url: 'https://www.kimi.com/code/authorize_device?user_code=ABCD-1234',
+      method: 'auto',
+    })
+    expect(flow.instructions).toContain('ABCD-1234')
+    // opencode stores the OAuth pair, which gates this loader on the next start.
+    expect(await flow.callback()).toMatchObject({
+      type: 'success',
+      access: 'kimi-at',
+      refresh: 'kimi-rt',
+    })
+    const rows = (await readPool()).accounts
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      providerID: 'kimi-code-plan-cn',
+      access: 'kimi-at',
+      refresh: 'kimi-rt',
+      accountId: 'u_1',
+    })
+    expect(rows[0]?.usage.weekly?.utilization).toBe(0.5)
+    await hooks.dispose()
+  })
+
+  test('a pasted key is verified and stored as an api credential; one account stays one row', async () => {
+    kimiHosts()
+    const hooks = await loadHooks(KimiCodeLoadBalancerPlugin)
+    const flow = await hooks.auth.methods[1]!.authorize()
     expect(flow).toMatchObject({
       url: 'https://www.kimi.com/code/console',
       instructions: 'Paste your Kimi Code API key here:',
@@ -2642,58 +2700,75 @@ describe('kimi code plugins', () => {
       type: 'success',
       key: 'sk-kimi-one',
     })
-    // The same key pasted again updates its row, never a second copy of one quota.
-    expect((await flow.callback('sk-kimi-one')).type).toBe('success')
+    // A second key of the same subscription replaces the first: one quota, one row.
+    expect((await flow.callback('sk-kimi-two')).type).toBe('success')
+    const keyRows = (await readPool()).accounts
+    expect(keyRows).toHaveLength(1)
+    expect(keyRows[0]).toMatchObject({
+      access: 'sk-kimi-two',
+      refresh: '',
+      accountId: 'u_1',
+    })
+    expect(keyRows[0]?.usage.hourly?.utilization).toBe(0.25)
+    // A device login of that account takes the same row too.
+    await (await hooks.auth.methods[0]!.authorize()).callback()
     const rows = (await readPool()).accounts
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({
-      providerID: 'kimi-code-plan-cn',
-      access: 'sk-kimi-one',
-      refresh: '',
-    })
-    // Usage is seeded from /usages right after the login.
-    expect(rows[0]?.usage.hourly?.utilization).toBe(0.25)
-    expect(rows[0]?.usage.weekly?.utilization).toBe(0.5)
+    expect(rows[0]).toMatchObject({ access: 'kimi-at', refresh: 'kimi-rt' })
     await hooks.dispose()
   })
 
-  test('kimi.ai is its own provider and console, and a refused key is never pooled', async () => {
+  test('kimi.ai is its own provider and hosts; a refused key or denied login pools nothing', async () => {
     const hooks = await loadHooks(KimiCodeGlobalLoadBalancerPlugin)
     expect(hooks.auth.provider).toBe('kimi-code-plan-global')
-    const flow = await hooks.auth.methods[0]!.authorize()
-    expect(flow.url).toBe('https://www.kimi.ai/code/console')
+    const key = await hooks.auth.methods[1]!.authorize()
+    expect(key.url).toBe('https://www.kimi.ai/code/console')
     respond = () => new Response('{}', { status: 401 })
-    expect((await flow.callback('sk-kimi-bad')).type).toBe('failed')
+    expect((await key.callback('sk-kimi-bad')).type).toBe('failed')
+    kimiHosts()
+    const hosts = respond
+    respond = (url, init) =>
+      url.endsWith('/api/oauth/token')
+        ? Response.json({ error: 'access_denied' }, { status: 400 })
+        : hosts(url, init)
+    const device = await hooks.auth.methods[0]!.authorize()
+    expect((await device.callback()).type).toBe('failed')
     expect((await readPool()).accounts).toHaveLength(0)
     await hooks.dispose()
   })
 
-  test('the loader imports the api key opencode already stores, and only that kind', async () => {
+  test('the loader imports whichever credential opencode already stores', async () => {
     const kimi = await loadHooks(KimiCodeLoadBalancerPlugin)
-    // An OAuth pair is not a Kimi Code key: nothing to import.
-    await kimi.auth.loader(
-      async () => ({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 }),
-      { models: {} },
-    )
-    expect((await readPool()).accounts).toHaveLength(0)
     await kimi.auth.loader(
       async () => ({ type: 'api', key: 'sk-kimi-stored' }),
       { models: {} },
     )
-    const [row] = (await readPool()).accounts
-    expect(row).toMatchObject({
+    const [keyRow] = (await readPool()).accounts
+    expect(keyRow).toMatchObject({
       providerID: 'kimi-code-plan-cn',
       label: 'kimi-code-plan-cn-1',
       access: 'sk-kimi-stored',
+      refresh: '',
     })
-    // The startup seed then marks it in use — settle that background write so
-    // it cannot land in the next test's pool.
-    const deadline = Date.now() + 5_000
-    while ((await readPool()).lastSelected['kimi-code-plan-cn'] !== row?.id) {
-      if (Date.now() > deadline) throw new Error('startup prime never landed')
-      await sleep(10)
-    }
-    // An OAuth provider still ignores an api credential.
+    await settleStartup(keyRow?.id)
+    // The OAuth pair a device login leaves behind imports too.
+    await mutatePool((pool) => {
+      pool.accounts = []
+      pool.lastSelected = {}
+    })
+    await kimi.auth.loader(
+      async () => ({
+        type: 'oauth',
+        access: 'kimi-at',
+        refresh: 'kimi-rt',
+        expires: Date.now() + 3_600_000,
+      }),
+      { models: {} },
+    )
+    const [oauthRow] = (await readPool()).accounts
+    expect(oauthRow).toMatchObject({ access: 'kimi-at', refresh: 'kimi-rt' })
+    await settleStartup(oauthRow?.id)
+    // An OAuth-only provider still ignores an api credential.
     const claude = await loadHooks(AnthropicLoadBalancerPlugin)
     await claude.auth.loader(async () => ({ type: 'api', key: 'sk-ant-api' }), {
       models: {},
@@ -2721,6 +2796,21 @@ describe('kimi code plugins', () => {
     expect((await readPool()).accounts[0]?.disabledReason).toBe(
       'invalid API key: re-login required (kimi-code-plan-cn:A)',
     )
+
+    // An OAuth row keeps the cooldown: its refresh token can still recover it.
+    await mutatePool((pool) => {
+      pool.accounts = [
+        {
+          ...kimiRow('kimi-at'),
+          refresh: 'kimi-rt',
+          expires: Date.now() + 3_600_000,
+        },
+      ]
+    })
+    await sendKimi()
+    const oauthRow = (await readPool()).accounts[0]
+    expect(oauthRow?.disabledReason).toBeNull()
+    expect(oauthRow?.cooldownKind).toBe('auth')
   })
 
   test("a key replaced by a re-login mid-request survives the old key's 401", async () => {

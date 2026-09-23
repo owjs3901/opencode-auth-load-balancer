@@ -49,6 +49,16 @@ export interface AuthorizeRequest {
   instructions?: string
 }
 
+/** A device-code login (RFC 8628) in flight: where to approve it, and the wait for approval. */
+export interface DeviceLogin {
+  /** Verification URL to open (the user code rides in it). */
+  url: string
+  /** Prompt shown with the URL, e.g. the user code to confirm. */
+  instructions: string
+  /** Resolve with the approved tokens, or null when denied, expired, or failed. */
+  complete(): Promise<TokenSet | null>
+}
+
 /**
  * A request-body rewrite that downgrades the requested model to a cheaper
  * fallback (e.g. Claude Opus → Sonnet) when the primary model's tier quota is
@@ -109,16 +119,21 @@ export interface ProviderAdapter {
   /** Refresh an access token. Throws on failure (callers handle invalid_grant). */
   refresh(refreshToken: string): Promise<TokenSet>
   /**
-   * Present on providers whose credential is a static API key rather than an
-   * OAuth token pair (Kimi Code): maps a key onto the pool's TokenSet. Its
-   * presence switches three credential paths, because a key has no refresh
-   * token behind it:
-   *  - the login callback hands opencode `{ key }`, stored as a plain `api`
-   *    credential (`authorize`/`exchange` collect and verify the key);
-   *  - the auth loader imports opencode's existing `api` credential into the
-   *    pool, where OAuth providers import an `oauth` one;
-   *  - a 401 parks the row for a re-login instead of cooling it down — no
-   *    refresh can repair a revoked key.
+   * Start a device-code login, for providers whose OAuth has no redirect to
+   * paste back (Kimi Code). Registered as an `auto` login method ahead of the
+   * paste flow; absent on Claude/Codex.
+   */
+  startDeviceLogin?(): Promise<DeviceLogin>
+  /**
+   * Present on providers that also take a static API key (Kimi Code): maps a
+   * key onto the pool's TokenSet. A key has no refresh token behind it, so
+   * its presence switches three credential paths:
+   *  - the paste login (`authorize`/`exchange`) collects a key, and its
+   *    callback hands opencode `{ key }`, stored as a plain `api` credential;
+   *  - the auth loader also imports opencode's `api` credential, which
+   *    OAuth-only providers ignore;
+   *  - a 401 parks a key row (one without a refresh token) for a re-login
+   *    instead of cooling it down — no refresh can repair a revoked key.
    */
   tokensFromApiKey?(key: string): TokenSet
 

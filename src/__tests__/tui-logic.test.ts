@@ -589,6 +589,33 @@ describe('pickAuthMethodIndex', () => {
     expect(pickAuthMethodIndex([])).toBeNull()
     expect(pickAuthMethodIndex(undefined)).toBeNull()
   })
+
+  test('re-logs a row in the way it was added: account login or API key', () => {
+    const kimi = [
+      {
+        type: 'oauth',
+        label: 'Kimi Code (kimi.com) (add account to load balancer)',
+      },
+      {
+        type: 'oauth',
+        label: 'Kimi Code (kimi.com) API key (add account to load balancer)',
+      },
+    ]
+    expect(pickAuthMethodIndex(kimi)).toBe(0)
+    expect(pickAuthMethodIndex(kimi, true)).toBe(1)
+    // With no key login on offer, a key row still re-logs in through the pooled one.
+    expect(
+      pickAuthMethodIndex(
+        [
+          {
+            type: 'oauth',
+            label: 'Claude Pro/Max (add account to load balancer)',
+          },
+        ],
+        true,
+      ),
+    ).toBe(0)
+  })
 })
 
 describe('isFiniteNumber', () => {

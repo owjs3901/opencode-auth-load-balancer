@@ -4,7 +4,13 @@ import {
   kimiCodeAdapter,
   kimiCodeGlobalAdapter,
 } from '../providers/kimi/adapter'
+import { KIMI_CODE } from '../providers/kimi/constants'
 import { tokensFromApiKey } from '../providers/kimi/key'
+import {
+  type PollClock,
+  refreshOAuth,
+  startDeviceLogin,
+} from '../providers/kimi/oauth'
 import { parseUsages } from '../providers/kimi/usage'
 import { adapterFor, ADAPTERS } from '../providers/registry'
 import { testAccount } from './fixtures/account'
@@ -181,27 +187,34 @@ describe('kimi key login', () => {
     )
   })
 
-  test('exchange checks the pasted key against /usages before pooling it', async () => {
+  test('exchange checks the pasted key against /me and keys it by the Kimi account', async () => {
     const seen: { url: string; auth: string | null }[] = []
     respond = (url, init) => {
       seen.push({ url, auth: new Headers(init?.headers).get('authorization') })
-      return json(LIVE)
+      return json({ user_id: 'u_1', nickname: 'moon' })
     }
     const tokens = await kimiCodeAdapter.exchange('  sk-kimi-abc  ', '', '', '')
-    expect(tokens).toEqual(tokensFromApiKey('sk-kimi-abc'))
+    expect(tokens).toEqual({
+      ...tokensFromApiKey('sk-kimi-abc'),
+      accountId: 'u_1',
+    })
     expect(tokens).toMatchObject({
       access: 'sk-kimi-abc',
       refresh: '',
       expires: Number.MAX_SAFE_INTEGER,
     })
     expect(seen).toEqual([
-      {
-        url: 'https://api.kimi.com/coding/v1/usages',
-        auth: 'Bearer sk-kimi-abc',
-      },
+      { url: 'https://api.kimi.com/coding/v1/me', auth: 'Bearer sk-kimi-abc' },
     ])
-    await kimiCodeGlobalAdapter.exchange('sk-kimi-abc', '', '', '')
-    expect(seen[1]?.url).toBe('https://api.kimi.ai/coding/v1/usages')
+    // A profile without an account id still admits the key, keyed by its fingerprint.
+    respond = (url, init) => {
+      seen.push({ url, auth: new Headers(init?.headers).get('authorization') })
+      return json({ nickname: 'moon' })
+    }
+    expect(
+      await kimiCodeGlobalAdapter.exchange('sk-kimi-abc', '', '', ''),
+    ).toEqual(tokensFromApiKey('sk-kimi-abc'))
+    expect(seen[1]?.url).toBe('https://api.kimi.ai/coding/v1/me')
   })
 
   test('exchange rejects a key the API refuses, and a non-key paste unsent', async () => {
@@ -224,8 +237,209 @@ describe('kimi key login', () => {
     expect(tokensFromApiKey('sk-kimi-b').accountId).not.toBe(a.accountId)
   })
 
-  test('refresh fails as invalid_grant, so a corrupted row is parked for re-login', async () => {
+  test('a key row cannot refresh: invalid_grant parks a corrupted one for re-login', async () => {
+    let calls = 0
+    respond = () => {
+      calls++
+      return json({})
+    }
     await expect(kimiCodeAdapter.refresh('')).rejects.toThrow('invalid_grant')
+    expect(calls).toBe(0)
+  })
+})
+
+describe('kimi device login', () => {
+  interface Call {
+    url: string
+    headers: Record<string, string>
+    body: URLSearchParams
+  }
+
+  /** Scripted OAuth host: device authorization, then one reply per token poll. */
+  function oauthHost(polls: Response[], device: object = {}): Call[] {
+    const calls: Call[] = []
+    respond = (url, init) => {
+      calls.push({
+        url,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        body: new URLSearchParams(String(init?.body ?? '')),
+      })
+      if (url.endsWith('/api/oauth/device_authorization'))
+        return json({
+          device_code: 'dc',
+          user_code: 'ABCD-1234',
+          verification_uri: 'https://www.kimi.com/code/authorize_device',
+          verification_uri_complete:
+            'https://www.kimi.com/code/authorize_device?user_code=ABCD-1234',
+          expires_in: 1800,
+          interval: 5,
+          ...device,
+        })
+      if (url.endsWith('/api/oauth/token'))
+        return polls.shift() ?? json({ error: 'authorization_pending' }, 400)
+      return json({ user_id: 'u_42' })
+    }
+    return calls
+  }
+
+  /** A clock that only advances when the poll loop sleeps. */
+  function fakeClock(): PollClock & { slept: number[] } {
+    let now = 1_000_000
+    const slept: number[] = []
+    return {
+      slept,
+      now: () => now,
+      sleep: async (ms) => {
+        slept.push(ms)
+        now += ms
+      },
+    }
+  }
+
+  const approved = () =>
+    json({
+      access_token: 'kimi-at',
+      refresh_token: 'kimi-rt',
+      expires_in: 3600,
+      token_type: 'Bearer',
+    })
+
+  test('polls until approved, slows down on request, and keys the login by account', async () => {
+    const calls = oauthHost([
+      json({ error: 'authorization_pending' }, 400),
+      json({ error: 'slow_down' }, 400),
+      approved(),
+    ])
+    const clock = fakeClock()
+    const login = await startDeviceLogin(KIMI_CODE, clock)
+    expect(login.url).toBe(
+      'https://www.kimi.com/code/authorize_device?user_code=ABCD-1234',
+    )
+    expect(login.instructions).toContain('ABCD-1234')
+    const tokens = await login.complete()
+    expect(tokens).toMatchObject({
+      access: 'kimi-at',
+      refresh: 'kimi-rt',
+      accountId: 'u_42',
+    })
+    expect(clock.slept).toEqual([5000, 10_000])
+
+    const [authorize, poll] = calls
+    expect(authorize?.url).toBe(
+      'https://auth.kimi.com/api/oauth/device_authorization',
+    )
+    expect(authorize?.body.get('client_id')).toBe(
+      '17e5f671-d194-4dfb-9706-5516cb48c098',
+    )
+    expect(authorize?.headers['X-Msh-Platform']).toBe(
+      'opencode_auth_load_balancer',
+    )
+    expect(authorize?.headers['X-Msh-Device-Id']).toMatch(/^[0-9a-f]{32}$/)
+    expect(poll?.body.get('grant_type')).toBe(
+      'urn:ietf:params:oauth:grant-type:device_code',
+    )
+    expect(poll?.body.get('device_code')).toBe('dc')
+    expect(calls.at(-1)?.url).toBe('https://api.kimi.com/coding/v1/me')
+  })
+
+  test('gives up when the user denies, the code expires, or the reply is malformed', async () => {
+    for (const reply of [
+      json({ error: 'access_denied' }, 400),
+      json({ error: 'expired_token' }, 400),
+      new Response('bad gateway', { status: 502 }),
+      json({ access_token: 'kimi-at' }),
+    ]) {
+      oauthHost([reply])
+      const login = await startDeviceLogin(KIMI_CODE, fakeClock())
+      expect(await login.complete()).toBeNull()
+    }
+  })
+
+  test('stops before a poll would land past the deadline', async () => {
+    // 12 s to approve at a 5 s interval: polls at 0, 5 and 10 s — none at 15 s.
+    const calls = oauthHost([], { expires_in: 12 })
+    const clock = fakeClock()
+    const login = await startDeviceLogin(KIMI_CODE, clock)
+    expect(await login.complete()).toBeNull()
+    expect(calls.filter((c) => c.url.endsWith('/token'))).toHaveLength(3)
+    expect(clock.slept).toEqual([5000, 5000])
+  })
+
+  test('defaults a missing interval to 5 s and caps the wait at 15 minutes', async () => {
+    const calls = oauthHost([], { interval: undefined, expires_in: undefined })
+    const clock = fakeClock()
+    expect(
+      await (await startDeviceLogin(KIMI_CODE, clock)).complete(),
+    ).toBeNull()
+    expect(clock.slept.every((ms) => ms === 5000)).toBe(true)
+    // 15 min at 5 s apart: 180 polls (0 s .. 895 s).
+    expect(calls.filter((c) => c.url.endsWith('/token'))).toHaveLength(180)
+  })
+
+  test('keeps an approved login when the profile lookup has no account id', async () => {
+    oauthHost([approved()])
+    respond = ((inner) => (url: string, init?: RequestInit) =>
+      url.endsWith('/me') ? json({}, 401) : inner(url, init))(respond)
+    const tokens = await (
+      await startDeviceLogin(KIMI_CODE, fakeClock())
+    ).complete()
+    expect(tokens).toMatchObject({ access: 'kimi-at', refresh: 'kimi-rt' })
+    expect(tokens?.accountId).toBeUndefined()
+  })
+
+  test('device authorization failures throw with the HTTP status', async () => {
+    respond = () => new Response('down', { status: 503 })
+    await expect(startDeviceLogin(KIMI_CODE, fakeClock())).rejects.toThrow(
+      'HTTP 503',
+    )
+    respond = () => json({ device_code: 'dc' })
+    await expect(startDeviceLogin(KIMI_CODE, fakeClock())).rejects.toThrow(
+      'HTTP 200',
+    )
+  })
+
+  test('the adapters start the login on their own OAuth host', async () => {
+    const calls = oauthHost([])
+    await kimiCodeAdapter.startDeviceLogin?.()
+    await kimiCodeGlobalAdapter.startDeviceLogin?.()
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://auth.kimi.com/api/oauth/device_authorization',
+      'https://auth.kimi.ai/api/oauth/device_authorization',
+    ])
+  })
+})
+
+describe('kimi oauth refresh', () => {
+  test('refreshes on the OAuth host and keeps the old refresh token if none returns', async () => {
+    const bodies: URLSearchParams[] = []
+    const urls: string[] = []
+    respond = (url, init) => {
+      urls.push(url)
+      bodies.push(new URLSearchParams(String(init?.body)))
+      return json({ access_token: 'a2', refresh_token: 'r2', expires_in: 3600 })
+    }
+    expect(await refreshOAuth(KIMI_CODE, 'r1')).toMatchObject({
+      access: 'a2',
+      refresh: 'r2',
+    })
+    expect(urls[0]).toBe('https://auth.kimi.com/api/oauth/token')
+    expect(bodies[0]?.get('grant_type')).toBe('refresh_token')
+    expect(bodies[0]?.get('refresh_token')).toBe('r1')
+    respond = () => json({ access_token: 'a3', expires_in: 3600 })
+    expect((await kimiCodeGlobalAdapter.refresh('r2')).refresh).toBe('r2')
+  })
+
+  test('a revoked grant — 400 invalid_grant, 401 or 403 — reads as invalid_grant', async () => {
+    respond = () => json({ error: 'invalid_grant' }, 400)
+    await expect(refreshOAuth(KIMI_CODE, 'r1')).rejects.toThrow(
+      /^Token refresh failed: 400/,
+    )
+    respond = () => json({ error: 'forbidden' }, 403)
+    await expect(refreshOAuth(KIMI_CODE, 'r1')).rejects.toThrow('invalid_grant')
+    respond = () => new Response('busy', { status: 503 })
+    await expect(refreshOAuth(KIMI_CODE, 'r1')).rejects.toThrow(
+      /^Token refresh failed: 503/,
+    )
   })
 })
 

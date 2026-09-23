@@ -1,7 +1,8 @@
 import type { PoolAccount } from '../../types'
 import { classifyHttpStatus, type ProviderAdapter } from '../types'
 import { KIMI_CODE, KIMI_CODE_GLOBAL, type KimiDeployment } from './constants'
-import { exchange, refresh, tokensFromApiKey } from './key'
+import { exchange, tokensFromApiKey } from './key'
+import { refreshOAuth, startDeviceLogin } from './oauth'
 import { usageFetcher } from './usage'
 
 /** Send the pooled key as the Bearer; drop any SDK placeholder key (the loader hands opencode `apiKey: ''`). */
@@ -11,14 +12,19 @@ function applyAuth(headers: Headers, account: PoolAccount): void {
 }
 
 /**
- * Kimi Code (subscription API key) adapter for one deployment. opencode
- * already shapes these requests as OpenAI-compatible chat completions, so they
- * pass through untouched. Inference responses carry no quota headers: usage
- * comes from `/usages` alone.
+ * Kimi Code adapter for one deployment. A subscription joins the pool either
+ * through a device-code OAuth login (`startDeviceLogin`, refreshed by
+ * `refresh`) or as a pasted API key (`authorize`/`exchange` +
+ * `tokensFromApiKey`). opencode already shapes the requests as
+ * OpenAI-compatible chat completions, so they pass through untouched, and
+ * inference responses carry no quota headers: usage comes from `/usages`.
  */
 export function createKimiAdapter(deployment: KimiDeployment): ProviderAdapter {
   return {
     id: deployment.id,
+
+    startDeviceLogin: () => startDeviceLogin(deployment),
+    refresh: (refreshToken) => refreshOAuth(deployment, refreshToken),
 
     authorize: async () => ({
       url: deployment.consoleUrl,
@@ -28,7 +34,6 @@ export function createKimiAdapter(deployment: KimiDeployment): ProviderAdapter {
       instructions: 'Paste your Kimi Code API key here:',
     }),
     exchange: (input) => exchange(deployment, input),
-    refresh,
     tokensFromApiKey,
 
     applyAuth,

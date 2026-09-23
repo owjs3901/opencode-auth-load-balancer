@@ -1,0 +1,7 @@
+{
+  "changes": {
+    "package.json": "Minor"
+  },
+  "note": "Sign in to Kimi Code with a device-code OAuth login, and key each Kimi login by its account so one subscription stays one pool row",
+  "date": "2026-09-23T06:28:32.312056300Z"
+}

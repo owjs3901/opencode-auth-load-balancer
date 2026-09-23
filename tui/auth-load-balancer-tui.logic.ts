@@ -62,6 +62,8 @@ export interface PoolAccount {
   /** LEGACY pre-tier-map field (folded into `modelCooldownsUntil.opus` for display until the server migrates the file). */
   opusCooldownUntil?: number
   disabledReason?: string | null
+  /** Empty on a static API-key row (Kimi Code), which re-logs in with a new key. */
+  refresh?: string
 }
 /** Loosely-typed view of the on-disk pool JSON (one shape for reads AND read-modify-writes). */
 export interface PoolShape {
@@ -276,16 +278,24 @@ export function clearReloginTargetInPool(path: string = POOL_FILE): void {
  * opencode aggregates auth methods from every plugin registered for a provider,
  * so this plugin's position is not stable. Prefer its pooled-login label, then
  * fall back to the provider's first OAuth method when no such label is present.
+ * A provider can offer both an account login and an API-key login (Kimi
+ * Code), so `apiKey` picks the kind that matches how the row was added.
  */
 export function pickAuthMethodIndex(
   methods: readonly { type?: string; label?: string }[] | undefined,
+  apiKey = false,
 ): number | null {
-  const pooled = methods?.findIndex(
+  const pooled = (method: { type?: string; label?: string }): boolean =>
+    method.type === 'oauth' &&
+    (method.label?.toLowerCase().includes('load balancer') ?? false)
+  const sameKind = methods?.findIndex(
     (method) =>
-      method.type === 'oauth' &&
-      method.label?.toLowerCase().includes('load balancer'),
+      pooled(method) &&
+      (method.label?.toLowerCase().includes('api key') ?? false) === apiKey,
   )
-  if (pooled !== undefined && pooled >= 0) return pooled
+  if (sameKind !== undefined && sameKind >= 0) return sameKind
+  const anyPooled = methods?.findIndex(pooled)
+  if (anyPooled !== undefined && anyPooled >= 0) return anyPooled
   const oauth = methods?.findIndex((method) => method.type === 'oauth')
   return oauth !== undefined && oauth >= 0 ? oauth : null
 }

@@ -2,7 +2,11 @@ import { type LockOptions, withLock as withFileLock } from './pool/lock'
 import { poolFilePath } from './pool/paths'
 import { findAccount, mutatePool, readPoolAccount } from './pool/store'
 import type { ProviderAdapter } from './providers/types'
-import type { PoolAccount, TokenSet } from './types'
+import {
+  MANUAL_DISABLED_REASON,
+  type PoolAccount,
+  type TokenSet,
+} from './types'
 
 /** Refresh this many ms before the access token actually expires. */
 const REFRESH_SKEW_MS = 5 * 60 * 1000
@@ -114,7 +118,10 @@ async function commitRefresh(
     if (!sameGeneration(stored, attempt)) return tokensOf(stored)
     applyTokensTo(stored, next)
     stored.tokenGen = attempt.gen + 1
-    stored.disabledReason = null
+    // A working rotation heals a re-login reason, never a MANUAL disable:
+    // usage polling refreshes manually disabled accounts too.
+    if (stored.disabledReason !== MANUAL_DISABLED_REASON)
+      stored.disabledReason = null
     return next
   })
 }

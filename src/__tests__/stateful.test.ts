@@ -28,6 +28,7 @@ import { selectAccount } from '../scheduler/select'
 import { buildStatus, renderStatus } from '../status'
 import {
   emptyUsage,
+  MANUAL_DISABLED_REASON,
   type PoolAccount,
   type TokenSet,
   type UsageSnapshot,
@@ -867,6 +868,28 @@ describe('refresh', () => {
     expect(findAccount(await readPool(), a.id)?.disabledReason).toContain(
       'invalid_grant',
     )
+  })
+
+  test('a successful refresh heals a re-login reason but keeps a MANUAL disable', async () => {
+    const manual = account({
+      expires: Date.now() - 1,
+      disabledReason: MANUAL_DISABLED_REASON,
+    })
+    const relogin = account({
+      expires: Date.now() - 1,
+      disabledReason: 'invalid_grant: re-login required (anthropic:x)',
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...manual }, { ...relogin })
+    })
+    const adapter = fakeAdapter()
+    await ensureAccessToken(adapter, manual, Date.now())
+    await ensureAccessToken(adapter, relogin, Date.now())
+    const pool = await readPool()
+    expect(findAccount(pool, manual.id)?.disabledReason).toBe(
+      MANUAL_DISABLED_REASON,
+    )
+    expect(findAccount(pool, relogin.id)?.disabledReason).toBeNull()
   })
 
   test('does NOT disable an account when a 5xx body coincidentally contains "400"', async () => {

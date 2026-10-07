@@ -28,6 +28,7 @@ import { selectAccount } from '../scheduler/select'
 import { buildStatus, renderStatus } from '../status'
 import {
   emptyUsage,
+  MANUAL_DISABLED_REASON,
   type PoolAccount,
   type TokenSet,
   type UsageSnapshot,
@@ -867,6 +868,28 @@ describe('refresh', () => {
     expect(findAccount(await readPool(), a.id)?.disabledReason).toContain(
       'invalid_grant',
     )
+  })
+
+  test('a successful refresh heals a re-login reason but keeps a MANUAL disable', async () => {
+    const manual = account({
+      expires: Date.now() - 1,
+      disabledReason: MANUAL_DISABLED_REASON,
+    })
+    const relogin = account({
+      expires: Date.now() - 1,
+      disabledReason: 'invalid_grant: re-login required (anthropic:x)',
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...manual }, { ...relogin })
+    })
+    const adapter = fakeAdapter()
+    await ensureAccessToken(adapter, manual, Date.now())
+    await ensureAccessToken(adapter, relogin, Date.now())
+    const pool = await readPool()
+    expect(findAccount(pool, manual.id)?.disabledReason).toBe(
+      MANUAL_DISABLED_REASON,
+    )
+    expect(findAccount(pool, relogin.id)?.disabledReason).toBeNull()
   })
 
   test('does NOT disable an account when a 5xx body coincidentally contains "400"', async () => {
@@ -1801,6 +1824,44 @@ describe('usage-refresh', () => {
     expect(
       findAccount(await readPool(), a.id)?.usage.weekly?.utilization,
     ).toBeCloseTo(0.4, 5)
+  })
+
+  test('keeps polling a MANUALLY disabled account but skips one that needs a re-login', async () => {
+    const now = Date.now()
+    const manual = account({
+      expires: now - 1, // disabled for days: its access token has expired
+      disabledReason: MANUAL_DISABLED_REASON,
+      usage: emptyUsage(),
+    })
+    const revoked = account({
+      disabledReason: 'invalid_grant: re-login required (anthropic:revoked)',
+      usage: emptyUsage(),
+    })
+    const rejectedKey = account({
+      disabledReason: 'invalid API key: re-login required (anthropic:key)',
+      usage: emptyUsage(),
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...manual }, { ...revoked }, { ...rejectedKey })
+    })
+    const polled: string[] = []
+    const adapter = fakeAdapter({
+      fetchUsage: async (a) => {
+        polled.push(`${a.id}:${a.access}`)
+        return {
+          hourly: { utilization: 0.3, resetAt: 0 },
+          weekly: { utilization: 0.6, resetAt: 0 },
+          capturedAt: now,
+        }
+      },
+    })
+    await refreshUsageInBackground(adapter, now)
+    expect(polled).toEqual([`${manual.id}:new`])
+    const stored = findAccount(await readPool(), manual.id)
+    expect(stored?.usage.weekly?.utilization).toBeCloseTo(0.6, 5)
+    expect(stored?.usage.capturedAt).toBe(now)
+    expect(stored?.refresh).toBe('newref')
+    expect(stored?.disabledReason).toBe(MANUAL_DISABLED_REASON)
   })
 
   test('skips fresh accounts and a null usage result', async () => {

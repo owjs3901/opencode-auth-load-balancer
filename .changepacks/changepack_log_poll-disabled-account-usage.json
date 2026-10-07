@@ -1,0 +1,7 @@
+{
+  "changes": {
+    "package.json": "Patch"
+  },
+  "note": "Keep refreshing usage for manually disabled accounts; only accounts that need a re-login are skipped",
+  "date": "2026-10-07T07:35:10.6780015Z"
+}

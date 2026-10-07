@@ -95,7 +95,9 @@ export interface PoolAccount {
    * written on a revoked refresh token (`src/refresh.ts`), and the manual
    * `MANUAL_DISABLED_REASON` sentinel written by the disable action (TUI menu /
    * `auth_lb_disable` tool). The dashboards distinguish the two to render
-   * `disabled` (a user turned it off) vs `re-login` (needs a fresh OAuth login).
+   * `disabled` (a user turned it off) vs `re-login` (needs a fresh OAuth login),
+   * and the usage poll skips only `re-login` — a disabled account's usage stays
+   * current.
    */
   disabledReason: string | null
 }
@@ -105,8 +107,10 @@ export interface PoolAccount {
  * sidebar menu and the `auth_lb_disable` tool), distinct from the automatic
  * `invalid_grant: re-login required (…)` reason `src/refresh.ts` writes when a
  * refresh token is revoked. Both are non-null so `isAvailable` skips the
- * account; the value is kept distinct only so the dashboards can render
- * `disabled` (a user turned it off) rather than `re-login` (needs a fresh login).
+ * account; the value is kept distinct so the dashboards can render `disabled`
+ * (a user turned it off) rather than `re-login` (needs a fresh login), and so
+ * the usage poll keeps refreshing a disabled account (its credential still
+ * works) without a successful token rotation ever re-enabling it.
  */
 export const MANUAL_DISABLED_REASON = 'manually disabled'
 

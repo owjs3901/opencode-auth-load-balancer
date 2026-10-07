@@ -3,7 +3,11 @@ import { adapterFor, ADAPTERS } from './providers/registry'
 import type { ProviderAdapter } from './providers/types'
 import { ensureAccessToken } from './refresh'
 import { isExhausted, loadScoreConfig } from './scheduler/score-core'
-import type { PoolAccount, PoolFile } from './types'
+import {
+  MANUAL_DISABLED_REASON,
+  type PoolAccount,
+  type PoolFile,
+} from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
 
 export const USAGE_REFRESH_TTL_MS = 5 * 60 * 1000
@@ -95,8 +99,8 @@ async function refreshUsage(
   // where a size-only comparison can never detect the churn since both sides
   // stay equal. Every account (including the openai `continue` below) is
   // added to the alive set BEFORE any `continue`, so it costs no extra
-  // iteration over `pool.accounts`; disabled rows are included too, so a
-  // disabled account keeps its throttle slot — re-enabling it shouldn't
+  // iteration over `pool.accounts`; a re-login row the poll skips is included
+  // too, so it keeps its throttle slot — repairing its credential shouldn't
   // immediately re-poll the usage endpoint and risk its own rate limit. The
   // final prune loop is O(lastPoll.size), bounded by the historical account
   // count, and runs once after this loop instead of gating on a size compare.
@@ -104,7 +108,14 @@ async function refreshUsage(
   let stale: StaleTarget[] | undefined
   for (const account of pool.accounts) {
     aliveIds?.add(account.id)
-    if (account.disabledReason) continue
+    // Only a dead credential (a re-login reason) stops the poll. A MANUAL
+    // disable just leaves scheduling — the credential still works — so its
+    // usage keeps converging like any cooling-down or exhausted account's.
+    if (
+      account.disabledReason &&
+      account.disabledReason !== MANUAL_DISABLED_REASON
+    )
+      continue
     // Check staleness FIRST: in the steady state it is false, and both the
     // adapter lookup and the `lastPoll` Map lookup would be dead weight on the
     // per-request hot path.

@@ -1826,6 +1826,44 @@ describe('usage-refresh', () => {
     ).toBeCloseTo(0.4, 5)
   })
 
+  test('keeps polling a MANUALLY disabled account but skips one that needs a re-login', async () => {
+    const now = Date.now()
+    const manual = account({
+      expires: now - 1, // disabled for days: its access token has expired
+      disabledReason: MANUAL_DISABLED_REASON,
+      usage: emptyUsage(),
+    })
+    const revoked = account({
+      disabledReason: 'invalid_grant: re-login required (anthropic:revoked)',
+      usage: emptyUsage(),
+    })
+    const rejectedKey = account({
+      disabledReason: 'invalid API key: re-login required (anthropic:key)',
+      usage: emptyUsage(),
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...manual }, { ...revoked }, { ...rejectedKey })
+    })
+    const polled: string[] = []
+    const adapter = fakeAdapter({
+      fetchUsage: async (a) => {
+        polled.push(`${a.id}:${a.access}`)
+        return {
+          hourly: { utilization: 0.3, resetAt: 0 },
+          weekly: { utilization: 0.6, resetAt: 0 },
+          capturedAt: now,
+        }
+      },
+    })
+    await refreshUsageInBackground(adapter, now)
+    expect(polled).toEqual([`${manual.id}:new`])
+    const stored = findAccount(await readPool(), manual.id)
+    expect(stored?.usage.weekly?.utilization).toBeCloseTo(0.6, 5)
+    expect(stored?.usage.capturedAt).toBe(now)
+    expect(stored?.refresh).toBe('newref')
+    expect(stored?.disabledReason).toBe(MANUAL_DISABLED_REASON)
+  })
+
   test('skips fresh accounts and a null usage result', async () => {
     const fresh = account({
       usage: {

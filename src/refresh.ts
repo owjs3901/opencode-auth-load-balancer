@@ -1,3 +1,4 @@
+import { recordLostLogin } from './accounts'
 import { type LockOptions, withLock as withFileLock } from './pool/lock'
 import { poolFilePath } from './pool/paths'
 import { findAccount, mutatePool, readPoolAccount } from './pool/store'
@@ -5,8 +6,10 @@ import type { ProviderAdapter } from './providers/types'
 import {
   MANUAL_DISABLED_REASON,
   type PoolAccount,
+  STATIC_CREDENTIAL_EXPIRES,
   type TokenSet,
 } from './types'
+import { errorSummary } from './util'
 
 /** Refresh this many ms before the access token actually expires. */
 const REFRESH_SKEW_MS = 5 * 60 * 1000
@@ -65,6 +68,15 @@ function isInvalidGrant(error: unknown): boolean {
   return error.message.includes('invalid_grant')
 }
 
+/** The status and server body `readRefreshResponse` puts in its error message. */
+const REFRESH_FAILURE_RE = /^Token refresh failed: (\d+) — ([\s\S]*)$/
+
+/** Why the token endpoint refused a refresh, as one line for the dashboards. */
+function refusalReason(error: Error): string {
+  const m = REFRESH_FAILURE_RE.exec(error.message)
+  return m ? errorSummary(Number(m[1]), m[2] ?? '') : error.message
+}
+
 function genOf(account: PoolAccount): number {
   return account.tokenGen ?? 0
 }
@@ -95,6 +107,7 @@ function applyTokensTo(account: PoolAccount, tokens: TokenSet): void {
   account.refresh = tokens.refresh
   account.expires = tokens.expires
   if (tokens.accountId) account.accountId = tokens.accountId
+  if (tokens.refreshExpires) account.refreshExpires = tokens.refreshExpires
 }
 
 function refreshLockDir(providerID: string, accountId: string): string {
@@ -131,16 +144,31 @@ async function commitRefresh(
  * were refreshing, our token was merely superseded by a concurrent refresh — adopt
  * the newer one (returned). Only when the failed token is STILL the current on-disk
  * token is a permanent disable justified — that is real revocation, not a race.
+ *
+ * Unless the row also holds a setup-token: then only its OAuth login is gone, and
+ * the row falls back to the token alone (returned) — still serving inference,
+ * with usage measured by the token's probe until an OAuth login is paired again.
+ * Either way the server's reason is kept for the dashboards.
  */
 async function resolveInvalidGrant(
   adapter: ProviderAdapter,
   accountId: string,
   attempt: RefreshAttempt,
+  reason: string,
 ): Promise<TokenSet | null> {
   return mutatePool((pool) => {
     const stored = findAccount(pool, accountId)
     if (!stored) return null
     if (!sameGeneration(stored, attempt)) return tokensOf(stored)
+    recordLostLogin(stored, 'oauth', reason)
+    if (stored.inferenceToken !== undefined) {
+      stored.access = stored.inferenceToken
+      stored.refresh = ''
+      stored.expires = STATIC_CREDENTIAL_EXPIRES
+      stored.tokenGen = attempt.gen + 1
+      delete stored.refreshExpires
+      return tokensOf(stored)
+    }
     stored.disabledReason = disableReason(adapter, stored.label)
     return null
   })
@@ -178,8 +206,13 @@ async function runRefresh(
         const next = await adapter.refresh(attempt.refresh)
         return await commitRefresh(account.id, attempt, next)
       } catch (error) {
-        if (!isInvalidGrant(error)) throw error
-        const adopted = await resolveInvalidGrant(adapter, account.id, attempt)
+        if (!(error instanceof Error) || !isInvalidGrant(error)) throw error
+        const adopted = await resolveInvalidGrant(
+          adapter,
+          account.id,
+          attempt,
+          refusalReason(error),
+        )
         if (adopted) return adopted
         throw error
       }

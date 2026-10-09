@@ -43,7 +43,7 @@ import {
   refreshAllUsageInBackground,
   refreshUsageInBackground,
 } from '../usage-refresh'
-import { sleep } from '../util'
+import { ignore, sleep } from '../util'
 import { testAccount } from './fixtures/account'
 import { fakeAdapter } from './fixtures/adapter'
 import { responderFetch } from './fixtures/fetch-mock'
@@ -899,12 +899,16 @@ describe('refresh', () => {
       refresh: 'rotated',
       expires: Date.now() + 3_600_000,
       accountId: 'acc_x',
+      refreshExpires: 42,
     }
     const adapter = fakeAdapter({ refresh: async () => tokens })
     expect(await ensureAccessToken(adapter, a, Date.now())).toBe('fresh')
     expect(a.access).toBe('fresh')
     expect(a.accountId).toBe('acc_x')
-    expect(findAccount(await readPool(), a.id)?.refresh).toBe('rotated')
+    expect(findAccount(await readPool(), a.id)).toMatchObject({
+      refresh: 'rotated',
+      refreshExpires: 42,
+    })
   })
 
   test('disables the account on invalid_grant and rethrows', async () => {
@@ -923,6 +927,59 @@ describe('refresh', () => {
     expect(a.disabledReason).toContain('invalid_grant')
     expect(findAccount(await readPool(), a.id)?.disabledReason).toContain(
       'invalid_grant',
+    )
+  })
+
+  test('an invalid_grant on a row that also holds a setup-token falls back to the token instead of disabling', async () => {
+    const a = account({
+      expires: Date.now() - 1,
+      inferenceToken: 'tok',
+      refreshExpires: Date.now() + 1000,
+    })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        throw new Error('invalid_grant')
+      },
+    })
+
+    const bearer = await ensureAccessToken(adapter, a, Date.now())
+
+    expect(bearer).toBe('tok')
+    expect(a.refresh).toBe('')
+    const stored = findAccount(await readPool(), a.id)
+    expect(stored).toMatchObject({
+      access: 'tok',
+      refresh: '',
+      expires: Number.MAX_SAFE_INTEGER,
+      inferenceToken: 'tok',
+      lostLogins: { oauth: { reason: 'invalid_grant' } },
+      disabledReason: null,
+    })
+    expect(stored).not.toHaveProperty('refreshExpires')
+  })
+
+  test("a disabled row keeps the token endpoint's own reason for refusing the refresh", async () => {
+    const a = account({ expires: Date.now() - 1 })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        throw new Error(
+          'Token refresh failed: 400 — {"error":"invalid_grant","error_description":"Refresh token expired"}',
+        )
+      },
+    })
+
+    await ensureAccessToken(adapter, a, Date.now()).catch(ignore)
+
+    const stored = findAccount(await readPool(), a.id)
+    expect(stored?.disabledReason).toContain('re-login required')
+    expect(stored?.lostLogins?.oauth?.reason).toBe(
+      '400 invalid_grant: Refresh token expired',
     )
   })
 

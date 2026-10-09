@@ -113,6 +113,12 @@ export interface PoolAccount {
    */
   inferenceToken?: string
   /**
+   * epoch ms `inferenceToken` lapses, known only for a token the plugin
+   * minted from the row's OAuth login (`src/token-mint.ts`), which renews it
+   * ahead of time. A pasted token's lifetime is unknown, so it has none.
+   */
+  inferenceExpires?: number
+  /**
    * Logins of this row the provider refused for good, each kept with when
    * and why until that login is replaced. While the row's other login still
    * works the row keeps serving on it, and the lost one shows as `oauth

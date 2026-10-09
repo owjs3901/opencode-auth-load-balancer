@@ -35,6 +35,7 @@ import type { ProviderAdapter } from './providers/types'
 import { loadConfig } from './scheduler/config'
 import { MESSAGE_HEADER, SESSION_HEADER } from './session'
 import { readStatus, renderPendingStatus, renderStatus } from './status'
+import { maintainTokens, mintAtLogin } from './token-mint'
 import { MANUAL_DISABLED_REASON, type TokenSet } from './types'
 import {
   refreshAllUsageInBackground,
@@ -100,7 +101,8 @@ function buildAuthHook(
       if (usage) tokens.usage = usage
     }
     const account = await addAccount(adapter.id, tokens)
-    if (account.inferenceToken !== undefined && account.refresh)
+    const minted = await mintAtLogin(adapter, account)
+    if (minted || (account.inferenceToken !== undefined && account.refresh))
       void notifyPaired(client, adapter.id, account)
     await refreshUsageInBackground(adapter, Date.now()).catch(ignore)
   }
@@ -133,6 +135,7 @@ function buildAuthHook(
       void refreshUsageInBackground(adapter, Date.now())
         .then(() => primeInUse(adapter.id, Date.now()))
         .catch(ignore)
+      void maintainTokens(adapter, Date.now()).catch(ignore)
       return {
         apiKey: '',
         fetch: createLoadBalancedFetch(

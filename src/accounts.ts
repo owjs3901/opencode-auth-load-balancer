@@ -56,7 +56,10 @@ export function recordLostLogin(
   row.lostLogins = { ...row.lostLogins, [login]: { at: Date.now(), reason } }
 }
 
-function clearLostLogin(row: PoolAccount, login: keyof LostLogins): void {
+export function clearLostLogin(
+  row: PoolAccount,
+  login: keyof LostLogins,
+): void {
   if (!row.lostLogins?.[login]) return
   delete row.lostLogins[login]
   if (!row.lostLogins.oauth && !row.lostLogins.token) delete row.lostLogins
@@ -98,10 +101,12 @@ function applyTokens(row: PoolAccount, tokens: TokenSet): PoolAccount {
 /**
  * Land a setup-token on a row as its inference credential, leaving the row's
  * OAuth login in place to poll usage. A row without one stays a static row,
- * whose `access` mirrors the token.
+ * whose `access` mirrors the token. A pasted token's lifetime is unknown, so
+ * it inherits no renewal date from a minted token it replaces.
  */
 function attachToken(row: PoolAccount, tokens: TokenSet): PoolAccount {
   row.inferenceToken = tokens.access
+  delete row.inferenceExpires
   if (!row.refresh) {
     row.access = tokens.access
     row.expires = tokens.expires
@@ -127,6 +132,7 @@ export async function dropInferenceToken(
     const row = findAccount(pool, accountId)
     if (row?.inferenceToken !== token) return
     delete row.inferenceToken
+    delete row.inferenceExpires
     recordLostLogin(row, 'token', reason)
   })
 }

@@ -483,6 +483,7 @@ describe('pool store', () => {
     const lost = { at: 1, reason: '400 invalid_grant' }
     const valid = account({
       inferenceToken: 'tok',
+      inferenceExpires: 456,
       orgId: 'org-1',
       refreshExpires: 123,
       lostLogins: { oauth: lost },
@@ -497,7 +498,12 @@ describe('pool store', () => {
         version: 1,
         accounts: [
           valid,
-          broken({ inferenceToken: 42, orgId: '', refreshExpires: -1 }),
+          broken({
+            inferenceToken: 42,
+            inferenceExpires: -1,
+            orgId: '',
+            refreshExpires: -1,
+          }),
           broken({
             inferenceToken: '',
             orgId: { uuid: 'x' },
@@ -505,9 +511,15 @@ describe('pool store', () => {
             lostLogins: 'x',
           }),
           broken({
+            // A renewal date with no token left to renew.
+            inferenceExpires: 789,
             lostLogins: { oauth: { at: 'x', reason: 'r' }, token: null },
           }),
-          broken({ lostLogins: { oauth: lost, token: { at: 2 } } }),
+          broken({
+            inferenceToken: 'tok-2',
+            inferenceExpires: 'soon',
+            lostLogins: { oauth: lost, token: { at: 2 } },
+          }),
         ],
         lastSelected: {},
         sessions: {},
@@ -518,16 +530,20 @@ describe('pool store', () => {
 
     expect(kept).toMatchObject({
       inferenceToken: 'tok',
+      inferenceExpires: 456,
       orgId: 'org-1',
       refreshExpires: 123,
       lostLogins: { oauth: lost },
     })
     for (const row of [empty1, empty2, empty3]) {
       expect(row).not.toHaveProperty('inferenceToken')
+      expect(row).not.toHaveProperty('inferenceExpires')
       expect(row).not.toHaveProperty('orgId')
       expect(row).not.toHaveProperty('refreshExpires')
       expect(row).not.toHaveProperty('lostLogins')
     }
+    expect(partial?.inferenceToken).toBe('tok-2')
+    expect(partial).not.toHaveProperty('inferenceExpires')
     expect(partial?.lostLogins).toEqual({ oauth: lost })
   })
 
@@ -2185,6 +2201,37 @@ describe('credential pairing', () => {
     const stored = findAccount(await readPool(), row.id)
     expect(stored).not.toHaveProperty('inferenceToken')
     expect(stored?.lostLogins?.token?.reason).toBe('401 revoked')
+  })
+
+  test('a minted token takes its renewal date along when it is dropped or a pasted one replaces it', async () => {
+    const row = await addAccount('anthropic', OAUTH)
+    const mint = (token: string) =>
+      mutatePool((pool) => {
+        const stored = findAccount(pool, row.id)
+        if (stored) {
+          stored.inferenceToken = token
+          stored.inferenceExpires = Date.now() + DAY
+        }
+      })
+
+    await mint('minted-1')
+    await dropInferenceToken(row.id, 'minted-1', '401 revoked')
+    expect(findAccount(await readPool(), row.id)).not.toHaveProperty(
+      'inferenceExpires',
+    )
+
+    await mint('minted-2')
+    await mutatePool((pool) => {
+      pool.relogin = {
+        accountId: row.id,
+        providerID: 'anthropic',
+        expiresAt: Date.now() + 60_000,
+      }
+    })
+    await addAccount('anthropic', TOKEN)
+    const stored = findAccount(await readPool(), row.id)
+    expect(stored?.inferenceToken).toBe('tok-1')
+    expect(stored).not.toHaveProperty('inferenceExpires')
   })
 })
 

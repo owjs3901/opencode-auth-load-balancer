@@ -74,6 +74,7 @@ class FakePendingCoordinator implements PendingFetchCoordinator {
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_LB_DIR = DIR
   process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '0'
+  process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN = '0'
   await rm(POOL, { force: true })
   respond = () => new Response('ok', { status: 200 })
   globalThis.fetch = responderFetch(() => respond)
@@ -83,6 +84,7 @@ afterEach(() => {
   globalThis.fetch = realFetch
   delete process.env.OPENCODE_AUTH_LB_DIR
   delete process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS
+  delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN
 })
 
 describe('durable pending fetch integration', () => {

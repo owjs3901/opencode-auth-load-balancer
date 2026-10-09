@@ -78,9 +78,13 @@ function mockFetch(handler: (url: string) => Response): Call[] {
 const realFetch = globalThis.fetch
 afterAll(() => {
   globalThis.fetch = realFetch
+  delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN
 })
 beforeEach(() => {
   process.env.OPENCODE_AUTH_LB_DIR = POOL_DIR
+  // These rows are OAuth logins: keep them from minting a setup-token in
+  // the background, which would add a token-endpoint call to the recordings.
+  process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN = '0'
   globalThis.fetch = realFetch
 })
 

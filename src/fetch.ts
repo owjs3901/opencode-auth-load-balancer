@@ -25,6 +25,7 @@ import { loadConfig, type SchedulerConfig } from './scheduler/config'
 import { isExhausted } from './scheduler/score-core'
 import { selectForSession } from './scheduler/select'
 import { deriveSessionKey, MESSAGE_HEADER, SESSION_HEADER } from './session'
+import { maintainTokens } from './token-mint'
 import type { CooldownKind, PoolAccount, UsageSnapshot } from './types'
 import { preserveWeeklyAnchor } from './usage-merge'
 import {
@@ -668,10 +669,13 @@ export function createLoadBalancedFetch(
       // refresh cycle at all after its startup seed — its dashboard/TUI
       // numbers froze for the whole opencode process. The staleness gate and
       // per-account throttle inside make the extra providers free in the
-      // steady state.
+      // steady state. A row whose OAuth login is due a long-lived token
+      // (none yet, or its minted one near its end) is minted one the same
+      // way: in the background, throttled per row.
       if (!usageSeeded) {
         usageSeeded = true
         void refreshAllUsageInBackground(now, pool).catch(ignore)
+        void maintainTokens(adapter, now, pool).catch(ignore)
       }
 
       // A durable wait is entered only when every otherwise-usable account is

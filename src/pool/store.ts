@@ -253,6 +253,12 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     if (typeof row.orgId !== 'string' || row.orgId === '') delete row.orgId
     if (!isFiniteNumber(row.refreshExpires) || row.refreshExpires <= 0)
       delete row.refreshExpires
+    if (
+      row.inferenceToken === undefined ||
+      !isFiniteNumber(row.inferenceExpires) ||
+      row.inferenceExpires <= 0
+    )
+      delete row.inferenceExpires
     // Lost-login records feed the dashboards' warnings and their "why": keep
     // only well-formed entries, and drop the map once nothing is left in it.
     if (row.lostLogins !== undefined) {

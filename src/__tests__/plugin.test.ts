@@ -52,6 +52,10 @@ beforeEach(async () => {
   // responders that JSON.parse the (absent) request body. Version DISCOVERY
   // itself is covered by version.test.ts.
   process.env.OPENCODE_AUTH_LB_ANTHROPIC_CLAUDE_CODE_VERSION = '2.1.258'
+  // Off for the same reason: an OAuth row would mint itself a setup-token
+  // in the background (token-mint.ts), adding token-endpoint calls to every
+  // count here. The `claude auto token` tests below turn it back on.
+  process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN = '0'
   await rm(POOL, { force: true })
   await rm(PENDING, { force: true })
   respond = () => new Response('{}', { status: 200 })
@@ -60,6 +64,7 @@ beforeEach(async () => {
 afterEach(() => {
   globalThis.fetch = realFetch
   delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_CLAUDE_CODE_VERSION
+  delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN
 })
 
 // Minimal structural views of the (untyped-in-public-API) hook shape.
@@ -3113,5 +3118,124 @@ describe('claude setup-token login', () => {
     expect(days).toBeGreaterThan(29.9)
     expect(days).toBeLessThanOrEqual(30)
     await hooks.dispose()
+  })
+})
+
+describe('claude auto token', () => {
+  const MINTED = 'sk-ant-oat01-minted'
+  const MINT = '/v1/oauth/token refresh_token user:inference'
+
+  /**
+   * Anthropic with minting on: its token endpoint redeems a login code, or
+   * mints a one-year token from a refresh grant; anything else answers 200.
+   * Records each request as `path grant` or `path bearer`.
+   */
+  function anthropic(): string[] {
+    process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN = '1'
+    const calls: string[] = []
+    respond = (url, init) => {
+      const path = new URL(url).pathname
+      if (path !== '/v1/oauth/token') {
+        calls.push(`${path} ${new Headers(init?.headers).get('authorization')}`)
+        return Response.json({ five_hour: null, seven_day: null })
+      }
+      const body = JSON.parse(String(init?.body))
+      calls.push(`${path} ${body.grant_type} ${body.scope ?? ''}`.trim())
+      return Response.json(
+        body.grant_type === 'authorization_code'
+          ? {
+              access_token: 'oauth-at',
+              refresh_token: 'ort',
+              expires_in: 3600,
+              account: { uuid: 'acc-1' },
+              organization: { uuid: 'org-1' },
+            }
+          : {
+              access_token: MINTED,
+              refresh_token: 'ort-2',
+              expires_in: 31_536_000,
+            },
+      )
+    }
+    return calls
+  }
+
+  test('an OAuth login mints its setup-token at once and lands paired', async () => {
+    const calls = anthropic()
+    const toasts: string[] = []
+    const client: ToastClient = {
+      tui: {
+        showToast: async ({ body }) => {
+          toasts.push(body.message)
+        },
+      },
+    }
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const flow = await hooks.auth.methods[0]?.authorize()
+    const state = new URL(flow?.url ?? '').searchParams.get('state')
+
+    expect(
+      (await flow?.callback(`https://cb?code=C&state=${state}`))?.type,
+    ).toBe('success')
+
+    const rows = (await readPool()).accounts
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      access: 'oauth-at',
+      refresh: 'ort-2',
+      inferenceToken: MINTED,
+    })
+    expect(calls).toContain(MINT)
+    expect(toasts).toHaveLength(1)
+    expect(toasts[0]).toContain(rows[0]?.label ?? '?')
+    await hooks.dispose()
+  })
+
+  test('opencode start mints its existing OAuth rows their token', async () => {
+    const calls = anthropic()
+    await mutatePool((pool) => {
+      pool.accounts = [account({ id: 'mint-at-start' })]
+    })
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin)
+
+    await hooks.auth.loader(async () => ({ type: 'api' }), { models: {} })
+
+    expect(
+      await waitForAccount(
+        'mint-at-start',
+        (a) => a.inferenceToken !== undefined,
+      ),
+    ).toMatchObject({
+      inferenceToken: MINTED,
+      refresh: 'ort-2',
+      access: 'tokA',
+    })
+    expect(calls).toEqual([MINT])
+    await hooks.dispose()
+  })
+
+  test('a request mints a due row its token in the background; the next request is served on it', async () => {
+    const calls = anthropic()
+    await mutatePool((pool) => {
+      pool.accounts = [account({ id: 'mint-on-request' })]
+    })
+    const send = () =>
+      createLoadBalancedFetch(anthropicAdapter)(
+        'https://api.anthropic.com/v1/messages',
+        { method: 'POST', body: '{}' },
+      )
+
+    expect((await send()).status).toBe(200)
+    await waitForAccount(
+      'mint-on-request',
+      (a) => a.inferenceToken !== undefined,
+    )
+    expect((await send()).status).toBe(200)
+
+    // The first request and the mint race; the second request follows both.
+    expect(calls.slice(0, 2).sort()).toEqual(
+      [MINT, '/v1/messages Bearer tokA'].sort(),
+    )
+    expect(calls.slice(2)).toEqual([`/v1/messages Bearer ${MINTED}`])
   })
 })

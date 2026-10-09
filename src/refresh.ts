@@ -39,7 +39,7 @@ const REFRESH_LOCK: LockOptions = {
 const inflight = new Map<string, Promise<TokenSet>>()
 
 /** The single-use refresh token + the generation it was read at (the CAS key). */
-interface RefreshAttempt {
+export interface RefreshAttempt {
   readonly refresh: string
   readonly gen: number
 }
@@ -77,7 +77,7 @@ function refusalReason(error: Error): string {
   return m ? errorSummary(Number(m[1]), m[2] ?? '') : error.message
 }
 
-function genOf(account: PoolAccount): number {
+export function genOf(account: PoolAccount): number {
   return account.tokenGen ?? 0
 }
 
@@ -90,7 +90,7 @@ function tokensOf(account: PoolAccount): TokenSet {
   }
 }
 
-function sameGeneration(
+export function sameGeneration(
   account: PoolAccount,
   attempt: RefreshAttempt,
 ): boolean {
@@ -112,6 +112,18 @@ function applyTokensTo(account: PoolAccount, tokens: TokenSet): void {
 
 function refreshLockDir(providerID: string, accountId: string): string {
   return `${poolFilePath()}.refresh.${providerID}.${accountId}.lock`
+}
+
+/**
+ * Run `fn` holding the account's refresh lock — taken by everything that
+ * spends its single-use refresh token (a refresh, a token mint).
+ */
+export function withRefreshLock<T>(
+  providerID: string,
+  accountId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return withFileLock(refreshLockDir(providerID, accountId), REFRESH_LOCK, fn)
 }
 
 /**

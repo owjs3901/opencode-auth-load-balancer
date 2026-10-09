@@ -1,0 +1,7 @@
+{
+  "changes": {
+    "package.json": "Minor"
+  },
+  "note": "Sync the pool's static credentials between machines through an encrypted secret GitHub gist: a publisher uploads its Claude tokens and Kimi keys (AES-256-GCM, key only in the link's #fragment) and subscribers follow the link with no GitHub login, registering each credential through the setup-token path and removing only what they imported; OAuth tokens never sync; driven from the TUI sidebar only, and `OPENCODE_AUTH_LB_SYNC=0` turns it off",
+  "date": "2026-10-10T05:00:00.0000000Z"
+}

@@ -15,6 +15,27 @@ export { OAUTH_HTTP_TIMEOUT_MS, USAGE_HTTP_TIMEOUT_MS } from '../http-timeouts'
 /** Dedicated usage endpoint — returns 5h + 7d utilization without consuming quota. */
 export const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 
+/** Default host; `rewriteUrl` applies `ANTHROPIC_BASE_URL` and `?beta=true` like on any request. */
+export const MESSAGES_URL = 'https://api.anthropic.com/v1/messages'
+
+export const ANTHROPIC_VERSION = '2023-06-01'
+
+/**
+ * Model for the usage probe that stands in for `USAGE_URL` on a
+ * `claude setup-token` row (see `fetchUsage` in usage.ts): Claude Code's
+ * small, fast model, so the one-token probe costs as little quota as any
+ * request can. An alias, not a dated snapshot, so it follows the model
+ * forward.
+ */
+export const USAGE_PROBE_MODEL = 'claude-haiku-4-5'
+
+/** Claude Code's docs for `claude setup-token`, shown with the token login's prompt. */
+export const SETUP_TOKEN_DOCS_URL =
+  'https://code.claude.com/docs/en/authentication#generate-a-long-lived-token'
+
+/** Response header naming the organization a request was served for. */
+export const ORGANIZATION_ID_HEADER = 'anthropic-organization-id'
+
 export const OAUTH_SCOPES = [
   'org:create_api_key',
   'user:profile',

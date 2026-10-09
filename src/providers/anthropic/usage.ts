@@ -1,12 +1,19 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
-import { isImplausiblyFarFuture } from '../../util'
+import { ignore, isImplausiblyFarFuture } from '../../util'
 import {
   endpointWindowFrom,
   parseWindowPairHeaders,
   type WindowPairHeaderSpec,
 } from '../usage-headers'
 import { fetchJson } from '../usage-http'
-import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL } from './constants'
+import {
+  ANTHROPIC_VERSION,
+  MESSAGES_URL,
+  USAGE_HTTP_TIMEOUT_MS,
+  USAGE_PROBE_MODEL,
+  USAGE_URL,
+} from './constants'
+import { rewriteRequestBody, rewriteUrl, setOAuthHeaders } from './transform'
 import { usageUserAgent } from './version'
 
 /** Header utilization is a 0..1 FRACTION (divisor 1); reset is epoch SECONDS. */
@@ -125,14 +132,75 @@ function endpointWindow(
 }
 
 /**
+ * Claude Code's own quota check: one output token on the small model, shaped
+ * like every other request this plugin sends (identity + billing header,
+ * betas, UA). Any response to it — a 429 included — carries the unified
+ * 5h/7d headers. Rejects only on a network failure; the caller owns the body.
+ */
+export function sendUsageProbe(access: string): Promise<Response> {
+  const headers = new Headers({
+    'content-type': 'application/json',
+    'anthropic-version': ANTHROPIC_VERSION,
+  })
+  setOAuthHeaders(headers, access)
+  return fetch(rewriteUrl(MESSAGES_URL), {
+    method: 'POST',
+    headers,
+    body: rewriteRequestBody(
+      JSON.stringify({
+        model: USAGE_PROBE_MODEL,
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'quota' }],
+      }),
+    ),
+    signal: AbortSignal.timeout(USAGE_HTTP_TIMEOUT_MS),
+  })
+}
+
+/** The usage a probe's response reports, or null when it carries none. */
+export function probeSnapshot(
+  headers: Headers,
+  now: number,
+): UsageSnapshot | null {
+  const partial = parseUsageHeaders(headers)
+  if (!partial) return null
+  // A window the response did not report is unknown, not 0%: `null` keeps
+  // the stored one, and without a weekly window nothing is stamped fresh.
+  return {
+    hourly: partial.hourly ?? null,
+    weekly: partial.weekly ?? null,
+    capturedAt: partial.weekly ? now : 0,
+  }
+}
+
+async function probeUsage(
+  access: string,
+  now: number,
+): Promise<UsageSnapshot | null> {
+  let res: Response
+  try {
+    res = await sendUsageProbe(access)
+  } catch {
+    return null
+  }
+  await res.body?.cancel().catch(ignore)
+  return probeSnapshot(res.headers, now)
+}
+
+/**
  * Poll the dedicated usage endpoint for authoritative 5h + 7d utilization without
  * consuming inference quota. Returns null on any failure — including a 200 whose
  * body is not the usage shape — so the caller keeps the last-known snapshot.
+ *
+ * A row without a refresh token is a `claude setup-token` bearer, scoped to
+ * `user:inference` alone; the endpoint demands `user:profile` and answers it
+ * 403, so such a row is measured with the one-token probe above instead.
  */
 export async function fetchUsage(
   account: PoolAccount,
   now: number,
 ): Promise<UsageSnapshot | null> {
+  if (!account.refresh) return probeUsage(account.access, now)
   const json = await fetchJson<UsageEndpointResponse>(
     USAGE_URL,
     {

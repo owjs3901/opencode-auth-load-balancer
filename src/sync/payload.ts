@@ -3,31 +3,37 @@
  * else. OAuth access and refresh tokens never go in (a refresh token is
  * single-use, so two machines sharing one would kill it for both), and a
  * payload read back is untrusted: every field is allow-listed and bounded.
+ * Every entry names the machine (origin) that listed it, and only that machine
+ * ever adds, changes or removes it.
  */
-import { type PoolFile, STATIC_CREDENTIAL_EXPIRES } from '../types'
 import { isFiniteNumber, isPlainObject } from '../util'
 import { fingerprint } from './crypto'
 import { SyncError } from './errors'
 
-export const PAYLOAD_VERSION = 1
-const MAX_ENTRIES = 64
-const MAX_LABEL = 80
+export const PAYLOAD_VERSION = 2
+export const MAX_ENTRIES = 64
+export const MAX_LABEL = 80
 const MAX_SECRET = 512
 const MAX_FIELD = 128
 const ID_RE = /^[\w-]{1,64}$/
+/** A machine's origin: 128 random bits as hex. Not a secret, and never derived from a host name. */
+export const ORIGIN_RE = /^[\da-f]{32}$/
 const CLAUDE_TOKEN_RE = /^sk-ant-oat\d+-[\w-]+$/
 const API_KEY_RE = /^\S{8,512}$/
 
 /** The providers a credential may sync for, and the shape its secret must have. */
 /** A Map, not an object: a provider id from a gist must never resolve to an inherited member such as `constructor`. */
-const SECRET_SHAPES: ReadonlyMap<string, RegExp> = new Map([
+export const SECRET_SHAPES: ReadonlyMap<string, RegExp> = new Map([
   ['anthropic', CLAUDE_TOKEN_RE],
   ['kimi-code-plan-cn', API_KEY_RE],
   ['kimi-code-plan-global', API_KEY_RE],
 ])
 
-/** One synced credential, keyed by the publisher's row id. */
+/** One synced credential, identified by the listing machine and its row id there. */
 export interface SyncEntry {
+  /** The machine that listed it. */
+  origin: string
+  /** That machine's row id. */
   id: string
   providerID: string
   label: string
@@ -35,6 +41,11 @@ export interface SyncEntry {
   secret: string
   /** epoch ms a minted Claude token lapses. */
   expiresAt?: number
+}
+
+/** The identity of an entry across machines. */
+export function entryKey(entry: Pick<SyncEntry, 'origin' | 'id'>): string {
+  return `${entry.origin}/${entry.id}`
 }
 
 /**
@@ -69,13 +80,27 @@ function boundedString(value: unknown, max: number): string | undefined {
     : undefined
 }
 
-function parseEntry(raw: unknown): SyncEntry | null {
+/** The key of a raw entry, when its origin and id are well formed (even if the rest is not). */
+function keyOf(raw: unknown): string | null {
   if (!isPlainObject(raw)) return null
+  const { origin, id } = raw
+  return typeof origin === 'string' &&
+    ORIGIN_RE.test(origin) &&
+    typeof id === 'string' &&
+    ID_RE.test(id)
+    ? `${origin}/${id}`
+    : null
+}
+
+export function parseEntry(raw: unknown): SyncEntry | null {
+  if (!isPlainObject(raw)) return null
+  const origin = boundedString(raw.origin, 32)
   const id = boundedString(raw.id, 64)
   const providerID = boundedString(raw.providerID, MAX_FIELD)
   const label = printable(boundedString(raw.label, MAX_LABEL) ?? '')
   const secret = boundedString(raw.secret, MAX_SECRET)
   const shape = providerID ? SECRET_SHAPES.get(providerID) : undefined
+  if (!origin || !ORIGIN_RE.test(origin)) return null
   if (!id || !ID_RE.test(id) || !providerID || !label || !secret) return null
   if (!shape?.test(secret)) return null
   const expiresAt =
@@ -84,50 +109,27 @@ function parseEntry(raw: unknown): SyncEntry | null {
     raw.expiresAt > 0
       ? raw.expiresAt
       : undefined
-  return { id, providerID, label, secret, ...(expiresAt ? { expiresAt } : {}) }
-}
-
-/**
- * The static credential of a row: a Claude `inferenceToken`, or a Kimi API
- * key. A Kimi row only counts when it carries the static-credential expiry as
- * well as no refresh token: an OAuth sign-in can also leave a refresh-less row,
- * with a short-lived access token that must never leave the machine.
- */
-function staticSecret(row: PoolFile['accounts'][number]): string | undefined {
-  if (row.providerID === 'anthropic') return row.inferenceToken
-  return !row.refresh && row.expires === STATIC_CREDENTIAL_EXPIRES
-    ? row.access
-    : undefined
-}
-
-/**
- * The static credentials of `pool`, sorted by row id so equal pools produce
- * equal payloads. Every entry goes through the receiver's own validation (a
- * label too long is trimmed, a row whose id or secret a receiver would refuse
- * is left out, at most MAX_ENTRIES): the publisher never produces a snapshot
- * its subscribers would reject.
- */
-export function collectEntries(pool: PoolFile): SyncEntry[] {
-  const entries: SyncEntry[] = []
-  for (const row of pool.accounts) {
-    if (!SECRET_SHAPES.has(row.providerID)) continue
-    if (row.disabledReason || row.lostLogins?.token) continue
-    const entry = parseEntry({
-      id: row.id,
-      providerID: row.providerID,
-      label: printable(row.label).slice(0, MAX_LABEL).trim() || row.providerID,
-      secret: staticSecret(row),
-      expiresAt: row.inferenceExpires,
-    })
-    if (entry) entries.push(entry)
+  return {
+    origin,
+    id,
+    providerID,
+    label,
+    secret,
+    ...(expiresAt ? { expiresAt } : {}),
   }
-  entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-  return entries.slice(0, MAX_ENTRIES)
+}
+
+/** The entries in a stable order (by key), so equal lists produce equal payloads. */
+export function sortEntries(entries: readonly SyncEntry[]): SyncEntry[] {
+  return [...entries].sort((a, b) => {
+    const [x, y] = [entryKey(a), entryKey(b)]
+    return x < y ? -1 : x > y ? 1 : 0
+  })
 }
 
 /** A digest of the entries: when it changes, the gist is out of date. */
 export function entriesDigest(entries: readonly SyncEntry[]): string {
-  return fingerprint(JSON.stringify(entries))
+  return fingerprint(JSON.stringify(sortEntries(entries)))
 }
 
 /** The plaintext to encrypt. */
@@ -135,18 +137,24 @@ export function buildPayload(
   entries: readonly SyncEntry[],
   at: number,
 ): string {
-  return JSON.stringify({ v: PAYLOAD_VERSION, at, entries })
+  return JSON.stringify({
+    v: PAYLOAD_VERSION,
+    at,
+    entries: sortEntries(entries),
+  })
 }
 
-/** A snapshot read back: when it was written, its valid entries, and every id it still lists. */
+/** A snapshot read back: when it was written, its valid entries, and every key it still lists. */
 export interface ParsedPayload {
   at: number
   entries: SyncEntry[]
   /**
-   * Ids of every listed entry, valid or not. An entry that fails validation is
+   * Keys of every listed entry, valid or not. An entry that fails validation is
    * not imported, but it is still listed: it must never read as "removed".
    */
   listed: ReadonlySet<string>
+  /** How many entries could not be read at all: a writer must not rewrite what it cannot parse. */
+  unreadable: number
 }
 
 /**
@@ -168,12 +176,17 @@ export function parsePayload(text: string): ParsedPayload {
   if (json.entries.length > MAX_ENTRIES) throw new SyncError('too-large')
   const listed = new Set<string>()
   const entries: SyncEntry[] = []
+  let unreadable = 0
   for (const raw of json.entries) {
-    const id = isPlainObject(raw) ? raw.id : undefined
-    const fresh = typeof id === 'string' && ID_RE.test(id) && !listed.has(id)
-    if (typeof id === 'string' && ID_RE.test(id)) listed.add(id)
-    const entry = fresh ? parseEntry(raw) : null
+    const key = keyOf(raw)
+    const entry = parseEntry(raw)
+    if (key) {
+      const seen = listed.has(key)
+      listed.add(key)
+      if (seen && entry) continue
+    }
     if (entry) entries.push(entry)
+    else unreadable += 1
   }
-  return { at: json.at, entries, listed }
+  return { at: json.at, entries, listed, unreadable }
 }

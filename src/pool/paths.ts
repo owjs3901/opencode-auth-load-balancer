@@ -137,6 +137,11 @@ export function syncStateFilePath(): string {
   return dataFilePath('auth-load-balancer-sync.json')
 }
 
+/** Path to this machine's sync origin (random, not secret; outlives "stop syncing"). */
+export function syncOriginFilePath(): string {
+  return dataFilePath('auth-load-balancer-sync-origin.json')
+}
+
 /** Path to the one-shot TUI → server sync request (consumed and deleted on read). */
 export function syncIntentFilePath(): string {
   return dataFilePath('auth-load-balancer-sync-intent.json')

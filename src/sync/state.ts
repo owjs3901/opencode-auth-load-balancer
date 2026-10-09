@@ -14,6 +14,18 @@ export interface ImportedRef {
 }
 
 /**
+ * An entry that was not imported because the account already has a credential:
+ * the digest of the entry's secret, and the row in the way with the digest of
+ * the static credential it held ('' when it holds none, such as an OAuth login).
+ * While that row still holds it, the entry is not probed again.
+ */
+export interface SkippedRef {
+  fingerprint: string
+  blocker: string
+  holds: string
+}
+
+/**
  * The latest outcome, for the TUI (its own file: there is nowhere else to say
  * "no GitHub token" before any state exists). `reqAt` echoes the request it
  * answers. Never holds the link or key.
@@ -25,41 +37,63 @@ export interface SyncStatus {
   reqAt?: number
 }
 
-export type SyncRole = 'publisher' | 'subscriber'
+/**
+ * What this machine can do besides downloading, as the last cycle found it:
+ * upload (`ok`), or not for lack of a GitHub login, because the GitHub account
+ * cannot update the gist, or because the gist holds entries this version
+ * cannot read and must not rewrite.
+ */
+export type SyncWrite = 'ok' | 'no-token' | 'denied' | 'unreadable'
+const WRITES: readonly string[] = ['ok', 'no-token', 'denied', 'unreadable']
 
 /** Everything sync remembers. Holds the encryption key: the file is owner-only and not part of the pool. */
 export interface SyncState {
   v: 1
-  role: SyncRole
   gistId: string
   /** The link's key, base64url. */
   key: string
-  /** The publisher's GitHub login, for building the link. */
+  /** This machine created the gist, so it may show the link. */
+  creator: boolean
+  /** The creator's GitHub login, for building the link. */
   owner?: string
+  write?: SyncWrite
+  /** No upload attempt before this time: the back-off after the GitHub account was refused. */
+  writeCheckAt?: number
   etag?: string
   syncedAt?: number
-  /** Digest of the entries last uploaded (publisher). */
+  /** Digest of this machine's own entries as of the last cycle that brought the gist up to date. */
   uploadedDigest?: string
-  /** The t stamped on the last upload (publisher): the next one is strictly later, whatever the clock does. */
+  /** The t stamped on the last upload: the next one is strictly later, whatever the clock does. */
   uploadedAt?: number
-  /** The newest snapshot t applied (subscriber): an older ciphertext replayed from the gist is refused. */
+  /** The newest snapshot t applied: an older ciphertext replayed from the gist is refused. */
   appliedAt?: number
-  /** No background download or upload before this time: the shared poll schedule, retry delay and rate-limit back-off. */
+  /** The next scheduled download (and upload check). */
+  pollAt?: number
+  /** No background download or upload before this time: the retry delay and rate-limit back-off after a failure. */
   retryAt?: number
-  /** Entry id ??the local row it was imported into (subscriber). */
+  /** Entry key (origin/id) to the local row it was imported into. */
   imported: Record<string, ImportedRef>
+  /** Entry key to why it was not imported. */
+  skipped: Record<string, SkippedRef>
 }
 
 /**
- * An id-keyed map of what was imported. Entry ids come from another machine, so the record has no prototype: `__proto__`, `constructor` and `prototype` are
- * then ordinary keys, and a lookup never finds an inherited member.
+ * A key-indexed map. Keys come from another machine, so the record has no
+ * prototype: `__proto__`, `constructor` and `prototype` are then ordinary
+ * keys, and a lookup never finds an inherited member.
  */
+export function newMap<T>(
+  from?: Readonly<Record<string, T>>,
+): Record<string, T> {
+  const map: Record<string, T> = Object.create(null)
+  if (from) for (const [key, value] of Object.entries(from)) map[key] = value
+  return map
+}
+
 export function newRefs(
   from?: Readonly<Record<string, ImportedRef>>,
 ): Record<string, ImportedRef> {
-  const refs: Record<string, ImportedRef> = Object.create(null)
-  if (from) for (const [id, ref] of Object.entries(from)) refs[id] = ref
-  return refs
+  return newMap(from)
 }
 
 const STATE_LOCK: LockOptions = {
@@ -77,6 +111,30 @@ function isRef(value: unknown): value is ImportedRef {
   )
 }
 
+function isSkip(value: unknown): value is SkippedRef {
+  return (
+    isPlainObject(value) &&
+    typeof value.fingerprint === 'string' &&
+    typeof value.blocker === 'string' &&
+    typeof value.holds === 'string'
+  )
+}
+
+function readMap<T>(
+  raw: unknown,
+  accept: (value: unknown) => value is T,
+): Record<string, T> {
+  const map = newMap<T>()
+  if (isPlainObject(raw))
+    for (const [key, value] of Object.entries(raw))
+      if (accept(value)) map[key] = value
+  return map
+}
+
+function isWrite(value: unknown): value is SyncWrite {
+  return typeof value === 'string' && WRITES.includes(value)
+}
+
 /** The state file's content, or null when it is absent, unreadable, or not a sync state. */
 function parseState(text: string): SyncState | null {
   let json: unknown
@@ -88,32 +146,31 @@ function parseState(text: string): SyncState | null {
   if (
     !isPlainObject(json) ||
     json.v !== 1 ||
-    (json.role !== 'publisher' && json.role !== 'subscriber') ||
     typeof json.gistId !== 'string' ||
     !GIST_ID_RE.test(json.gistId) ||
     typeof json.key !== 'string' ||
     !decodeKey(json.key)
   )
     return null
-  const imported = newRefs()
-  if (isPlainObject(json.imported))
-    for (const [id, ref] of Object.entries(json.imported))
-      if (isRef(ref)) imported[id] = ref
-  const { owner, etag, syncedAt, uploadedDigest } = json
-  const { uploadedAt, appliedAt, retryAt } = json
+  const { owner, etag, syncedAt, uploadedDigest, write } = json
+  const { uploadedAt, appliedAt, retryAt, pollAt, writeCheckAt } = json
   return {
     v: 1,
-    role: json.role,
     gistId: json.gistId,
     key: json.key,
-    imported,
+    creator: json.creator === true,
+    imported: readMap(json.imported, isRef),
+    skipped: readMap(json.skipped, isSkip),
     ...(typeof owner === 'string' ? { owner } : {}),
+    ...(isWrite(write) ? { write } : {}),
     ...(typeof etag === 'string' ? { etag } : {}),
     ...(isFiniteNumber(syncedAt) ? { syncedAt } : {}),
     ...(typeof uploadedDigest === 'string' ? { uploadedDigest } : {}),
     ...(isFiniteNumber(uploadedAt) ? { uploadedAt } : {}),
     ...(isFiniteNumber(appliedAt) ? { appliedAt } : {}),
     ...(isFiniteNumber(retryAt) ? { retryAt } : {}),
+    ...(isFiniteNumber(pollAt) ? { pollAt } : {}),
+    ...(isFiniteNumber(writeCheckAt) ? { writeCheckAt } : {}),
   }
 }
 

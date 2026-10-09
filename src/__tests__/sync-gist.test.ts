@@ -138,9 +138,44 @@ describe('gist client', () => {
     expect(await readGist(ID)).toEqual({ changed: true, content: 'c' })
   })
 
-  test('a deleted gist is not-found for every verb', async () => {
-    for (const run of [() => readGist(ID), () => updateGist('t', ID, 'x')])
-      expect((await codeOf(run)).code).toBe('not-found')
+  test('a deleted gist is not-found on read; on write it is the account that cannot write', async () => {
+    expect((await codeOf(() => readGist(ID))).code).toBe('not-found')
+    expect((await codeOf(() => updateGist('t', ID, 'x'))).code).toBe(
+      'write-denied',
+    )
+  })
+
+  test('GitHub refusing the token on a write is the same: this account cannot update the gist', async () => {
+    const { id } = await createGist('t', 'one')
+    for (const status of [401, 403]) {
+      github.hooks.before = () => new Response('{}', { status })
+      expect((await codeOf(() => updateGist('t', id, 'x'))).code).toBe(
+        'write-denied',
+      )
+    }
+    github.hooks.before = () => new Response('{}', { status: 500 })
+    expect((await codeOf(() => updateGist('t', id, 'x'))).code).toBe('http')
+  })
+
+  test('a read with a token is authenticated, and a token GitHub refuses falls back to an anonymous read', async () => {
+    const { id } = await createGist('t', 'one')
+    expect(await readGist(id, undefined, 1, 'ghp_read')).toMatchObject({
+      changed: true,
+      content: 'one',
+    })
+    expect(github.calls.at(-1)?.authorization).toBe('Bearer ghp_read')
+    github.hooks.before = () =>
+      github.calls.at(-1)?.authorization === 'Bearer bad'
+        ? new Response('{}', { status: 401 })
+        : undefined
+    const before = github.calls.length
+    expect(await readGist(id, undefined, 1, 'bad')).toMatchObject({
+      content: 'one',
+    })
+    expect(github.calls.slice(before).map((c) => c.authorization)).toEqual([
+      'Bearer bad',
+      null,
+    ])
   })
 
   test('rate limiting is recognized from a 403 with no quota left, or a 429', async () => {
@@ -217,7 +252,9 @@ describe('gist client', () => {
     expect((await codeOf(() => createGist('t', 'x'))).code).toBe('http')
     github.hooks.before = () => new Response('{}', { status: 401 })
     expect((await codeOf(() => createGist('t', 'x'))).code).toBe('http')
-    expect((await codeOf(() => updateGist('t', ID, 'x'))).code).toBe('http')
+    expect((await codeOf(() => updateGist('t', ID, 'x'))).code).toBe(
+      'write-denied',
+    )
   })
 
   test('an owner that is not a login is not trusted', async () => {

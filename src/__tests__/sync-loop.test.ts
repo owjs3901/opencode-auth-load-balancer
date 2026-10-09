@@ -21,12 +21,7 @@ import {
   withCycleLock,
 } from '../sync/loop'
 import { startSync, syncEnabled } from '../sync/start'
-import {
-  newRefs,
-  type SyncRole,
-  type SyncState,
-  updateSyncState,
-} from '../sync/state'
+import { newRefs, type SyncState, updateSyncState } from '../sync/state'
 
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-sync-loop-'))
 const ID = 'c'.repeat(32)
@@ -44,20 +39,23 @@ afterEach(() => {
   delete process.env.OPENCODE_AUTH_LB_SYNC
 })
 
-const setRole = (role: SyncRole | null, retryAt?: number) =>
+/** A machine that follows the gist; `over` says when its next cycle is due. */
+const setState = (over: Partial<SyncState> | null = {}) =>
   updateSyncState(() =>
-    role
+    over
       ? ({
           v: 1,
-          role,
           gistId: ID,
           key: encodeKey(generateKey()),
+          creator: false,
           imported: newRefs(),
-          ...(retryAt === undefined ? {} : { retryAt }),
+          skipped: {},
+          ...over,
         } satisfies SyncState)
       : null,
   )
-
+/** No cycle is due for a long while: only the upload check runs. */
+const NOT_DUE = 9_000_000_000
 /** An engine that records its calls and answers from `script`. */
 function scriptedEngine() {
   const calls: string[] = []
@@ -68,7 +66,6 @@ function scriptedEngine() {
     lockSeen: boolean[]
   } = { background: OK, digest: null, hold: Promise.resolve(), lockSeen: [] }
   const engine: SyncEngine = {
-    poll: async () => OK,
     upload: async (fresh, reqAt) => {
       calls.push(`upload:${fresh}:${reqAt}`)
       return OK
@@ -149,9 +146,9 @@ const holdLock = () =>
     heartbeatMs: 5_000,
   })
 
-describe('subscriber schedule', () => {
+describe('download schedule', () => {
   test('downloads when the persisted schedule says it is due, checking no more often than every 5 seconds', async () => {
-    await setRole('subscriber')
+    await setState()
     const { loop, clock, calls } = harness(noRequests)
     await loop.tick()
     expect(calls).toEqual([`bg-poll:${ID}`])
@@ -164,7 +161,7 @@ describe('subscriber schedule', () => {
 
   test('nothing runs before the persisted retry time, and the first check after it runs', async () => {
     const { loop, clock, calls } = harness(noRequests)
-    await setRole('subscriber', clock.now + POLL_MS)
+    await setState({ retryAt: clock.now + POLL_MS })
     await loop.tick()
     clock.now += POLL_MS - 1
     await loop.tick()
@@ -174,7 +171,7 @@ describe('subscriber schedule', () => {
     expect(calls).toEqual([`bg-poll:${ID}`])
   })
 
-  test('nothing runs without a role', async () => {
+  test('nothing runs when this machine follows no gist', async () => {
     const { loop, clock, calls } = harness(noRequests)
     await loop.tick()
     clock.now += CHANGE_CHECK_MS
@@ -183,7 +180,7 @@ describe('subscriber schedule', () => {
   })
 
   test('a download whose lock another window holds is simply tried again', async () => {
-    await setRole('subscriber')
+    await setState()
     const { loop, clock, calls } = harness(noRequests)
     const held = await holdLock()
     try {
@@ -198,9 +195,9 @@ describe('subscriber schedule', () => {
   })
 })
 
-describe('publisher schedule', () => {
+describe('upload schedule', () => {
   test('uploads once the credentials have stopped changing for the debounce window, naming the gist and digest it saw', async () => {
-    await setRole('publisher')
+    await setState({ pollAt: NOT_DUE })
     const { loop, clock, calls, script } = harness(noRequests)
     script.digest = 'd1'
     await loop.tick()
@@ -223,7 +220,7 @@ describe('publisher schedule', () => {
 
   test('nothing is uploaded before the persisted retry time', async () => {
     const { loop, clock, calls, script } = harness(noRequests)
-    await setRole('publisher', clock.now + 3 * DEBOUNCE_MS)
+    await setState({ pollAt: NOT_DUE, retryAt: clock.now + 3 * DEBOUNCE_MS })
     script.digest = 'd1'
     for (let i = 0; i < 4; i++) {
       await loop.tick()
@@ -240,7 +237,7 @@ describe('publisher schedule', () => {
   })
 
   test('an upload that did not run (lock busy, or decided against under it) is retried while the credentials are still unpublished', async () => {
-    await setRole('publisher')
+    await setState({ pollAt: NOT_DUE })
     const { loop, clock, calls, script } = harness(noRequests)
     script.digest = 'd1'
     script.background = null
@@ -285,7 +282,7 @@ describe('TUI requests', () => {
   ] as const)(
     '%s runs at once and takes priority over the schedule',
     async (action, link, call) => {
-      await setRole('subscriber')
+      await setState()
       const { loop, calls } = harness(once(asked(action, link)))
       await loop.tick()
       expect(calls).toEqual([call])
@@ -352,7 +349,7 @@ describe('TUI requests', () => {
 
 describe('lifecycle', () => {
   test('start schedules a one-second tick and runs one at once; dispose clears it and stops ticking', async () => {
-    await setRole('subscriber')
+    await setState()
     const { loop, timers, calls } = harness(noRequests)
     loop.start()
     expect(timers.started.map((t) => t.ms)).toEqual([1_000])
@@ -384,7 +381,7 @@ describe('lifecycle', () => {
   })
 
   test('runs never overlap', async () => {
-    await setRole('subscriber')
+    await setState()
     const { loop, calls, script, clock } = harness(noRequests)
     let release: () => void = () => undefined
     script.hold = new Promise<void>((resolve) => {
@@ -400,7 +397,7 @@ describe('lifecycle', () => {
   })
 
   test('dispose waits for the step in flight, so its lock is released with it', async () => {
-    await setRole('subscriber')
+    await setState()
     const { loop, script } = harness(noRequests)
     let release: () => void = () => undefined
     script.hold = new Promise<void>((resolve) => {
@@ -423,7 +420,7 @@ describe('lifecycle', () => {
   })
 
   test('dispose does not wait forever for a step that never ends', async () => {
-    await setRole('subscriber')
+    await setState()
     const { loop, script } = harness(noRequests, { disposeWaitMs: 50 })
     script.hold = new Promise<void>(() => undefined)
     void loop.tick()
@@ -434,7 +431,7 @@ describe('lifecycle', () => {
   })
 
   test('a failing step is swallowed and the next one still runs', async () => {
-    await setRole('subscriber')
+    await setState()
     let fail = true
     const { loop, clock, calls } = harness({
       pending: async () => {

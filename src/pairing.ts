@@ -71,10 +71,37 @@ export function orgPartner(
   const only = candidates.length === 1 ? candidates[0] : undefined
   if (!only) return undefined
   if (!tokens.inferenceOnly) return only.refresh ? undefined : only
-  const tokenDead =
-    !!only.disabledReason && only.disabledReason !== MANUAL_DISABLED_REASON
   const confirmed = sameAccount(tokens.usage, only.usage, now) === true
-  return only.inferenceToken === undefined || tokenDead || confirmed
+  return only.inferenceToken === undefined || tokenDead(only) || confirmed
+    ? only
+    : undefined
+}
+
+/** Whether a row's credential was given up on (disabled for a reason other than the user's own choice). */
+function tokenDead(row: PoolAccount): boolean {
+  return !!row.disabledReason && row.disabledReason !== MANUAL_DISABLED_REASON
+}
+
+/**
+ * The one row of the token's organization, among those its usage readings do
+ * not rule out, that already serves the account with a working token of its
+ * own. Gist sync uses it to leave such an account alone: a second token for it
+ * adds nothing, and replacing one machine's token with another's would have
+ * two machines trading tokens for ever.
+ */
+export function tokenSharer(
+  rows: readonly PoolAccount[],
+  tokens: TokenSet,
+): PoolAccount | undefined {
+  if (!tokens.orgId) return undefined
+  const now = Date.now()
+  const candidates = rows.filter(
+    (row) =>
+      row.orgId === tokens.orgId &&
+      sameAccount(tokens.usage, row.usage, now) !== false,
+  )
+  const only = candidates.length === 1 ? candidates[0] : undefined
+  return only?.inferenceToken !== undefined && !tokenDead(only)
     ? only
     : undefined
 }

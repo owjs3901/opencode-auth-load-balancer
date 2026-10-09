@@ -1,26 +1,22 @@
 /** The sync operations. Every one reports a short, link-free outcome and never throws. */
 import { readPool } from '../pool/store'
 import type { ProviderAdapter } from '../providers/types'
-import { applyPlan } from './apply'
-import { decodeKey, encodeKey, generateKey, open, seal } from './crypto'
+import { encodeKey, generateKey, seal } from './crypto'
+import { type CycleReport, runCycle } from './cycle'
 import { describeSyncError, SyncError } from './errors'
-import { createGist, parseGistLink, readGist, updateGist } from './gist'
+import { createGist, parseGistLink } from './gist'
 import { discoverGithubToken, type GhRunner } from './github-auth'
-import { planMerge } from './merge'
+import { machineOrigin } from './origin'
+import { ownEntries } from './own'
+import { buildPayload, entriesDigest } from './payload'
 import {
-  buildPayload,
-  collectEntries,
-  entriesDigest,
-  parsePayload,
-} from './payload'
-import {
+  newMap,
   newRefs,
   readSyncState,
-  type SyncState,
   updateSyncState,
   writeSyncStatus,
 } from './state'
-import { POLL_MS, PUBLISH_RETRY_MS } from './timing'
+import { POLL_MS } from './timing'
 
 export interface EngineDeps {
   now: () => number
@@ -36,34 +32,35 @@ export interface Outcome {
 }
 
 export interface SyncEngine {
-  /** Download, decrypt and merge the gist (subscriber). */
-  poll(reqAt?: number): Promise<Outcome>
-  /** Upload the static credentials, to the same gist unless `fresh` (publisher). */
+  /** One full cycle: download and apply, then upload this machine's own changes when it may. */
+  sync(reqAt?: number): Promise<Outcome>
+  /**
+   * "Upload now": a cycle that insists on writing (it needs a GitHub token),
+   * or with `fresh` (or when this machine follows nothing) a new gist.
+   */
   upload(fresh: boolean, reqAt?: number): Promise<Outcome>
   /** Start following a gist link, then sync it once. */
   subscribe(link: string, reqAt?: number): Promise<Outcome>
   /** Stop syncing; imported accounts stay. */
   forget(reqAt?: number): Promise<Outcome>
-  /** Whichever sync fits the current role. */
-  sync(reqAt?: number): Promise<Outcome>
-  /** The digest of the credentials a publisher has not uploaded yet, or null when the gist is current. */
+  /**
+   * The digest of this machine's own credentials when the gist may be out of
+   * date and this machine may write, else null.
+   */
   unpublishedDigest(): Promise<string | null>
   /**
-   * The scheduled download. Call it with the cycle lock held: it looks at the
+   * The scheduled cycle. Call it with the cycle lock held: it looks at the
    * persisted state again and returns null (does nothing) unless this machine
-   * still follows gist gistId and a download is due.
+   * still follows gist gistId and a cycle is due.
    */
   backgroundPoll(gistId: string): Promise<Outcome | null>
   /**
    * The automatic upload, decided again under the lock: null unless this
-   * machine still publishes gist gistId, no back-off is running, and the
+   * machine still follows gist gistId, no back-off is running, and its
    * credentials still differ from the upload by digest.
    */
   backgroundPublish(gistId: string, digest: string): Promise<Outcome | null>
 }
-
-/** What an operation is, for the shared schedule: a download, an upload, or neither. */
-type Kind = 'poll' | 'upload' | 'none'
 
 function count(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
@@ -72,22 +69,20 @@ function count(n: number, one: string, many: string): string {
 export function createEngine(deps: EngineDeps): SyncEngine {
   const { now } = deps
 
-  /** When background work may next run after outcome: the poll interval, the retry delay, or as long as GitHub asked. */
-  function nextAttempt(kind: Kind, outcome: Outcome): number | undefined {
-    if (outcome.ok) return kind === 'poll' ? now() + POLL_MS : undefined
-    const wait =
-      outcome.backoffMs ?? (kind === 'poll' ? POLL_MS : PUBLISH_RETRY_MS)
-    return now() + wait
-  }
-
+  /**
+   * Run `work` and record when background work may next run: a success pushes
+   * the next scheduled cycle out by the poll interval, a failure waits as long
+   * as GitHub asked, or the cycle's own retry delay.
+   */
   async function settle(
-    run: () => Promise<string>,
+    work: (report: CycleReport) => Promise<string>,
     reqAt: number | undefined,
-    kind: Kind,
+    scheduled: boolean,
   ): Promise<Outcome> {
+    const report: CycleReport = { retryMs: POLL_MS }
     let outcome: Outcome
     try {
-      outcome = { ok: true, message: await run() }
+      outcome = { ok: true, message: await work(report) }
     } catch (error) {
       outcome = {
         ok: false,
@@ -97,9 +92,15 @@ export function createEngine(deps: EngineDeps): SyncEngine {
           : {}),
       }
     }
-    if (kind !== 'none') {
-      const retryAt = nextAttempt(kind, outcome)
-      await updateSyncState((cur) => cur && { ...cur, retryAt })
+    if (scheduled) {
+      const wait = outcome.backoffMs ?? report.retryMs
+      await updateSyncState(
+        (cur) =>
+          cur &&
+          (outcome.ok
+            ? { ...cur, pollAt: now() + POLL_MS, retryAt: undefined }
+            : { ...cur, retryAt: now() + wait }),
+      )
     }
     await writeSyncStatus({
       at: now(),
@@ -110,105 +111,87 @@ export function createEngine(deps: EngineDeps): SyncEngine {
     return outcome
   }
 
-  /** Keep `next` only while the state still follows the gist this run read. */
-  function amend(
-    gistId: string,
-    next: (state: SyncState) => SyncState,
-  ): Promise<SyncState | null> {
-    return updateSyncState((cur) => (cur?.gistId === gistId ? next(cur) : cur))
-  }
+  const cycle = (force: boolean) => (report: CycleReport) =>
+    runCycle(deps, force, report)
 
-  async function download(): Promise<string> {
-    const state = await readSyncState()
-    if (state?.role !== 'subscriber') throw new SyncError('not-set-up')
-    const read = await readGist(state.gistId, state.etag, now())
-    if (!read.changed) {
-      await amend(state.gistId, (cur) => ({ ...cur, syncedAt: now() }))
-      return 'Up to date.'
-    }
-    const key = decodeKey(state.key)
-    if (!key) throw new SyncError('decrypt')
-    const snapshot = parsePayload(open(read.content, key))
-    if (state.appliedAt !== undefined && snapshot.at < state.appliedAt)
-      throw new SyncError('rolled-back')
-    const plan = planMerge(
-      (await readPool()).accounts,
-      snapshot,
-      state.imported,
-    )
-    const applied = await applyPlan(plan, state.imported, deps.adapters)
-    await amend(state.gistId, (cur) => ({
-      ...cur,
-      imported: applied.imported,
-      appliedAt: Math.max(snapshot.at, cur.appliedAt ?? 0),
-      syncedAt: now(),
-      // An unverified entry must be seen again: no etag keeps the gist "changed".
-      etag: applied.deferred === 0 ? read.etag : undefined,
-    }))
-    const tail =
-      applied.deferred > 0
-        ? `; ${count(applied.deferred, 'entry', 'entries')} could not be verified yet`
-        : ''
-    return `Synced: ${applied.added} added, ${applied.updated} updated, ${applied.removed} removed${tail}.`
-  }
-
-  async function publish(fresh: boolean): Promise<string> {
+  /** A new secret gist holding this machine's own credentials, which this machine then follows as its creator. */
+  async function create(): Promise<string> {
     const token = await discoverGithubToken(deps.runGh)
     if (!token) throw new SyncError('no-auth')
-    const state = await readSyncState()
-    const entries = collectEntries(await readPool())
-    const prior = !fresh && state?.role === 'publisher' ? state : null
-    const priorKey = prior ? decodeKey(prior.key) : null
-    const key = priorKey ?? generateKey()
-    const at = Math.max(now(), (prior?.uploadedAt ?? 0) + 1)
-    const blob = seal(buildPayload(entries, at), key)
-    let gist: { id: string; owner?: string | undefined }
-    if (prior && priorKey) {
-      await updateGist(token, prior.gistId, blob, now())
-      gist = { id: prior.gistId, owner: prior.owner }
-    } else gist = await createGist(token, blob, now())
-    const next: SyncState = {
+    const origin = await machineOrigin()
+    const own = ownEntries(await readPool(), origin, newRefs())
+    const key = generateKey()
+    const at = now()
+    const gist = await createGist(
+      token,
+      seal(buildPayload(own, at), key),
+      now(),
+    )
+    await updateSyncState(() => ({
       v: 1,
-      role: 'publisher',
       gistId: gist.id,
       key: encodeKey(key),
+      creator: true,
       ...(gist.owner ? { owner: gist.owner } : {}),
+      write: 'ok',
       syncedAt: now(),
-      uploadedDigest: entriesDigest(entries),
+      uploadedDigest: entriesDigest(own),
       uploadedAt: at,
+      appliedAt: at,
+      pollAt: now() + POLL_MS,
       imported: newRefs(),
-    }
-    // An update of a gist that was forgotten meanwhile must not bring its state back.
-    await updateSyncState((cur) =>
-      prior && !(cur?.role === 'publisher' && cur.gistId === prior.gistId)
-        ? cur
-        : next,
+      skipped: newMap(),
+    }))
+    return `Uploaded ${count(own.length, 'credential', 'credentials')}.`
+  }
+
+  async function unpublishedDigest(): Promise<string | null> {
+    const state = await readSyncState()
+    if (
+      !state ||
+      state.write === 'no-token' ||
+      state.write === 'unreadable' ||
+      (state.write === 'denied' && now() < (state.writeCheckAt ?? 0))
     )
-    return `Uploaded ${count(entries.length, 'credential', 'credentials')}.`
+      return null
+    const own = ownEntries(
+      await readPool(),
+      await machineOrigin(),
+      state.imported,
+    )
+    const digest = entriesDigest(own)
+    return digest === state.uploadedDigest ? null : digest
   }
 
   const engine: SyncEngine = {
-    poll: (reqAt) => settle(download, reqAt, 'poll'),
-    upload: (fresh, reqAt) => settle(() => publish(fresh), reqAt, 'upload'),
+    sync: (reqAt) => settle(cycle(false), reqAt, true),
+    async upload(fresh, reqAt) {
+      const state = await readSyncState()
+      return fresh || !state
+        ? settle(create, reqAt, false)
+        : settle(cycle(true), reqAt, true)
+    },
     async subscribe(link, reqAt) {
       const parsed = parseGistLink(link)
       if (!parsed)
         return settle(
           () => Promise.reject(new SyncError('bad-link')),
           reqAt,
-          'none',
+          false,
         )
-      await updateSyncState((cur) => ({
-        v: 1,
-        role: 'subscriber',
-        gistId: parsed.id,
-        key: encodeKey(parsed.key),
-        imported:
-          cur?.role === 'subscriber' && cur.gistId === parsed.id
-            ? cur.imported
-            : newRefs(),
-      }))
-      return settle(download, reqAt, 'poll')
+      await updateSyncState((cur) => {
+        const prior = cur?.gistId === parsed.id ? cur : null
+        return {
+          v: 1,
+          gistId: parsed.id,
+          key: encodeKey(parsed.key),
+          creator: prior?.creator ?? false,
+          ...(prior?.owner ? { owner: prior.owner } : {}),
+          imported: prior?.imported ?? newRefs(),
+          skipped: prior?.skipped ?? newMap(),
+        }
+      })
+      return settle(cycle(false), reqAt, true)
     },
     async forget(reqAt) {
       return settle(
@@ -217,41 +200,28 @@ export function createEngine(deps: EngineDeps): SyncEngine {
           return 'Stopped syncing. Imported accounts stay in the pool.'
         },
         reqAt,
-        'none',
+        false,
       )
     },
-    async sync(reqAt) {
-      const state = await readSyncState()
-      return state?.role === 'publisher'
-        ? engine.upload(false, reqAt)
-        : engine.poll(reqAt)
-    },
-    async unpublishedDigest() {
-      const state = await readSyncState()
-      if (state?.role !== 'publisher') return null
-      const digest = entriesDigest(collectEntries(await readPool()))
-      return digest === state.uploadedDigest ? null : digest
-    },
+    unpublishedDigest,
     async backgroundPoll(gistId) {
       const state = await readSyncState()
       if (
-        state?.role !== 'subscriber' ||
-        state.gistId !== gistId ||
-        now() < (state.retryAt ?? 0)
+        state?.gistId !== gistId ||
+        now() < Math.max(state.pollAt ?? 0, state.retryAt ?? 0)
       )
         return null
-      return engine.poll()
+      return engine.sync()
     },
     async backgroundPublish(gistId, digest) {
       const state = await readSyncState()
       if (
-        state?.role !== 'publisher' ||
-        state.gistId !== gistId ||
+        state?.gistId !== gistId ||
         now() < (state.retryAt ?? 0) ||
-        (await engine.unpublishedDigest()) !== digest
+        (await unpublishedDigest()) !== digest
       )
         return null
-      return engine.upload(false)
+      return engine.sync()
     },
   }
   return engine

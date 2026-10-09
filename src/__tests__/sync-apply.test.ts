@@ -5,15 +5,17 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
+import { placeTokens } from '../accounts'
 import { poolFilePath } from '../pool/paths'
 import { mutatePool, readPool } from '../pool/store'
 import { applyPlan, land } from '../sync/apply'
 import { fingerprint } from '../sync/crypto'
-import { type ImportJob, planMerge } from '../sync/merge'
-import type { SyncEntry } from '../sync/payload'
+import { type ImportJob, type MergeMemory, planMerge } from '../sync/merge'
+import { entryKey, type SyncEntry } from '../sync/payload'
 import { newRefs } from '../sync/state'
 import {
   emptyUsage,
+  MANUAL_DISABLED_REASON,
   type PoolAccount,
   type PoolFile,
   STATIC_CREDENTIAL_EXPIRES,
@@ -22,8 +24,9 @@ import {
 import { testAccount } from './fixtures/account'
 import { fakeAdapter } from './fixtures/adapter'
 import { CLAUDE_TOKEN, CLAUDE_TOKEN_2, KIMI_KEY } from './fixtures/sync'
-import { claudeSyncAdapter } from './fixtures/sync-adapters'
+import { claudeSyncAdapter, orgOf } from './fixtures/sync-adapters'
 
+const ORIGIN = 'c'.repeat(32)
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-sync-apply-'))
 
 beforeEach(() => {
@@ -45,6 +48,7 @@ const entry = (
   secret: string,
   provider = 'anthropic',
 ): SyncEntry => ({
+  origin: ORIGIN,
   id,
   providerID: provider,
   label: id,
@@ -124,7 +128,7 @@ describe('landing one credential under the pool lock', () => {
       job(entry('e1', CLAUDE_TOKEN_2), ref('imported', CLAUDE_TOKEN)),
       claudeTokens(CLAUDE_TOKEN_2),
     )
-    expect(landing).toEqual({ kind: 'held' })
+    expect(landing).toMatchObject({ kind: 'skipped' })
     expect(p.accounts.map((a) => a.id)).toEqual(['mine'])
     expect(mine.inferenceToken).toBe(CLAUDE_TOKEN_2)
   })
@@ -156,7 +160,7 @@ describe('landing one credential under the pool lock', () => {
       job(entry('k', KIMI_KEY, 'kimi-code-plan-cn')),
       kimiTokens(KIMI_KEY, 'kimi-user-1'),
     )
-    expect(landing).toEqual({ kind: 'held' })
+    expect(landing).toMatchObject({ kind: 'skipped' })
     expect(oauth).toMatchObject({
       access: 'OAUTH-ACCESS',
       refresh: 'OAUTH-REFRESH',
@@ -180,7 +184,7 @@ describe('landing one credential under the pool lock', () => {
         job(entry('k', KIMI_KEY, 'kimi-code-plan-cn')),
         kimiTokens(KIMI_KEY, 'kimi-user-1'),
       ),
-    ).toEqual({ kind: 'held' })
+    ).toMatchObject({ kind: 'skipped' })
     expect(mine.access).toBe('user-own-key-0123456789')
   })
 
@@ -224,6 +228,152 @@ describe('landing one credential under the pool lock', () => {
   })
 })
 
+describe('sync never takes the place of a token the account already has', () => {
+  const oauth = (id: string, over: Partial<PoolAccount> = {}) =>
+    testAccount({
+      id,
+      label: id,
+      access: `ACCESS-${id}`,
+      refresh: `REFRESH-${id}`,
+      orgId: 'org-1',
+      ...over,
+    })
+  const withOrg = (token: string, orgId: string | undefined): TokenSet => ({
+    ...claudeTokens(token),
+    ...(orgId ? { orgId } : {}),
+  })
+
+  test("an account whose own OAuth row already has a token (minted or pasted) keeps it, and the other machine's token is skipped", () => {
+    const mine = oauth('mine', { inferenceToken: CLAUDE_TOKEN })
+    const p = pool(mine)
+    const landing = land(
+      p,
+      job(entry('theirs', CLAUDE_TOKEN_2)),
+      withOrg(CLAUDE_TOKEN_2, 'org-1'),
+    )
+    expect(landing).toEqual({
+      kind: 'skipped',
+      blocker: 'mine',
+      holds: fingerprint(CLAUDE_TOKEN),
+    })
+    expect(mine.inferenceToken).toBe(CLAUDE_TOKEN)
+    expect(p.accounts).toHaveLength(1)
+  })
+
+  test('a token imported earlier from another entry is not replaced by a second entry for the same account', () => {
+    const first = land(
+      pool(),
+      job(entry('one', CLAUDE_TOKEN)),
+      withOrg(CLAUDE_TOKEN, 'org-1'),
+    )
+    expect(first.kind).toBe('placed')
+    const p = pool(held('imported', CLAUDE_TOKEN, { orgId: 'org-1' }))
+    const second = land(
+      p,
+      job(entry('two', CLAUDE_TOKEN_2)),
+      withOrg(CLAUDE_TOKEN_2, 'org-1'),
+    )
+    expect(second).toMatchObject({ kind: 'skipped', blocker: 'imported' })
+    expect(p.accounts).toHaveLength(1)
+    expect(p.accounts[0]?.inferenceToken).toBe(CLAUDE_TOKEN)
+  })
+
+  test('an account with no token gets one on its own OAuth row; one whose token was given up on is replaced', () => {
+    const bare = oauth('bare')
+    const p = pool(bare)
+    expect(
+      land(p, job(entry('e', CLAUDE_TOKEN)), withOrg(CLAUDE_TOKEN, 'org-1')),
+    ).toMatchObject({ kind: 'placed', row: { id: 'bare' } })
+    expect(bare.inferenceToken).toBe(CLAUDE_TOKEN)
+
+    const dead = oauth('dead', {
+      inferenceToken: CLAUDE_TOKEN,
+      disabledReason: '401 token revoked',
+    })
+    const q = pool(dead)
+    expect(
+      land(
+        q,
+        job(entry('e', CLAUDE_TOKEN_2)),
+        withOrg(CLAUDE_TOKEN_2, 'org-1'),
+      ),
+    ).toMatchObject({ kind: 'placed', row: { id: 'dead' } })
+    expect(dead.inferenceToken).toBe(CLAUDE_TOKEN_2)
+  })
+
+  test('a token the user disabled on purpose is still theirs and is not replaced', () => {
+    const off = oauth('off', {
+      inferenceToken: CLAUDE_TOKEN,
+      disabledReason: MANUAL_DISABLED_REASON,
+    })
+    expect(
+      land(
+        pool(off),
+        job(entry('e', CLAUDE_TOKEN_2)),
+        withOrg(CLAUDE_TOKEN_2, 'org-1'),
+      ).kind,
+    ).toBe('skipped')
+    expect(off.inferenceToken).toBe(CLAUDE_TOKEN)
+  })
+
+  test('a token for another organization, or whose organization is unknown, or that two rows could claim, gets a row of its own', () => {
+    const mine = oauth('mine', { inferenceToken: CLAUDE_TOKEN })
+    for (const [rows, org] of [
+      [[mine], 'org-2'],
+      [[mine], undefined],
+      [[mine, oauth('twin', { inferenceToken: CLAUDE_TOKEN })], 'org-1'],
+    ] as const) {
+      const p = pool(...rows)
+      expect(
+        land(p, job(entry('e', CLAUDE_TOKEN_2)), withOrg(CLAUDE_TOKEN_2, org))
+          .kind,
+      ).toBe('placed')
+      expect(p.accounts).toHaveLength(rows.length + 1)
+      expect(mine.inferenceToken).toBe(CLAUDE_TOKEN)
+    }
+  })
+
+  test('a rotation of an entry still replaces the token it was imported as, in place', () => {
+    const imported = held('imported', CLAUDE_TOKEN, { orgId: 'org-1' })
+    const p = pool(imported)
+    expect(
+      land(
+        p,
+        job(entry('e', CLAUDE_TOKEN_2), ref('imported', CLAUDE_TOKEN)),
+        withOrg(CLAUDE_TOKEN_2, 'org-1'),
+      ),
+    ).toMatchObject({ kind: 'placed', row: { id: 'imported' } })
+    expect(imported.inferenceToken).toBe(CLAUDE_TOKEN_2)
+  })
+
+  test('the pasted-token pairing outside sync keeps its behavior: a confirmed renewal still replaces', () => {
+    const mine = oauth('mine', {
+      inferenceToken: CLAUDE_TOKEN,
+      usage: {
+        hourly: null,
+        weekly: { utilization: 0.1, resetAt: Date.now() + 86_400_000 },
+        capturedAt: Date.now(),
+      },
+    })
+    const p = pool(mine)
+    placeTokens(
+      p,
+      'anthropic',
+      {
+        ...withOrg(CLAUDE_TOKEN_2, 'org-1'),
+        usage: {
+          hourly: null,
+          weekly: { utilization: 0.1, resetAt: Date.now() + 86_400_000 },
+          capturedAt: Date.now(),
+        },
+      },
+      'pasted',
+      undefined,
+    )
+    expect(mine.inferenceToken).toBe(CLAUDE_TOKEN_2)
+    expect(p.accounts).toHaveLength(1)
+  })
+})
 describe('applying a plan', () => {
   /** Make every pool write fail fast (the pool file becomes a directory); returns the undo. */
   async function breakPool(): Promise<() => Promise<void>> {
@@ -255,29 +405,35 @@ describe('applying a plan', () => {
     })
   }
 
+  const key = (id: string) => `${ORIGIN}/${id}`
+  const memory = (over: Partial<MergeMemory> = {}): MergeMemory => ({
+    origin: 'd'.repeat(32),
+    imported: newRefs(),
+    skipped: {},
+    ...over,
+  })
+
   test('a write that fails after another landed keeps the first on record and defers the second; a retry finishes it', async () => {
     const undo: { run?: () => Promise<void> } = {}
     const entries = [entry('e1', CLAUDE_TOKEN), entry('e2', CLAUDE_TOKEN_2)]
-    const snapshot = { entries, listed: new Set(['e1', 'e2']) }
-    const first = await applyPlan(
-      planMerge([], snapshot, newRefs()),
-      newRefs(),
-      [tripping(CLAUDE_TOKEN_2, undo)],
-    )
+    const snapshot = { entries, listed: new Set(entries.map(entryKey)) }
+    const first = await applyPlan(planMerge([], snapshot, memory()), memory(), [
+      tripping(CLAUDE_TOKEN_2, undo),
+    ])
     await undo.run?.()
     expect(first).toMatchObject({ added: 1, deferred: 1 })
-    expect(Object.keys(first.imported)).toEqual(['e1'])
+    expect(Object.keys(first.imported)).toEqual([key('e1')])
     expect((await readPool()).accounts).toHaveLength(1)
 
     const plan = planMerge(
       (await readPool()).accounts,
       snapshot,
-      first.imported,
+      memory({ imported: first.imported }),
     )
     expect(plan.imports.map((j) => j.entry.id)).toEqual(['e2'])
-    const second = await applyPlan(plan, first.imported, [claudeSyncAdapter()])
+    const second = await applyPlan(plan, first, [claudeSyncAdapter(orgOf)])
     expect(second).toMatchObject({ added: 1, deferred: 0 })
-    expect(Object.keys(second.imported).sort()).toEqual(['e1', 'e2'])
+    expect(Object.keys(second.imported).sort()).toEqual([key('e1'), key('e2')])
     expect((await readPool()).accounts).toHaveLength(2)
   })
 
@@ -286,8 +442,8 @@ describe('applying a plan', () => {
     const imported = newRefs({ gone })
     const undo = await breakPool()
     const result = await applyPlan(
-      { imports: [], drops: [['gone', gone]] },
-      imported,
+      { imports: [], drops: [['gone', gone]], forgets: [] },
+      { imported, skipped: {} },
       [],
     )
     await undo()
@@ -295,16 +451,22 @@ describe('applying a plan', () => {
     expect(Object.keys(result.imported)).toEqual(['gone'])
   })
 
-  test('a credential the user already holds is neither counted nor tracked', async () => {
+  test('a credential the user already holds is neither counted nor tracked, and is remembered as skipped', async () => {
     await mutatePool((p) => {
       p.accounts = [held('mine', CLAUDE_TOKEN_2)]
     })
     const plan = {
       imports: [job(entry('e1', CLAUDE_TOKEN_2))],
       drops: [],
+      forgets: [],
     }
-    const result = await applyPlan(plan, newRefs(), [claudeSyncAdapter()])
+    const result = await applyPlan(plan, memory(), [claudeSyncAdapter()])
     expect(result).toMatchObject({ added: 0, updated: 0, deferred: 0 })
     expect(Object.keys(result.imported)).toEqual([])
+    expect(result.skipped[key('e1')]).toEqual({
+      fingerprint: fingerprint(CLAUDE_TOKEN_2),
+      blocker: 'mine',
+      holds: fingerprint(CLAUDE_TOKEN_2),
+    })
   })
 })

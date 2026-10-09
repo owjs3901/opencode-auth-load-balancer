@@ -192,32 +192,56 @@ export async function updateGist(
   content: string,
   now: number = Date.now(),
 ): Promise<void> {
-  const res = await request(
-    `${API}/${id}`,
-    {
-      method: 'PATCH',
-      headers: { ...headers(token), 'content-type': 'application/json' },
-      body: JSON.stringify({ files: { [GIST_FILE]: { content } } }),
-    },
-    now,
-  )
+  let res: Response
+  try {
+    res = await request(
+      `${API}/${id}`,
+      {
+        method: 'PATCH',
+        headers: { ...headers(token), 'content-type': 'application/json' },
+        body: JSON.stringify({ files: { [GIST_FILE]: { content } } }),
+      },
+      now,
+    )
+  } catch (error) {
+    // GitHub answers a gist its caller may read but not write with 404.
+    if (error instanceof SyncError && error.code === 'not-found')
+      throw new SyncError('write-denied')
+    throw error
+  }
+  if (res.status === 401 || res.status === 403)
+    throw new SyncError('write-denied')
   await readJson(res)
 }
 
 export type GistRead =
   { changed: false } | { changed: true; content: string; etag?: string }
 
-/** Read the sync file of gist `id` without credentials; a matching `etag` answers `changed: false` cheaply. */
+/**
+ * Read the sync file of gist `id`; a matching `etag` answers `changed: false`
+ * cheaply. With a `token` the read is authenticated (GitHub's own limit is far
+ * higher than the 60 an hour an anonymous address gets); a token GitHub
+ * refuses is not sent again, and the gist is read without credentials.
+ */
 export async function readGist(
   id: string,
   etag?: string,
   now: number = Date.now(),
+  token?: string,
 ): Promise<GistRead> {
-  const res = await request(
-    `${API}/${id}`,
-    { headers: { ...headers(), ...(etag ? { 'if-none-match': etag } : {}) } },
-    now,
-  )
+  const ask = (auth?: string) =>
+    request(
+      `${API}/${id}`,
+      {
+        headers: {
+          ...headers(auth),
+          ...(etag ? { 'if-none-match': etag } : {}),
+        },
+      },
+      now,
+    )
+  let res = await ask(token)
+  if (res.status === 401 && token) res = await ask()
   if (res.status === 304) return { changed: false }
   const json = await readJson(res)
   const file = isPlainObject(json.files) ? json.files[GIST_FILE] : undefined

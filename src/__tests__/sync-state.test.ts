@@ -44,10 +44,11 @@ afterEach(() => {
 
 const state = (over: Partial<SyncState> = {}): SyncState => ({
   v: 1,
-  role: 'subscriber',
   gistId: ID,
   key: encodeKey(generateKey()),
+  creator: false,
   imported: {},
+  skipped: {},
   ...over,
 })
 
@@ -59,8 +60,11 @@ describe('sync state file', () => {
     )
     expect(await readSyncState()).toBeNull()
     const full = state({
-      role: 'publisher',
+      creator: true,
       owner: 'octo',
+      write: 'denied',
+      writeCheckAt: 11,
+      pollAt: 12,
       etag: 'W/"1"',
       syncedAt: 5,
       uploadedDigest: 'abc',
@@ -68,6 +72,7 @@ describe('sync state file', () => {
       appliedAt: 8,
       retryAt: 7,
       imported: { e: { accountId: 'a', fingerprint: 'f' } },
+      skipped: { s: { fingerprint: 'f', blocker: 'b', holds: '' } },
     })
     expect(await updateSyncState(() => full)).toEqual(full)
     expect(await readSyncState()).toEqual(full)
@@ -93,7 +98,6 @@ describe('sync state file', () => {
       'not json',
       '[]',
       JSON.stringify({ ...state(), v: 2 }),
-      JSON.stringify({ ...state(), role: 'admin' }),
       JSON.stringify({ ...state(), gistId: 'zz' }),
       JSON.stringify({ ...state(), gistId: 5 }),
       JSON.stringify({ ...state(), key: 'short' }),
@@ -118,6 +122,11 @@ describe('sync state file', () => {
         uploadedAt: 'x',
         appliedAt: 'x',
         retryAt: 'x',
+        pollAt: 'x',
+        writeCheckAt: 'x',
+        write: 'sometimes',
+        creator: 'yes',
+        skipped: { bad: { blocker: 5 }, worse: 'x' },
         imported: {
           good: { accountId: 'a', fingerprint: 'f' },
           bad: { accountId: 5 },
@@ -138,8 +147,13 @@ describe('sync state file', () => {
       'uploadedAt',
       'appliedAt',
       'retryAt',
+      'pollAt',
+      'writeCheckAt',
+      'write',
     ])
       expect(read).not.toHaveProperty(field)
+    expect(read?.creator).toBe(false)
+    expect(read?.skipped).toEqual({})
     await writeFile(
       syncStateFilePath(),
       JSON.stringify({ ...state(), imported: 3 }),

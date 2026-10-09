@@ -11,6 +11,7 @@ export type SyncErrorCode =
   | 'network'
   | 'no-auth'
   | 'http'
+  | 'write-denied'
 
 /** What each failure tells the user. Short, and never carries the link, the key, or a response body. */
 const MESSAGES: Record<SyncErrorCode, string> = {
@@ -30,6 +31,8 @@ const MESSAGES: Record<SyncErrorCode, string> = {
   'no-auth':
     'Uploading needs GITHUB_TOKEN or GH_TOKEN (gist scope), or a logged-in gh CLI.',
   http: 'GitHub refused the request.',
+  'write-denied':
+    'This GitHub account cannot update the gist; downloading only.',
 }
 
 /** A sync failure with a fixed, non-leaky message; `retryAfterMs` accompanies `rate-limited`. */

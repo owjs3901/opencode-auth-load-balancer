@@ -1,16 +1,26 @@
 import { placeTokens } from '../accounts'
-import { holdsCredential } from '../pairing'
-import { findAccount, mutatePool } from '../pool/store'
+import { holdsCredential, tokenSharer } from '../pairing'
+import { findAccount, mutatePool, readPool } from '../pool/store'
 import { adapterFor, ADAPTERS } from '../providers/registry'
 import type { ProviderAdapter } from '../providers/types'
 import type { PoolAccount, PoolFile, TokenSet } from '../types'
 import { fingerprint } from './crypto'
-import { holdsFingerprint, type ImportJob, type MergePlan } from './merge'
-import { type ImportedRef, newRefs } from './state'
+import {
+  holdsFingerprint,
+  type ImportJob,
+  type MergeMemory,
+  type MergePlan,
+  planMerge,
+  staticFingerprint,
+} from './merge'
+import { entryKey, type ParsedPayload } from './payload'
+import { type ImportedRef, newMap, newRefs, type SkippedRef } from './state'
 
 export interface ApplyResult {
   /** The imported map after this plan. */
   imported: Record<string, ImportedRef>
+  /** The skipped map after this plan. */
+  skipped: Record<string, SkippedRef>
   added: number
   updated: number
   removed: number
@@ -18,8 +28,10 @@ export interface ApplyResult {
   deferred: number
 }
 
-/** What became of one import: the row it landed on, or left alone because the user already holds it. */
-export type Landing = { kind: 'placed'; row: PoolAccount } | { kind: 'held' }
+/** What became of one import: the row it landed on, or left alone because the account already has a credential. */
+export type Landing =
+  | { kind: 'placed'; row: PoolAccount }
+  | { kind: 'skipped'; blocker: string; holds: string }
 
 /** The secret verified the way a pasted one is: Claude's setup-token probe, Kimi's key check. */
 async function exchangeSecret(
@@ -76,10 +88,15 @@ async function strip(ref: ImportedRef): Promise<boolean> {
 /**
  * Land one verified credential, deciding everything from the pool as it is
  * under the lock (callers run this inside `mutatePool`):
- * - a row of this provider that already holds the secret — or, for a key, the
- *   same account — is the user's own, whatever the plan saw earlier: it is
- *   left alone, never tracked, and the old imported secret (if the entry is a
- *   rotation) is taken back;
+ * - a row of this provider that already holds the secret (or, for a key, the
+ *   same account) is the user's own, whatever the plan saw earlier;
+ * - for a Claude token, a row that already serves the same account with a
+ *   working token of its own, minted here, pasted, or imported from another
+ *   entry, is never replaced: two machines that each hold a token for one
+ *   account would otherwise trade them for ever. The entry is skipped;
+ * - in both cases the old imported secret (if the entry is a rotation) is
+ *   taken back, and the row in the way is reported, so the entry is not
+ *   probed again until that row changes;
  * - an earlier import still held by its row is replaced in place, but only by
  *   a credential of the same provider; if the entry changed provider the old
  *   one is taken back and the new one placed on its own;
@@ -103,16 +120,24 @@ export function land(
     : undefined
   const prev = owned && sameProvider(owned) ? owned : undefined
   if (owned && !prev) release(pool, owned)
-  const userHolds = pool.accounts.some(
-    (a) =>
-      a !== prev &&
-      sameProvider(a) &&
-      (holdsFingerprint(a, digest) ||
-        (!tokens.inferenceOnly && holdsCredential(a, tokens))),
-  )
-  if (userHolds) {
+  const blocker =
+    pool.accounts.find(
+      (a) =>
+        a !== prev &&
+        sameProvider(a) &&
+        (holdsFingerprint(a, digest) ||
+          (!tokens.inferenceOnly && holdsCredential(a, tokens))),
+    ) ??
+    (tokens.inferenceOnly && !prev
+      ? tokenSharer(pool.accounts.filter(sameProvider), tokens)
+      : undefined)
+  if (blocker) {
     if (prev) release(pool, prev)
-    return { kind: 'held' }
+    return {
+      kind: 'skipped',
+      blocker: blocker.id,
+      holds: staticFingerprint(blocker),
+    }
   }
   return {
     kind: 'placed',
@@ -133,18 +158,21 @@ export function land(
  */
 export async function applyPlan(
   plan: MergePlan,
-  imported: Readonly<Record<string, ImportedRef>>,
+  memory: Pick<MergeMemory, 'imported' | 'skipped'>,
   adapters: readonly ProviderAdapter[] = ADAPTERS,
 ): Promise<ApplyResult> {
   const result: ApplyResult = {
-    imported: newRefs(imported),
+    imported: newRefs(memory.imported),
+    skipped: newMap(memory.skipped),
     added: 0,
     updated: 0,
     removed: 0,
     deferred: 0,
   }
+  for (const key of plan.forgets) delete result.skipped[key]
   for (const job of plan.imports) {
     const { entry, previous } = job
+    const key = entryKey(entry)
     try {
       const adapter = adapterFor(adapters, entry.providerID)
       const tokens = adapter && (await exchangeSecret(adapter, entry.secret))
@@ -155,9 +183,16 @@ export async function applyPlan(
       if (tokens.inferenceOnly && entry.expiresAt)
         tokens.inferenceExpires = entry.expiresAt
       const landing = await mutatePool((pool) => land(pool, job, tokens))
-      if (landing.kind === 'held') delete result.imported[entry.id]
-      else {
-        result.imported[entry.id] = {
+      if (landing.kind === 'skipped') {
+        delete result.imported[key]
+        result.skipped[key] = {
+          fingerprint: fingerprint(entry.secret),
+          blocker: landing.blocker,
+          holds: landing.holds,
+        }
+      } else {
+        delete result.skipped[key]
+        result.imported[key] = {
           accountId: landing.row.id,
           fingerprint: fingerprint(entry.secret),
         }
@@ -168,13 +203,52 @@ export async function applyPlan(
       result.deferred += 1
     }
   }
-  for (const [id, ref] of plan.drops) {
+  for (const [key, ref] of plan.drops) {
     try {
       if (await strip(ref)) result.removed += 1
-      delete result.imported[id]
+      delete result.imported[key]
     } catch {
       result.deferred += 1
     }
   }
   return result
+}
+
+/** Passes of plan-and-apply per snapshot: a removal can free an account for an entry that was skipped behind it. */
+const MAX_PASSES = 3
+
+/**
+ * Bring the pool in line with `snapshot`. After a pass that removed something
+ * the plan is made again, so an entry that was kept out by the credential just
+ * removed is imported in the same cycle instead of the next one.
+ */
+export async function applySnapshot(
+  snapshot: Pick<ParsedPayload, 'entries' | 'listed'>,
+  memory: MergeMemory,
+  adapters: readonly ProviderAdapter[] = ADAPTERS,
+): Promise<ApplyResult> {
+  const total: ApplyResult = {
+    imported: newRefs(memory.imported),
+    skipped: newMap(memory.skipped),
+    added: 0,
+    updated: 0,
+    removed: 0,
+    deferred: 0,
+  }
+  for (let pass = 0; pass < MAX_PASSES; pass++) {
+    const plan = planMerge((await readPool()).accounts, snapshot, {
+      origin: memory.origin,
+      imported: total.imported,
+      skipped: total.skipped,
+    })
+    const done = await applyPlan(plan, total, adapters)
+    total.imported = done.imported
+    total.skipped = done.skipped
+    total.added += done.added
+    total.updated += done.updated
+    total.removed += done.removed
+    total.deferred = done.deferred
+    if (done.removed === 0) break
+  }
+  return total
 }

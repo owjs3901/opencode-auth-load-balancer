@@ -1,8 +1,9 @@
 /**
- * The sync schedule: serve TUI requests every second, download at start and
- * every 15 minutes (subscriber), upload a few seconds after the static
- * credentials stop changing (publisher). One run at a time per process, and
- * one per machine through a lock, so two opencode windows never both fetch.
+ * The sync schedule: serve TUI requests every second, run a cycle (download,
+ * then upload this machine's own changes when it may) at start and every 15
+ * minutes, and run one a few seconds after this machine's own static
+ * credentials stop changing. One run at a time per process, and one per
+ * machine through a lock, so two opencode windows never both fetch.
  *
  * Every decision that matters is made again by the engine once the lock is
  * held, from the persisted state: this loop only keeps a cheap watch.
@@ -154,13 +155,12 @@ export function createSyncLoop(deps: LoopDeps): SyncLoop {
     if (t < checkAt) return
     checkAt = t + CHANGE_CHECK_MS
     const state = await readSyncState()
-    if (state?.role === 'subscriber') {
-      if (t >= (state.retryAt ?? 0))
-        await withCycleLock(
-          () => engine.backgroundPoll(state.gistId),
-          lockWaitMs,
-        )
-    } else if (state?.role === 'publisher') await publishWhenSettled(t, state)
+    if (!state) return
+    if (t >= Math.max(state.pollAt ?? 0, state.retryAt ?? 0)) {
+      await withCycleLock(() => engine.backgroundPoll(state.gistId), lockWaitMs)
+      return
+    }
+    await publishWhenSettled(t, state)
   }
 
   async function step(): Promise<void> {

@@ -6,14 +6,23 @@ import {
   type UsageSnapshot,
 } from '../../types'
 import { fakeAdapter } from './adapter'
-import { REJECTED_TOKEN } from './sync'
+import { CLAUDE_TOKEN_2, REJECTED_TOKEN } from './sync'
 
 const USAGE: UsageSnapshot = { hourly: null, weekly: null, capturedAt: 0 }
 
-/** Claude adapter whose setup-token probe accepts every token but `REJECTED_TOKEN`. */
+/** The organization of a test token: org-2 for the second one (and its variants), org-3 for one marked _org3_, org-1 for the rest. */
+export const orgOf = (token: string): string =>
+  token.startsWith(CLAUDE_TOKEN_2)
+    ? 'org-2'
+    : token.includes('_org3_')
+      ? 'org-3'
+      : 'org-1'
+
 export function claudeSyncAdapter(
-  orgId: string | null = 'org-1',
+  org: string | null | ((token: string) => string | null) = 'org-1',
 ): ProviderAdapter {
+  const orgIdOf = (token: string): string | null =>
+    typeof org === 'function' ? org(token) : org
   return fakeAdapter({
     id: 'anthropic',
     tokenLogin: {
@@ -28,7 +37,7 @@ export function claudeSyncAdapter(
               refresh: '',
               expires: STATIC_CREDENTIAL_EXPIRES,
               inferenceOnly: true,
-              ...(orgId ? { orgId } : {}),
+              ...(orgIdOf(token) ? { orgId: orgIdOf(token) ?? '' } : {}),
               usage: { ...USAGE },
             },
     },

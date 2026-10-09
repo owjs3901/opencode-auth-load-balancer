@@ -4,12 +4,14 @@ import { tool } from '@opencode-ai/plugin/tool'
 import {
   addAccount,
   bootstrapFromOpencodeAuth,
+  makeAccount,
   type OpencodeAuthGetter,
 } from './accounts'
 import { createLoadBalancedFetch } from './fetch'
 import {
   notifyModelFallback,
   notifyOnSwitch,
+  notifyPaired,
   notifyPending,
   notifyPendingRestored,
   notifyPendingRestoreError,
@@ -74,7 +76,8 @@ function zeroOutCost(provider: LoaderProvider): void {
  *    the load-balanced fetch so every request flows through the scheduler.
  *  - `methods`: logins that APPEND each account to the pool (instead of
  *    overwriting opencode's single auth slot) — a pasted OAuth code for
- *    Claude/Codex; for Kimi Code a device-code OAuth login, then a pasted key.
+ *    Claude/Codex, then for Claude a pasted `claude setup-token` token; for
+ *    Kimi Code a device-code OAuth login, then a pasted key.
  */
 function buildAuthHook(
   adapter: ProviderAdapter,
@@ -83,11 +86,22 @@ function buildAuthHook(
 ): AuthHook {
   const label = PROVIDER_LABELS[adapter.id] ?? adapter.id
   const startDeviceLogin = adapter.startDeviceLogin
+  const tokenLogin = adapter.tokenLogin
   // Seed the just-registered account's usage right away — awaited so the
   // dashboard shows usage immediately after login (no extra latency on the
   // request path; this is the one-time login flow). Throttled inside.
   const register = async (tokens: TokenSet): Promise<void> => {
-    await addAccount(adapter.id, tokens)
+    // Measure the login before it lands (a setup-token's probe already did):
+    // pairing compares reset times, and the new row shows usage at once.
+    if (!tokens.usage) {
+      const usage = await adapter
+        .fetchUsage(makeAccount(adapter.id, '', tokens), Date.now())
+        .catch(ignore)
+      if (usage) tokens.usage = usage
+    }
+    const account = await addAccount(adapter.id, tokens)
+    if (account.inferenceToken !== undefined && account.refresh)
+      void notifyPaired(client, adapter.id, account)
     await refreshUsageInBackground(adapter, Date.now()).catch(ignore)
   }
   const oauthSuccess = (tokens: TokenSet) => ({
@@ -207,6 +221,30 @@ function buildAuthHook(
           }
         },
       },
+      // A long-lived token the provider's CLI mints (`claude setup-token`),
+      // pasted as-is; it pairs with the account's OAuth login on one row
+      // (see addAccount). An `oauth` method like the key login above, so the
+      // TUI re-login can drive it; opencode keeps it as an OAuth pair whose
+      // expiry never comes due, which a plain Bearer client can still use.
+      ...(tokenLogin
+        ? [
+            {
+              label: `${label} ${tokenLogin.label} (add account to load balancer)`,
+              type: 'oauth' as const,
+              authorize: async () => ({
+                url: tokenLogin.url,
+                instructions: tokenLogin.instructions,
+                method: 'code' as const,
+                callback: async (code: string) => {
+                  const tokens = await tokenLogin.exchange(code)
+                  if (!tokens) return { type: 'failed' as const }
+                  await register(tokens)
+                  return oauthSuccess(tokens)
+                },
+              }),
+            },
+          ]
+        : []),
     ],
   }
 }

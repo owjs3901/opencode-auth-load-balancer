@@ -1,3 +1,4 @@
+import { dropInferenceToken, recordLostLogin } from './accounts'
 import {
   classifyProviderRecovery,
   type ProviderRecovery,
@@ -30,7 +31,7 @@ import {
   refreshAllUsageInBackground,
   USAGE_REFRESH_TTL_MS,
 } from './usage-refresh'
-import { ignore, sleepAbortable } from './util'
+import { errorSummary, ignore, sleepAbortable } from './util'
 
 // Exported so the usage-refresh stale-cooldown reconciliation's local
 // `MAX_TRANSIENT_COOLDOWN_MS` can be held `===` to it by a drift-guard test
@@ -198,10 +199,11 @@ async function applyCooldown(
  * swallows `LockTimeoutError` / `PoolReadError` / `PoolWriteError` so a
  * bookkeeping failure never fails an already-served response.
  *
- * `revokedKey` is the static API key a 401 just rejected. No refresh can
- * replace a revoked key, so the row is parked for a re-login rather than
- * retried every AUTH_COOLDOWN_MS forever — but only while it still holds that
- * key, so a re-login that replaced it mid-request is never disabled.
+ * `revoked` is the static credential (a Kimi API key, a Claude setup-token)
+ * a 401 just rejected, with the server's reason. No refresh can replace it,
+ * so the row is parked for a re-login rather than retried every
+ * AUTH_COOLDOWN_MS forever — but only while it still holds that credential,
+ * so a re-login that replaced it mid-request is never disabled.
  */
 async function recordRotation(
   adapter: ProviderAdapter,
@@ -210,7 +212,7 @@ async function recordRotation(
   fallbackMs: number,
   now: number,
   kind: CooldownKind,
-  revokedKey?: string,
+  revoked?: { key: string; reason: string },
 ): Promise<void> {
   const partial = adapter.parseUsageHeaders(res.headers)
   const until = cooldownUntilFrom(res, fallbackMs, now)
@@ -223,8 +225,10 @@ async function recordRotation(
         account.cooldownUntil = until
         account.cooldownKind = kind
       }
-      if (revokedKey !== undefined && account.access === revokedKey)
-        account.disabledReason = `invalid API key: re-login required (${adapter.id}:${account.label})`
+      if (revoked && account.access === revoked.key) {
+        account.disabledReason = `credential rejected (401): re-login required (${adapter.id}:${account.label})`
+        recordLostLogin(account, 'token', revoked.reason)
+      }
     }),
   )
 }
@@ -625,6 +629,11 @@ export function createLoadBalancedFetch(
     // whole conversation to rediscover that is pure cost.
     let clientVersionRetried = false
 
+    // Setup-tokens the provider rejected during THIS request. Their rows are
+    // retried on their OAuth login even if dropping the token from the pool
+    // (best-effort) did not land, so a dead token is tried once, never looped.
+    let rejectedTokens: Set<string> | null = null
+
     // Cold-start / staleness seeding fires once per request, inside the loop —
     // reusing the loop's own pool read instead of paying a second serialized
     // file read + JSON.parse per request (see the flag at the readPool below).
@@ -821,15 +830,25 @@ export function createLoadBalancedFetch(
         }
       }
 
+      // A row's setup-token serves inference; its OAuth login, if any, only
+      // polls usage, so it is not refreshed on the request path at all.
+      const token =
+        account.inferenceToken !== undefined &&
+        !rejectedTokens?.has(account.inferenceToken)
+          ? account.inferenceToken
+          : undefined
       try {
-        await ensureAccessToken(adapter, account, now)
+        if (token === undefined) await ensureAccessToken(adapter, account, now)
 
         // Clone the pre-computed base so each attempt's `applyAuth` mutation
         // (the per-account Bearer token) stays isolated from sibling attempts
         // and from the captured base. `SESSION_HEADER` was already stripped
         // from `baseHeaders` above, so the clone inherits the absence.
         const headers = new Headers(baseHeaders)
-        adapter.applyAuth(headers, account)
+        adapter.applyAuth(
+          headers,
+          token === undefined ? account : { ...account, access: token },
+        )
 
         // Call-site DEBUG gate: `log()` re-checks internally, but the template
         // literal argument would otherwise be BUILT on every successful request
@@ -859,7 +878,13 @@ export function createLoadBalancedFetch(
           // timeout), and neither path should wait behind a socket pinned to
           // a dead response. Everything in this branch
           // (`planReactiveFallback`, `parseUsageHeaders`, retry-after) reads
-          // only `res.headers`, which stay readable after a body cancel.
+          // only `res.headers`, which stay readable after a body cancel. A
+          // 401's small body is read instead: it says why a credential died
+          // (expired vs revoked), which the dashboards show.
+          const rejection =
+            res.status === 401
+              ? errorSummary(401, await res.text().catch(() => ''))
+              : ''
           await res.body?.cancel().catch(ignore)
           // Model-tier fallback: a 429 whose BINDING limit is a MODEL-TIER
           // weekly cap (`representative-claim: seven_day_opus` /
@@ -914,6 +939,23 @@ export function createLoadBalancedFetch(
             }
           }
 
+          // A dead setup-token on a row that still has its OAuth login: drop
+          // the token and serve this same row on OAuth right away.
+          if (res.status === 401 && token !== undefined && account.refresh) {
+            rejectedTokens ??= new Set()
+            rejectedTokens.add(token)
+            await bestEffort('drop-token', () =>
+              dropInferenceToken(account.id, token, rejection),
+            )
+            tried.delete(account.id)
+            lastError = new Error(
+              `${adapter.id} account "${account.label}" rejected its setup-token`,
+            )
+            // prettier-ignore
+            if (DEBUG) log(`!! ${account.label} setup-token 401 -> retrying on its OAuth login`)
+            continue
+          }
+
           const ms = cls === 'auth' ? AUTH_COOLDOWN_MS : ACCOUNT_COOLDOWN_MS
           // Fresh Date.now(), NOT the loop-start `now`: that was captured before
           // ensureAccessToken (up to a 30 s network refresh) and the upstream
@@ -927,10 +969,11 @@ export function createLoadBalancedFetch(
             ms,
             Date.now(),
             cls === 'auth' ? 'auth' : 'quota',
-            // A key row is one without a refresh token: OAuth rows of the
-            // same provider keep the normal cooldown and refresh path.
-            res.status === 401 && adapter.tokensFromApiKey && !account.refresh
-              ? account.access
+            // A row without a refresh token (a Kimi API key, a Claude
+            // setup-token) has nothing a refresh could repair; OAuth rows
+            // keep the normal cooldown and refresh path.
+            res.status === 401 && !account.refresh
+              ? { key: account.access, reason: rejection }
               : undefined,
           )
           // Only an `account`-class (429/402) cooldown is worth waiting out; an auth

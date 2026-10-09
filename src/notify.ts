@@ -54,6 +54,24 @@ export async function notifyOnSwitch(
   })
 }
 
+/**
+ * Confirm a login that left a row holding both credentials, either half
+ * having arrived second: organization auto-pairing is a guess, so its result
+ * is shown, never silent.
+ */
+export async function notifyPaired(
+  client: ToastClient,
+  providerID: string,
+  account: PoolAccount,
+): Promise<void> {
+  await postToast(client, {
+    title: `${providerName(providerID)} account`,
+    message: `▶ ${account.label}  ·  inference: setup-token  ·  usage: OAuth`,
+    variant: 'success',
+    duration: 6000,
+  })
+}
+
 /** Last `fromModel@window` toasted per provider+account, so a downgraded sticky session doesn't re-toast every turn. */
 const lastFallbackToasted = new Map<string, string>()
 

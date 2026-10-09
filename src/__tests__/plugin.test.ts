@@ -9,6 +9,7 @@ const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-plugin-'))
 const POOL = join(DIR, 'auth-load-balancer.json')
 const PENDING = join(DIR, 'auth-load-balancer-pending.json')
 
+import { pickAuthMethodIndex } from '../../tui/auth-load-balancer-tui.logic'
 import { bestEffort, createLoadBalancedFetch } from '../fetch'
 import {
   AnthropicLoadBalancerPlugin,
@@ -69,7 +70,13 @@ interface AuthMethod {
     url: string
     instructions: string
     method: string
-    callback: (code?: string) => Promise<{ type: string; key?: string }>
+    callback: (code?: string) => Promise<{
+      type: string
+      key?: string
+      access?: string
+      refresh?: string
+      expires?: number
+    }>
   }>
 }
 interface PluginHooks {
@@ -2794,7 +2801,7 @@ describe('kimi code plugins', () => {
     respond = () => new Response('{}', { status: 401 })
     await sendKimi()
     expect((await readPool()).accounts[0]?.disabledReason).toBe(
-      'invalid API key: re-login required (kimi-code-plan-cn:A)',
+      'credential rejected (401): re-login required (kimi-code-plan-cn:A)',
     )
 
     // An OAuth row keeps the cooldown: its refresh token can still recover it.
@@ -2828,5 +2835,283 @@ describe('kimi code plugins', () => {
     const row = (await readPool()).accounts[0]
     expect(row?.access).toBe('sk-kimi-new')
     expect(row?.disabledReason).toBeNull()
+  })
+})
+
+describe('claude setup-token login', () => {
+  const TOKEN = 'sk-ant-oat01-Ab3_cD-9xYz0123456789abcdefGHIJ'
+
+  /**
+   * Anthropic's Messages API: every response reports the account at 5h 20% /
+   * weekly 40%. Returns the paths requested, to count probes.
+   */
+  function messagesApi(): string[] {
+    const paths: string[] = []
+    respond = (url) => {
+      paths.push(new URL(url).pathname)
+      return new Response('{}', {
+        status: 200,
+        headers: {
+          'anthropic-ratelimit-unified-5h-utilization': '0.2',
+          'anthropic-ratelimit-unified-7d-utilization': '0.4',
+        },
+      })
+    }
+    return paths
+  }
+
+  /** The body Anthropic's API answers a dead bearer with. */
+  const EXPIRED = {
+    type: 'error',
+    error: { type: 'authentication_error', message: 'OAuth token has expired' },
+  }
+
+  async function startTokenLogin(hooks: PluginHooks) {
+    const method = hooks.auth.methods.find((m) =>
+      m.label.includes('setup-token'),
+    )
+    if (!method) throw new Error('no setup-token login registered')
+    return method.authorize()
+  }
+
+  const sendClaude = () =>
+    createLoadBalancedFetch(anthropicAdapter)(
+      'https://api.anthropic.com/v1/messages',
+      { method: 'POST', body: '{}' },
+    )
+
+  /** Record each request's path and Bearer, answering with `status(bearer)`. */
+  function recordBearers(status: (bearer: string | null) => number): string[] {
+    const calls: string[] = []
+    respond = (url, init) => {
+      const bearer = new Headers(init?.headers).get('authorization')
+      calls.push(`${new URL(url).pathname} ${bearer}`)
+      const code = status(bearer)
+      return Response.json(
+        code === 401
+          ? EXPIRED
+          : {
+              five_hour: null,
+              seven_day: { utilization: 20, resets_at: null },
+            },
+        { status: code },
+      )
+    }
+    return calls
+  }
+
+  test('pools a pasted token as a static row with its probed usage; the same token again stays one row', async () => {
+    const requested = messagesApi()
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin)
+    const flow = await startTokenLogin(hooks)
+    expect(flow.method).toBe('code')
+
+    expect(await flow.callback(TOKEN)).toEqual({
+      type: 'success',
+      refresh: '',
+      access: TOKEN,
+      expires: Number.MAX_SAFE_INTEGER,
+    })
+    expect((await flow.callback(TOKEN)).type).toBe('success')
+
+    const rows = (await readPool()).accounts
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      providerID: 'anthropic',
+      access: TOKEN,
+      refresh: '',
+      expires: Number.MAX_SAFE_INTEGER,
+    })
+    expect(rows[0]?.usage.weekly?.utilization).toBe(0.4)
+    // One probe per paste: it validates the token AND seeds the row's usage.
+    expect(requested).toEqual(['/v1/messages', '/v1/messages'])
+    await hooks.dispose()
+  })
+
+  test('a token the API refuses pools nothing', async () => {
+    respond = () => new Response('{}', { status: 401 })
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin)
+    const flow = await startTokenLogin(hooks)
+
+    expect(await flow.callback(TOKEN)).toEqual({ type: 'failed' })
+
+    expect((await readPool()).accounts).toHaveLength(0)
+    await hooks.dispose()
+  })
+
+  test('the TUI re-logs a static Claude row through this login and an OAuth row through the OAuth one', async () => {
+    messagesApi()
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin)
+    const { methods } = hooks.auth
+
+    const staticFlow =
+      await methods[pickAuthMethodIndex(methods, true) ?? -1]?.authorize()
+    const oauthFlow =
+      await methods[pickAuthMethodIndex(methods) ?? -1]?.authorize()
+
+    expect(await staticFlow?.callback(TOKEN)).toMatchObject({
+      type: 'success',
+      access: TOKEN,
+      refresh: '',
+    })
+    expect(oauthFlow?.url).toContain('claude.ai/oauth/authorize')
+    await hooks.dispose()
+  })
+
+  test('a 401 parks a token-only row for re-login instead of cooling it down', async () => {
+    await mutatePool((pool) => {
+      pool.accounts = [
+        account({
+          access: TOKEN,
+          refresh: '',
+          expires: Number.MAX_SAFE_INTEGER,
+          inferenceToken: TOKEN,
+        }),
+      ]
+    })
+    respond = () => Response.json(EXPIRED, { status: 401 })
+
+    await sendClaude().catch((error: unknown) => error)
+
+    const row = (await readPool()).accounts[0]
+    expect(row?.disabledReason).toStartWith(
+      'credential rejected (401): re-login required',
+    )
+    expect(row?.disabledReason).not.toBe(MANUAL_DISABLED_REASON)
+    expect(row?.lostLogins?.token?.reason).toBe(
+      '401 authentication_error: OAuth token has expired',
+    )
+  })
+
+  test('a 401 whose body cannot be read still parks the token-only row, with the bare status as its reason', async () => {
+    await mutatePool((pool) => {
+      pool.accounts = [
+        account({
+          access: TOKEN,
+          refresh: '',
+          expires: Number.MAX_SAFE_INTEGER,
+          inferenceToken: TOKEN,
+        }),
+      ]
+    })
+    respond = () =>
+      new Response(
+        new ReadableStream({
+          start: (controller) => controller.error(new Error('dropped')),
+        }),
+        { status: 401 },
+      )
+
+    await sendClaude().catch((error: unknown) => error)
+
+    expect((await readPool()).accounts[0]?.lostLogins?.token?.reason).toBe(
+      '401',
+    )
+  })
+
+  test('a paired row serves inference on its setup-token and never refreshes its OAuth login for it', async () => {
+    await mutatePool((pool) => {
+      pool.accounts = [
+        account({
+          access: 'oauth-expired',
+          expires: Date.now() - 1,
+          inferenceToken: TOKEN,
+        }),
+      ]
+    })
+    const calls = recordBearers(() => 200)
+
+    const res = await sendClaude()
+
+    expect(res.status).toBe(200)
+    expect(calls).toEqual([`/v1/messages Bearer ${TOKEN}`])
+  })
+
+  test('a dead setup-token on a paired row is dropped and the same request is served on its OAuth login', async () => {
+    await mutatePool((pool) => {
+      pool.accounts = [account({ access: 'oauth-at', inferenceToken: TOKEN })]
+    })
+    const calls = recordBearers((bearer) =>
+      bearer === `Bearer ${TOKEN}` ? 401 : 200,
+    )
+
+    const res = await sendClaude()
+
+    expect(res.status).toBe(200)
+    expect(calls).toEqual([
+      `/v1/messages Bearer ${TOKEN}`,
+      '/v1/messages Bearer oauth-at',
+    ])
+    const row = (await readPool()).accounts[0]
+    expect(row?.inferenceToken).toBeUndefined()
+    expect(row?.disabledReason).toBeNull()
+    expect(row?.lostLogins?.token?.reason).toBe(
+      '401 authentication_error: OAuth token has expired',
+    )
+  })
+
+  test('a paired row measures usage through its OAuth login, never the inference probe', async () => {
+    await mutatePool((pool) => {
+      pool.accounts = [
+        account({
+          id: 'paired-usage',
+          access: 'oauth-at',
+          inferenceToken: TOKEN,
+          usage: { hourly: null, weekly: null, capturedAt: 0 },
+        }),
+      ]
+    })
+    const calls = recordBearers(() => 200)
+
+    await refreshUsageInBackground(anthropicAdapter, Date.now())
+
+    expect(calls).toEqual(['/api/oauth/usage Bearer oauth-at'])
+    expect(
+      (await readPool()).accounts[0]?.usage.weekly?.utilization,
+    ).toBeCloseTo(0.2, 5)
+  })
+
+  test('a login that completes a pair is confirmed with a toast; the first half is not', async () => {
+    const toasts: string[] = []
+    const client: ToastClient = {
+      tui: {
+        showToast: async ({ body }) => {
+          toasts.push(body.message)
+        },
+      },
+    }
+    respond = (url) => {
+      if (url.includes('/v1/oauth/token'))
+        return Response.json({
+          access_token: 'oauth-at',
+          refresh_token: 'ort',
+          expires_in: 3600,
+          account: { uuid: 'acc-1' },
+          organization: { uuid: 'org-1' },
+        })
+      if (url.includes('/api/oauth/usage'))
+        return Response.json({ five_hour: null, seven_day: null })
+      return new Response('{}', {
+        headers: { 'anthropic-organization-id': 'org-1' },
+      })
+    }
+    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
+    const oauth = await hooks.auth.methods[0]?.authorize()
+    const state = new URL(oauth?.url ?? '').searchParams.get('state')
+    await oauth?.callback(`https://cb?code=C&state=${state}`)
+    expect(toasts).toEqual([])
+
+    await (await startTokenLogin(hooks)).callback(TOKEN)
+
+    const rows = (await readPool()).accounts
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ refresh: 'ort', inferenceToken: TOKEN })
+    expect(toasts).toHaveLength(1)
+    expect(toasts[0]).toContain(rows[0]?.label ?? '?')
+    // No stated lifetime: Claude Code's own 30-day assumption from login.
+    const days = ((rows[0]?.refreshExpires ?? 0) - Date.now()) / 86_400_000
+    expect(days).toBeGreaterThan(29.9)
+    expect(days).toBeLessThanOrEqual(30)
+    await hooks.dispose()
   })
 })

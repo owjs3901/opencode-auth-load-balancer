@@ -20,6 +20,7 @@ import {
   syncLines,
   syncMenu,
   type SyncStatusView,
+  type SyncView,
   writeSyncIntent,
 } from '../../tui/auth-load-balancer-tui.logic'
 import { syncIntentFilePath } from '../pool/paths'
@@ -58,13 +59,14 @@ describe('files', () => {
 })
 
 describe('reading what the server wrote', () => {
-  test('the view has the role and times, and never the key or gist', () => {
+  test('the view has what this machine does and the times, and never the key or gist', () => {
     const state = scratch('state')
     const status = scratch('status')
     writeFileSync(
       state,
       JSON.stringify({
-        role: 'subscriber',
+        creator: false,
+        write: 'no-token',
         syncedAt: 50,
         gistId: ID,
         key: KEY,
@@ -76,7 +78,9 @@ describe('reading what the server wrote', () => {
     )
     const view = readSyncView(state, status)
     expect(view).toEqual({
-      role: 'subscriber',
+      joined: true,
+      creator: false,
+      write: 'no-token',
       syncedAt: 50,
       status: { at: 60, ok: true, message: 'Up to date.', reqAt: 7 },
     })
@@ -84,21 +88,31 @@ describe('reading what the server wrote', () => {
     expect(JSON.stringify(view)).not.toContain(ID)
   })
 
-  test('missing, broken, or foreign files read as off', () => {
-    expect(readSyncView(scratch('none'), scratch('none'))).toEqual({
-      role: null,
-    })
+  test('missing, broken, or foreign files read as not joined', () => {
+    const off = { joined: false, creator: false }
+    expect(readSyncView(scratch('none'), scratch('none'))).toEqual(off)
     const state = scratch('state')
     writeFileSync(state, '[]')
-    expect(readSyncView(state, scratch('none'))).toEqual({ role: null })
+    expect(readSyncView(state, scratch('none'))).toEqual(off)
     writeFileSync(state, 'broken')
-    expect(readSyncView(state, scratch('none'))).toEqual({ role: null })
-    writeFileSync(state, JSON.stringify({ role: 'admin', syncedAt: 1 }))
-    expect(readSyncView(state, scratch('none'))).toEqual({ role: null })
-    writeFileSync(state, JSON.stringify({ role: 'publisher', syncedAt: 'x' }))
-    expect(readSyncView(state, scratch('none'))).toEqual({ role: 'publisher' })
+    expect(readSyncView(state, scratch('none'))).toEqual(off)
+    writeFileSync(state, JSON.stringify({ creator: true, syncedAt: 1 }))
+    expect(readSyncView(state, scratch('none'))).toEqual(off)
+    writeFileSync(
+      state,
+      JSON.stringify({
+        gistId: ID,
+        key: KEY,
+        creator: true,
+        write: 'sometimes',
+        syncedAt: 'x',
+      }),
+    )
+    expect(readSyncView(state, scratch('none'))).toEqual({
+      joined: true,
+      creator: true,
+    })
   })
-
   test('a malformed outcome is ignored', () => {
     const status = scratch('status')
     for (const body of [
@@ -113,36 +127,32 @@ describe('reading what the server wrote', () => {
     expect(readSyncStatus(status)).toEqual({ at: 1, ok: false, message: 'm' })
   })
 
-  test('the share link is built only for a publisher, only on request', () => {
+  test('the share link is built only for the machine that created the gist, only on request', () => {
     const state = scratch('state')
     writeFileSync(
       state,
-      JSON.stringify({
-        role: 'publisher',
-        gistId: ID,
-        key: KEY,
-        owner: 'octo',
-      }),
+      JSON.stringify({ creator: true, gistId: ID, key: KEY, owner: 'octo' }),
     )
     const link = readShareLink(state)
     expect(link).toBe(`https://gist.github.com/octo/${ID}#${KEY}`)
     expect(parseGistLink(link ?? '')?.id).toBe(ID)
     writeFileSync(
       state,
-      JSON.stringify({ role: 'publisher', gistId: ID, key: KEY }),
+      JSON.stringify({ creator: true, gistId: ID, key: KEY }),
     )
     expect(readShareLink(state)).toBe(`https://gist.github.com/${ID}#${KEY}`)
     writeFileSync(
       state,
-      JSON.stringify({ role: 'subscriber', gistId: ID, key: KEY }),
+      JSON.stringify({ creator: false, gistId: ID, key: KEY }),
     )
     expect(readShareLink(state)).toBeUndefined()
-    writeFileSync(state, JSON.stringify({ role: 'publisher', gistId: ID }))
+    writeFileSync(state, JSON.stringify({ gistId: ID, key: KEY }))
+    expect(readShareLink(state)).toBeUndefined()
+    writeFileSync(state, JSON.stringify({ creator: true, gistId: ID }))
     expect(readShareLink(state)).toBeUndefined()
     expect(readShareLink(scratch('none'))).toBeUndefined()
   })
 })
-
 describe('link check', () => {
   test('agrees with the server on what a gist link with a key is', () => {
     const good = [
@@ -254,49 +264,83 @@ describe('asking the server', () => {
 
 describe('display', () => {
   const NOW = 10_000_000
-  test('off, publishing, following', () => {
-    expect(syncLines({ role: null }, NOW)).toEqual(['off'])
-    expect(syncLines({ role: 'publisher' }, NOW)).toEqual(['publishing'])
+  const off: SyncView = { joined: false, creator: false }
+  const joined = (over: Partial<SyncView> = {}): SyncView => ({
+    joined: true,
+    creator: false,
+    ...over,
+  })
+
+  test('the sidebar says plainly what this machine does', () => {
+    expect(syncLines(off, NOW)).toEqual(['off'])
+    expect(syncLines(joined(), NOW)).toEqual(['syncing'])
+    expect(syncLines(joined({ write: 'ok' }), NOW)).toEqual([
+      'syncing (upload + download)',
+    ])
+    expect(syncLines(joined({ write: 'no-token' }), NOW)).toEqual([
+      'syncing (download only: no GitHub login)',
+    ])
+    expect(syncLines(joined({ write: 'denied' }), NOW)).toEqual([
+      'syncing (download only: this GitHub account cannot update the gist)',
+    ])
+    expect(syncLines(joined({ write: 'unreadable' }), NOW)).toEqual([
+      'syncing (download only: update this plugin to upload)',
+    ])
     expect(
-      syncLines({ role: 'publisher', syncedAt: NOW - 5_000 }, NOW),
-    ).toEqual(['publishing · synced just now'])
-    expect(
-      syncLines({ role: 'subscriber', syncedAt: NOW - 3 * 60_000 }, NOW),
-    ).toEqual(['following a gist · synced 3m ago'])
+      syncLines(joined({ write: 'ok', syncedAt: NOW - 5_000 }), NOW),
+    ).toEqual(['syncing (upload + download) · synced just now'])
+    expect(syncLines(joined({ syncedAt: NOW - 3 * 60_000 }), NOW)).toEqual([
+      'syncing · synced 3m ago',
+    ])
   })
 
   test('the latest outcome is shown, with a marker when it failed', () => {
     const ok = { at: 1, ok: true, message: 'Up to date.' }
     const bad = { at: 1, ok: false, message: 'The gist no longer exists.' }
-    expect(syncLines({ role: 'subscriber', status: ok }, NOW).at(-1)).toBe(
-      'Up to date.',
-    )
-    expect(syncLines({ role: 'subscriber', status: bad }, NOW).at(-1)).toBe(
+    expect(syncLines(joined({ status: ok }), NOW).at(-1)).toBe('Up to date.')
+    expect(syncLines(joined({ status: bad }), NOW).at(-1)).toBe(
       '! The gist no longer exists.',
     )
-    expect(syncLines({ role: null, status: bad }, NOW)).toEqual([
+    expect(syncLines({ ...off, status: bad }, NOW)).toEqual([
       'off',
       '! The gist no longer exists.',
     ])
   })
 
-  test('the menu depends on the role', () => {
-    const ids = (role: 'publisher' | 'subscriber' | null) =>
-      syncMenu({ role }).map((item) => item.id)
-    expect(ids(null)).toEqual(['subscribe', 'upload-new'])
-    expect(ids('publisher')).toEqual([
+  test('the menu offers what this machine can do: the link only to its creator, an upload only to a machine that can', () => {
+    const ids = (view: SyncView) => syncMenu(view).map((item) => item.id)
+    expect(ids(off)).toEqual(['subscribe', 'upload-new'])
+    expect(ids(joined({ creator: true, write: 'ok' }))).toEqual([
       'show-link',
       'upload',
+      'sync',
+      'subscribe',
       'upload-new',
       'forget',
     ])
-    expect(ids('subscriber')).toEqual(['sync', 'subscribe', 'forget'])
-    for (const role of [null, 'publisher', 'subscriber'] as const)
-      for (const item of syncMenu({ role }))
-        expect(item.title.length).toBeGreaterThan(5)
+    expect(ids(joined())).toEqual([
+      'upload',
+      'sync',
+      'subscribe',
+      'upload-new',
+      'forget',
+    ])
+    expect(ids(joined({ write: 'no-token' }))).toEqual([
+      'sync',
+      'subscribe',
+      'forget',
+    ])
+    for (const write of ['denied', 'unreadable'] as const)
+      expect(ids(joined({ write }))).toEqual([
+        'sync',
+        'subscribe',
+        'upload-new',
+        'forget',
+      ])
+    for (const item of syncMenu(joined({ creator: true, write: 'ok' })))
+      expect(item.title.length).toBeGreaterThan(5)
   })
 })
-
 function readFileSyncOrNull(path: string): string | null {
   try {
     return readFileSync(path, 'utf8')

@@ -606,12 +606,24 @@ export interface SyncStatusView {
   message: string
   reqAt?: number
 }
+/** What this machine can do besides downloading, as the server last found it. */
+export type SyncWriteView = 'ok' | 'no-token' | 'denied' | 'unreadable'
+const WRITE_VIEWS: readonly string[] = [
+  'ok',
+  'no-token',
+  'denied',
+  'unreadable',
+]
+
 export interface SyncView {
-  role: 'publisher' | 'subscriber' | null
+  /** This machine has joined a gist (created it, or followed its link). */
+  joined: boolean
+  /** It created the gist: only then may it show the link. */
+  creator: boolean
+  write?: SyncWriteView
   syncedAt?: number
   status?: SyncStatusView
 }
-
 function readJsonFile(path: string): Record<string, unknown> | undefined {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
@@ -643,33 +655,35 @@ export function readSyncStatus(
   }
 }
 
-/** Role, last sync time and latest outcome: everything the sidebar shows, and no key. */
+/** Whether this machine joined a gist, what it can do, the last sync time and the latest outcome: everything the sidebar shows, and no key. */
 export function readSyncView(
   statePath: string = SYNC_STATE_FILE,
   statusPath: string = SYNC_STATUS_FILE,
 ): SyncView {
   const state = readJsonFile(statePath)
-  const role =
-    state?.role === 'publisher' || state?.role === 'subscriber'
-      ? state.role
-      : null
+  const joined =
+    typeof state?.gistId === 'string' && typeof state.key === 'string'
   const status = readSyncStatus(statusPath)
+  const write = state?.write
   return {
-    role,
-    ...(role && isFiniteNumber(state?.syncedAt)
+    joined,
+    creator: joined && state?.creator === true,
+    ...(joined && typeof write === 'string' && WRITE_VIEWS.includes(write)
+      ? { write: write as SyncWriteView }
+      : {}),
+    ...(joined && isFiniteNumber(state?.syncedAt)
       ? { syncedAt: state.syncedAt }
       : {}),
     ...(status ? { status } : {}),
   }
 }
-
-/** The publisher's share link, read only when the user asks to see it. */
+/** The share link, read only when the user asks to see it; only the machine that created the gist has it to show. */
 export function readShareLink(
   statePath: string = SYNC_STATE_FILE,
 ): string | undefined {
   const state = readJsonFile(statePath)
   if (
-    state?.role !== 'publisher' ||
+    state?.creator !== true ||
     typeof state.gistId !== 'string' ||
     typeof state.key !== 'string'
   )
@@ -781,12 +795,19 @@ function ago(at: number, now: number): string {
   return now - at < 60_000 ? 'just now' : `${until(2 * now - at, now)} ago`
 }
 
+const WRITE_LINES: Record<SyncWriteView, string> = {
+  ok: 'syncing (upload + download)',
+  'no-token': 'syncing (download only: no GitHub login)',
+  denied: 'syncing (download only: this GitHub account cannot update the gist)',
+  unreadable: 'syncing (download only: update this plugin to upload)',
+}
+
 /** The sidebar's sync lines. */
 export function syncLines(view: SyncView, now: number): string[] {
   const lines: string[] = []
-  if (view.role === null) lines.push('off')
+  if (!view.joined) lines.push('off')
   else {
-    const verb = view.role === 'publisher' ? 'publishing' : 'following a gist'
+    const verb = view.write ? WRITE_LINES[view.write] : 'syncing'
     lines.push(
       view.syncedAt === undefined
         ? verb
@@ -803,29 +824,36 @@ export interface SyncMenuItem {
   title: string
 }
 
-/** The sync menu for the current role. */
+/**
+ * The sync menu: what this machine can do. A machine that cannot upload (no
+ * GitHub login, an account that cannot update the gist, a gist from a newer
+ * version) is offered no upload action; the sidebar says why.
+ */
 export function syncMenu(view: SyncView): SyncMenuItem[] {
-  if (view.role === 'publisher')
+  if (!view.joined)
     return [
-      { id: 'show-link', title: 'Show the share link' },
-      { id: 'upload', title: 'Upload now' },
-      { id: 'upload-new', title: 'Upload to a NEW gist (new link and key)' },
-      { id: 'forget', title: 'Stop syncing' },
+      { id: 'subscribe', title: 'Follow a gist link' },
+      {
+        id: 'upload-new',
+        title: "Create a new secret gist from this pool's static credentials",
+      },
     ]
-  if (view.role === 'subscriber')
-    return [
-      { id: 'sync', title: 'Sync now' },
-      { id: 'subscribe', title: 'Follow a different link' },
-      { id: 'forget', title: 'Stop following' },
-    ]
+  const canWrite = view.write === undefined || view.write === 'ok'
   return [
-    {
-      id: 'subscribe',
-      title: 'Follow a gist link (download only, no GitHub login)',
-    },
-    {
-      id: 'upload-new',
-      title: "Publish this pool's static credentials to a new secret gist",
-    },
+    ...(view.creator
+      ? [{ id: 'show-link' as const, title: 'Show the share link' }]
+      : []),
+    ...(canWrite ? [{ id: 'upload' as const, title: 'Upload now' }] : []),
+    { id: 'sync', title: 'Sync now' },
+    { id: 'subscribe', title: 'Follow a different link' },
+    ...(view.write === 'no-token'
+      ? []
+      : [
+          {
+            id: 'upload-new' as const,
+            title: 'Create a new gist (new link and key)',
+          },
+        ]),
+    { id: 'forget', title: 'Stop syncing' },
   ]
 }

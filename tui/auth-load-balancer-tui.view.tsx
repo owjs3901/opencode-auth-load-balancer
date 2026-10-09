@@ -31,18 +31,22 @@ import {
   utilOf,
 } from './auth-load-balancer-scoring'
 import {
+  awaitSyncResult,
   cfg,
   clearReloginTargetInPool,
   compareAscii,
   credentialTag,
   deleteFromPool,
   hasLostLogin,
+  isGistLinkShape,
   lostLoginLines,
   MANUAL_DISABLED_REASON,
   pct,
   pickAuthMethodIndex,
   type PoolShape,
   readPool,
+  readShareLink,
+  readSyncView,
   renameInPool,
   rowWarnings,
   sessionAccountId,
@@ -50,10 +54,15 @@ import {
   setDisabledInPool,
   setReloginTargetInPool,
   stateOf,
+  type SyncAction,
+  syncLines,
+  syncMenu,
+  type SyncMenuId,
   tierResets,
   toScore,
   until,
   winPct,
+  writeSyncIntent,
 } from './auth-load-balancer-tui.logic'
 
 // NOTE: ships its OWN copy of `src/status.ts`'s `PROVIDER_NAMES` by design —
@@ -116,6 +125,14 @@ function usePool() {
   const timer = setInterval(() => setSample(pollSample()), POLL_MS)
   onCleanup(() => clearInterval(timer))
   return sample
+}
+
+/** One poll sample of the sync state: role, last sync, latest outcome (never the key). */
+function useSync() {
+  const [view, setView] = createSignal(readSyncView())
+  const timer = setInterval(() => setView(readSyncView()), POLL_MS)
+  onCleanup(() => clearInterval(timer))
+  return view
 }
 
 /** Shared theme-color accessor used identically by `BottomBar` and `SidebarPanel`. */
@@ -238,6 +255,7 @@ function SidebarPanel(props: {
   sessionId: string | undefined
 }) {
   const sample = usePool()
+  const sync = useSync()
   const color = themeColor(props.api)
   const groups = createMemo<Group[]>(() => {
     const { pool: p, now } = sample()
@@ -459,6 +477,50 @@ function SidebarPanel(props: {
     }
   }
 
+  function showMenu(
+    title: string,
+    items: readonly { title: string; run: () => void }[],
+  ): void {
+    dialog().replace(() => {
+      const c = color()
+      const [hovered, setHovered] = createSignal(-1)
+      return (
+        <box
+          gap={1}
+          paddingBottom={1}
+          paddingLeft={4}
+          paddingRight={4}
+          paddingTop={1}
+        >
+          <box flexDirection="row" justifyContent="space-between">
+            <text fg={c.text}>
+              <b>{title}</b>
+            </text>
+            <text fg={c.textMuted} onMouseUp={() => dialog().clear()}>
+              esc
+            </text>
+          </box>
+          <box>
+            <For each={items}>
+              {(item, i) => (
+                <box
+                  onMouseMove={() => setHovered(i())}
+                  onMouseUp={() => item.run()}
+                  paddingLeft={1}
+                  paddingRight={1}
+                >
+                  <text fg={hovered() === i() ? c.primary : c.text}>
+                    {item.title}
+                  </text>
+                </box>
+              )}
+            </For>
+          </box>
+        </box>
+      )
+    })
+  }
+
   // Click an account -> a small menu so Rename, Disable/Enable, Re-login, pairing, and
   // Delete are all reachable. Deliberately NOT api.ui.DialogSelect: that always renders an
   // auto-focused filter <input>, and a focused opentui input swallows the FIRST
@@ -522,110 +584,174 @@ function SidebarPanel(props: {
       })),
       { title: 'Delete — remove from pool', run: () => openDelete(id, label) },
     ]
-    dialog().replace(() => {
-      const c = color()
-      const [hovered, setHovered] = createSignal(-1)
-      return (
-        <box
-          gap={1}
-          paddingBottom={1}
-          paddingLeft={4}
-          paddingRight={4}
-          paddingTop={1}
-        >
-          <box flexDirection="row" justifyContent="space-between">
-            <text fg={c.text}>
-              <b>{label}</b>
-            </text>
-            <text fg={c.textMuted} onMouseUp={() => dialog().clear()}>
-              esc
-            </text>
-          </box>
-          <box>
-            <For each={items}>
-              {(item, i) => (
-                <box
-                  onMouseMove={() => setHovered(i())}
-                  onMouseUp={() => item.run()}
-                  paddingLeft={1}
-                  paddingRight={1}
-                >
-                  <text fg={hovered() === i() ? c.primary : c.text}>
-                    {item.title}
-                  </text>
-                </box>
-              )}
-            </For>
-          </box>
-        </box>
-      )
+    showMenu(label, items)
+  }
+
+  /**
+   * Ask the server for a sync action and report its outcome. The toast carries
+   * the server's own message, which never holds the link; only `showLink`,
+   * which the user chose, opens the link in a dialog.
+   */
+  async function runSync(
+    action: SyncAction,
+    link?: string,
+    showLink = false,
+  ): Promise<void> {
+    dialog().clear()
+    const at = writeSyncIntent(action, link)
+    if (action === 'forget') return
+    const status = await awaitSyncResult(at)
+    props.api.ui.toast({
+      variant: status?.ok ? 'success' : 'error',
+      message: status?.message ?? 'Sync is taking longer than expected.',
     })
+    const shared = status?.ok && showLink ? readShareLink() : undefined
+    if (shared) openLink(shared)
+  }
+
+  function openLink(link: string): void {
+    dialog().replace(() =>
+      props.api.ui.DialogAlert({
+        title: 'Share link',
+        message: `${link}\n\nOpen opencode on another machine, choose Sync here, and paste this. Anyone holding it can read these credentials: if it leaks, delete the gist and upload again for a new link.`,
+        onConfirm: () => dialog().clear(),
+      }),
+    )
+  }
+
+  function openSubscribe(): void {
+    dialog().replace(() =>
+      props.api.ui.DialogPrompt({
+        title: 'Follow a gist link',
+        placeholder: 'https://gist.github.com/<user>/<id>#<key>',
+        onConfirm: (text: string) => {
+          if (isGistLinkShape(text)) void runSync('subscribe', text)
+          else {
+            dialog().clear()
+            props.api.ui.toast({
+              variant: 'error',
+              message: 'That is not a gist link with a key.',
+            })
+          }
+        },
+        onCancel: () => dialog().clear(),
+      }),
+    )
+  }
+
+  function openForget(): void {
+    dialog().replace(() =>
+      props.api.ui.DialogConfirm({
+        title: 'Stop syncing',
+        message:
+          'Stop syncing with the gist? Accounts already imported stay in the pool; the gist itself is not deleted.',
+        onConfirm: () => void runSync('forget'),
+        onCancel: () => dialog().clear(),
+      }),
+    )
+  }
+
+  const syncRuns: Record<SyncMenuId, () => void> = {
+    'show-link': () => {
+      const link = readShareLink()
+      if (link) openLink(link)
+    },
+    upload: () => void runSync('upload'),
+    'upload-new': () => void runSync('upload-new', undefined, true),
+    sync: () => void runSync('sync'),
+    subscribe: openSubscribe,
+    forget: openForget,
+  }
+
+  function openSyncMenu(): void {
+    showMenu(
+      'Gist sync',
+      syncMenu(sync()).map((item) => ({
+        title: item.title,
+        run: syncRuns[item.id],
+      })),
+    )
   }
 
   return (
-    <Show when={groups().length > 0}>
-      <box>
+    <box>
+      <Show when={groups().length > 0}>
+        <box>
+          <text fg={color().text}>
+            <b>Auth accounts</b>
+            <span style={{ fg: color().textMuted }}>
+              {' '}
+              (click: rename / disable / re-login / delete)
+            </span>
+          </text>
+          <For each={groups()}>
+            {(g) => (
+              <box>
+                <text fg={color().textMuted}>{g.provider}</text>
+                <For each={g.rows}>
+                  {(r) => (
+                    <box onMouseUp={() => openMenu(r)}>
+                      <text
+                        fg={
+                          r.manuallyDisabled
+                            ? color().textMuted
+                            : r.current
+                              ? color().primary
+                              : color().text
+                        }
+                        wrapMode="word"
+                      >
+                        {(r.current ? '▶ ' : '  ') +
+                          (r.rank ? `${r.rank}. ` : '  ') +
+                          r.label}
+                        <Show when={r.login}>
+                          <span style={{ fg: color().textMuted }}>
+                            {` [${r.login}]`}
+                          </span>
+                        </Show>
+                        <Show when={r.score !== null}>
+                          <span style={{ fg: color().secondary }}>
+                            {`  ${(r.score ?? 0).toFixed(2)}`}
+                          </span>
+                        </Show>
+                        <Show when={r.state}>
+                          <span
+                            style={{ fg: color().warning }}
+                          >{` (${r.state})`}</span>
+                        </Show>
+                      </text>
+                      <text fg={color().textMuted}>
+                        {`      wk ${r.weeklyPct} (${r.weeklyReset}) · 5h ${r.hourlyPct} (${r.hourlyReset})`}
+                      </text>
+                      <For each={r.lostLines}>
+                        {(line) => (
+                          <text fg={color().textMuted} wrapMode="word">
+                            {`      ${line}`}
+                          </text>
+                        )}
+                      </For>
+                    </box>
+                  )}
+                </For>
+              </box>
+            )}
+          </For>
+        </box>
+      </Show>
+      <box onMouseUp={openSyncMenu}>
         <text fg={color().text}>
-          <b>Auth accounts</b>
-          <span style={{ fg: color().textMuted }}>
-            {' '}
-            (click: rename / disable / re-login / delete)
-          </span>
+          <b>Gist sync</b>
+          <span style={{ fg: color().textMuted }}> (click)</span>
         </text>
-        <For each={groups()}>
-          {(g) => (
-            <box>
-              <text fg={color().textMuted}>{g.provider}</text>
-              <For each={g.rows}>
-                {(r) => (
-                  <box onMouseUp={() => openMenu(r)}>
-                    <text
-                      fg={
-                        r.manuallyDisabled
-                          ? color().textMuted
-                          : r.current
-                            ? color().primary
-                            : color().text
-                      }
-                      wrapMode="word"
-                    >
-                      {(r.current ? '▶ ' : '  ') +
-                        (r.rank ? `${r.rank}. ` : '  ') +
-                        r.label}
-                      <Show when={r.login}>
-                        <span style={{ fg: color().textMuted }}>
-                          {` [${r.login}]`}
-                        </span>
-                      </Show>
-                      <Show when={r.score !== null}>
-                        <span style={{ fg: color().secondary }}>
-                          {`  ${(r.score ?? 0).toFixed(2)}`}
-                        </span>
-                      </Show>
-                      <Show when={r.state}>
-                        <span
-                          style={{ fg: color().warning }}
-                        >{` (${r.state})`}</span>
-                      </Show>
-                    </text>
-                    <text fg={color().textMuted}>
-                      {`      wk ${r.weeklyPct} (${r.weeklyReset}) · 5h ${r.hourlyPct} (${r.hourlyReset})`}
-                    </text>
-                    <For each={r.lostLines}>
-                      {(line) => (
-                        <text fg={color().textMuted} wrapMode="word">
-                          {`      ${line}`}
-                        </text>
-                      )}
-                    </For>
-                  </box>
-                )}
-              </For>
-            </box>
+        <For each={syncLines(sync(), sample().now)}>
+          {(line) => (
+            <text fg={color().textMuted} wrapMode="word">
+              {`  ${line}`}
+            </text>
           )}
         </For>
       </box>
-    </Show>
+    </box>
   )
 }
 

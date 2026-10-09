@@ -11,7 +11,7 @@
  */
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import {
   displayUtil,
@@ -577,4 +577,214 @@ export function stateOf(
   if (tiers.length > 0)
     return tiers.map(([tier, at]) => `${tier} ${until(at, now)}`).join(' · ')
   return ''
+}
+
+// ---------------------------------------------------------------------------
+// Gist sync. The server runs it; the TUI only asks (an intent file beside the
+// pool, which the server claims and deletes) and shows what comes back. None
+// of this may put the share link anywhere but the dialog the user asked for.
+// ---------------------------------------------------------------------------
+
+const DATA_DIR = dirname(POOL_FILE)
+export const SYNC_STATE_FILE = join(DATA_DIR, 'auth-load-balancer-sync.json')
+export const SYNC_STATUS_FILE = join(
+  DATA_DIR,
+  'auth-load-balancer-sync-status.json',
+)
+export const SYNC_INTENT_FILE = join(
+  DATA_DIR,
+  'auth-load-balancer-sync-intent.json',
+)
+
+export type SyncAction =
+  'upload' | 'upload-new' | 'subscribe' | 'sync' | 'forget'
+export type SyncMenuId = SyncAction | 'show-link'
+
+export interface SyncStatusView {
+  at: number
+  ok: boolean
+  message: string
+  reqAt?: number
+}
+export interface SyncView {
+  role: 'publisher' | 'subscriber' | null
+  syncedAt?: number
+  status?: SyncStatusView
+}
+
+function readJsonFile(path: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    return isPlainRecordValue(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The latest outcome the server wrote, or undefined. */
+export function readSyncStatus(
+  path: string = SYNC_STATUS_FILE,
+): SyncStatusView | undefined {
+  const raw = readJsonFile(path)
+  if (
+    !raw ||
+    !isFiniteNumber(raw.at) ||
+    typeof raw.ok !== 'boolean' ||
+    typeof raw.message !== 'string'
+  )
+    return undefined
+  return {
+    at: raw.at,
+    ok: raw.ok,
+    message: raw.message,
+    ...(isFiniteNumber(raw.reqAt) ? { reqAt: raw.reqAt } : {}),
+  }
+}
+
+/** Role, last sync time and latest outcome: everything the sidebar shows, and no key. */
+export function readSyncView(
+  statePath: string = SYNC_STATE_FILE,
+  statusPath: string = SYNC_STATUS_FILE,
+): SyncView {
+  const state = readJsonFile(statePath)
+  const role =
+    state?.role === 'publisher' || state?.role === 'subscriber'
+      ? state.role
+      : null
+  const status = readSyncStatus(statusPath)
+  return {
+    role,
+    ...(role && isFiniteNumber(state?.syncedAt)
+      ? { syncedAt: state.syncedAt }
+      : {}),
+    ...(status ? { status } : {}),
+  }
+}
+
+/** The publisher's share link, read only when the user asks to see it. */
+export function readShareLink(
+  statePath: string = SYNC_STATE_FILE,
+): string | undefined {
+  const state = readJsonFile(statePath)
+  if (
+    state?.role !== 'publisher' ||
+    typeof state.gistId !== 'string' ||
+    typeof state.key !== 'string'
+  )
+    return undefined
+  const owner = typeof state.owner === 'string' ? `${state.owner}/` : ''
+  return `https://gist.github.com/${owner}${state.gistId}#${state.key}`
+}
+
+/** Mirror of the server's link check, so a typo is caught before it is sent. */
+export function isGistLinkShape(text: string): boolean {
+  return /^https:\/\/gist\.github\.com\/(?:[\w-]{1,39}\/)?[\da-f]{20,40}#[\w-]{43}$/i.test(
+    text.trim(),
+  )
+}
+
+/**
+ * Ask the server to do `action`. Written atomically (temp + rename) with an
+ * owner-only mode; a `subscribe` carries the link, so the server deletes the
+ * file the moment it reads it. Returns the request's timestamp, which the
+ * server echoes in its outcome.
+ */
+export function writeSyncIntent(
+  action: SyncAction,
+  link?: string,
+  now: number = Date.now(),
+  path: string = SYNC_INTENT_FILE,
+  ops: FsOps = realFsOps,
+): number {
+  const tmp = `${path}.${process.pid}.${now}.tmp`
+  try {
+    ops.writeFileSync(
+      tmp,
+      JSON.stringify({
+        action,
+        at: now,
+        ...(link ? { link: link.trim() } : {}),
+      }),
+      { mode: 0o600 },
+    )
+    ops.renameSync(tmp, path)
+  } catch {
+    try {
+      ops.unlinkSync(tmp)
+    } catch {
+      /* ignore — best-effort cleanup */
+    }
+  }
+  return now
+}
+
+/** The outcome answering the request stamped `since`, or null when the server does not answer in time. */
+export async function awaitSyncResult(
+  since: number,
+  read: () => SyncStatusView | undefined = readSyncStatus,
+  sleep: (ms: number) => Promise<unknown> = (ms) => Bun.sleep(ms),
+  timeoutMs = 25_000,
+  stepMs = 500,
+): Promise<SyncStatusView | null> {
+  for (let waited = 0; waited <= timeoutMs; waited += stepMs) {
+    const status = read()
+    if (status?.reqAt === since) return status
+    await sleep(stepMs)
+  }
+  return null
+}
+
+function ago(at: number, now: number): string {
+  return now - at < 60_000 ? 'just now' : `${until(2 * now - at, now)} ago`
+}
+
+/** The sidebar's sync lines. */
+export function syncLines(view: SyncView, now: number): string[] {
+  const lines: string[] = []
+  if (view.role === null) lines.push('off')
+  else {
+    const verb = view.role === 'publisher' ? 'publishing' : 'following a gist'
+    lines.push(
+      view.syncedAt === undefined
+        ? verb
+        : `${verb} · synced ${ago(view.syncedAt, now)}`,
+    )
+  }
+  if (view.status)
+    lines.push(`${view.status.ok ? '' : '! '}${view.status.message}`)
+  return lines
+}
+
+export interface SyncMenuItem {
+  id: SyncMenuId
+  title: string
+}
+
+/** The sync menu for the current role. */
+export function syncMenu(view: SyncView): SyncMenuItem[] {
+  if (view.role === 'publisher')
+    return [
+      { id: 'show-link', title: 'Show the share link' },
+      { id: 'upload', title: 'Upload now' },
+      { id: 'upload-new', title: 'Upload to a NEW gist (new link and key)' },
+      { id: 'forget', title: 'Stop syncing' },
+    ]
+  if (view.role === 'subscriber')
+    return [
+      { id: 'sync', title: 'Sync now' },
+      { id: 'subscribe', title: 'Follow a different link' },
+      { id: 'forget', title: 'Stop following' },
+    ]
+  return [
+    {
+      id: 'subscribe',
+      title: 'Follow a gist link (download only, no GitHub login)',
+    },
+    {
+      id: 'upload-new',
+      title: "Publish this pool's static credentials to a new secret gist",
+    },
+  ]
 }

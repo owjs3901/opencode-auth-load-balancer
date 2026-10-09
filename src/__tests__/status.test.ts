@@ -212,6 +212,90 @@ describe('renderStatus', () => {
     expect(out).not.toContain('re-login')
   })
 
+  /** The state column of the table row whose label is `id`. */
+  const stateIn = (out: string, id: string) =>
+    out
+      .split('\n')
+      .find((line) => line.includes(` ${id} `))
+      ?.split(/\s{2,}/)
+      .at(-1)
+
+  test('tags a setup-token row with the logins it holds; any other row is untagged', () => {
+    const p = pool([
+      { ...acc({ id: 'paired' }), inferenceToken: 'tok-1' },
+      { ...acc({ id: 'token-only' }), inferenceToken: 'tok-2', refresh: '' },
+      acc({ id: 'oauth-only' }),
+    ])
+
+    const out = renderStatus(buildStatus(p, NOW), NOW)
+
+    expect(stateIn(out, 'paired')).toBe('ready · token+oauth')
+    expect(stateIn(out, 'token-only')).toBe('ready · token')
+    expect(stateIn(out, 'oauth-only')).toBe('ready')
+  })
+
+  test('a lost half of a row still in service is flagged, with when and why under the table', () => {
+    const p = pool([
+      {
+        ...acc({ id: 'lost-oauth' }),
+        inferenceToken: 'tok',
+        refresh: '',
+        lostLogins: {
+          oauth: { at: NOW - 3 * HOUR, reason: '400 invalid_grant: expired' },
+        },
+      },
+      {
+        ...acc({ id: 'lost-token' }),
+        lostLogins: { token: { at: NOW - 30_000, reason: '401 revoked' } },
+      },
+    ])
+
+    const out = renderStatus(buildStatus(p, NOW), NOW)
+
+    expect(stateIn(out, 'lost-oauth')).toBe('ready · token · oauth re-login')
+    expect(stateIn(out, 'lost-token')).toBe('ready · token re-login')
+    expect(out).toContain(
+      '! lost-oauth: OAuth login lost 3h ago — 400 invalid_grant: expired',
+    )
+    expect(out).toContain('! lost-token: token lost just now — 401 revoked')
+  })
+
+  test('an OAuth login in its last 3 days warns how many days it has left', () => {
+    const p = pool([
+      { ...acc({ id: 'soon' }), refreshExpires: NOW + 2 * 24 * HOUR - HOUR },
+      { ...acc({ id: 'later' }), refreshExpires: NOW + 4 * 24 * HOUR },
+      { ...acc({ id: 'past' }), refreshExpires: NOW - HOUR },
+      {
+        ...acc({ id: 'no-oauth' }),
+        refresh: '',
+        refreshExpires: NOW + HOUR,
+      },
+    ])
+
+    const out = renderStatus(buildStatus(p, NOW), NOW)
+
+    expect(stateIn(out, 'soon')).toBe('ready · oauth expires 2d')
+    for (const id of ['later', 'past', 'no-oauth'])
+      expect(stateIn(out, id)).toBe('ready')
+  })
+
+  test('a parked row shows no login warnings, only its state and why it was parked', () => {
+    const p = pool([
+      {
+        ...acc({ id: 'parked', disabled: 'invalid_grant: re-login required' }),
+        refreshExpires: NOW + HOUR,
+        lostLogins: { oauth: { at: NOW - HOUR, reason: '400 invalid_grant' } },
+      },
+    ])
+
+    const out = renderStatus(buildStatus(p, NOW), NOW)
+
+    expect(stateIn(out, 'parked')).toBe('re-login')
+    expect(out).toContain(
+      '! parked: OAuth login lost 60m ago — 400 invalid_grant',
+    )
+  })
+
   test('floors a sub-minute future cooldown at 1m (never "0m")', () => {
     // 20s from now would Math.round to 0 -> "cooldown 0m", which reads as
     // "already done" while '-' is reserved for actually elapsed times.

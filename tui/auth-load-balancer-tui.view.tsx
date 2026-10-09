@@ -12,7 +12,8 @@
  *     per provider, sorted by the scheduler's score (highest = use next), showing
  *     the score + use-order, usage + reset countdowns, in-use marker, and state.
  *     Click any account row for a menu to Rename (prompt), Disable/Enable
- *     (toggle), Re-login (provider OAuth), or Delete (confirm) it.
+ *     (toggle), Re-login (provider OAuth), pair a Claude row's other login
+ *     (setup-token for inference / OAuth for usage), or Delete (confirm) it.
  *
  * The ranking is computed by the SAME code the server scheduler uses — imported from a
  * byte-identical copy of src/scheduler/score-core.ts installed alongside this file
@@ -33,13 +34,17 @@ import {
   cfg,
   clearReloginTargetInPool,
   compareAscii,
+  credentialTag,
   deleteFromPool,
+  hasLostLogin,
+  lostLoginLines,
   MANUAL_DISABLED_REASON,
   pct,
   pickAuthMethodIndex,
   type PoolShape,
   readPool,
   renameInPool,
+  rowWarnings,
   sessionAccountId,
   sessionFallback,
   setDisabledInPool,
@@ -131,6 +136,8 @@ interface Chip extends WindowDisplay {
   label: string
   /** Raw model ids (requested → served) when this session runs on a fallback model, else undefined. */
   fallback?: { from: string; to: string }
+  /** `<label> <warning>` for each login warning on this provider's rows (`rowWarnings`). */
+  warnings: string[]
 }
 
 /** Always-visible bottom bar (app_bottom): the in-use account per provider. */
@@ -167,6 +174,9 @@ function BottomBar(props: { api: TuiPluginApi }) {
         // Only THIS session's fallback (keyed by sid); the `lastSelected` home-screen
         // fallback path has no session, so no downgrade to surface there.
         fallback: sessionFallback(p, providerID, sid),
+        warnings: accounts
+          .filter((x) => x.providerID === providerID)
+          .flatMap((x) => rowWarnings(x, now).map((w) => `${x.label} ${w}`)),
       })
     }
     return out
@@ -186,6 +196,11 @@ function BottomBar(props: { api: TuiPluginApi }) {
               </span>
             ) : null}
             {`  wk ${a.weeklyPct} (${a.weeklyReset}) · 5h ${a.hourlyPct} (${a.hourlyReset})`}
+            {a.warnings.length > 0 ? (
+              <span style={{ fg: color().warning }}>
+                {`  ! ${a.warnings.join(' · ')}`}
+              </span>
+            ) : null}
           </text>
         )}
       </For>
@@ -202,8 +217,15 @@ interface Row extends WindowDisplay {
   rank: number | null
   state: string
   manuallyDisabled: boolean
-  /** A static API-key row: re-login asks for a new key, not an OAuth sign-in. */
+  /** A static-credential row (API key, setup-token): re-login asks for a new one, not an OAuth sign-in. */
   apiKey: boolean
+  /** `credentialTag`: `token` / `token+oauth` on a setup-token row, else ''. */
+  login: string
+  /** A login of this row was refused for good: its menu offers to re-login that one. */
+  oauthLost: boolean
+  tokenLost: boolean
+  /** Why each lost login stopped working (`lostLoginLines`). */
+  lostLines: string[]
 }
 interface Group {
   provider: string
@@ -266,9 +288,15 @@ function SidebarPanel(props: {
           // Raw reads are finiteness-guarded inside tierResets: a hand-edited
           // `1e999` entry (Infinity via JSON.parse) would otherwise render its
           // tier annotation forever until the server heals the file.
-          state: stateOf(sa, tierResets(a, now), now),
+          state: [stateOf(sa, tierResets(a, now), now), ...rowWarnings(a, now)]
+            .filter(Boolean)
+            .join(' · '),
           manuallyDisabled: a.disabledReason === MANUAL_DISABLED_REASON,
           apiKey: a.refresh === '',
+          login: credentialTag(a),
+          oauthLost: hasLostLogin(a, 'oauth'),
+          tokenLost: hasLostLogin(a, 'token'),
+          lostLines: lostLoginLines(a, now),
         }
       })
       return { provider: providerLabel(providerID), rows }
@@ -307,17 +335,22 @@ function SidebarPanel(props: {
     )
   }
 
+  /**
+   * Run one of the provider's pooled logins onto the clicked row:
+   * `staticLogin` picks the setup-token / API-key login, else the OAuth one.
+   * `action` names the step in the dialog and toasts ("Re-login", …).
+   */
   async function openRelogin(
-    id: string,
-    label: string,
-    providerID: string,
-    apiKey: boolean,
+    row: Row,
+    staticLogin: boolean,
+    action: string,
   ): Promise<void> {
+    const { id, label, providerID } = row
     try {
       const methods = (await props.api.client.provider.auth()).data?.[
         providerID
       ]
-      const method = pickAuthMethodIndex(methods, apiKey)
+      const method = pickAuthMethodIndex(methods, staticLogin)
       if (method === null) {
         props.api.ui.toast({
           variant: 'error',
@@ -355,7 +388,7 @@ function SidebarPanel(props: {
           if (completed) {
             props.api.ui.toast({
               variant: 'success',
-              message: `Re-login complete for ${label}.`,
+              message: `${action} complete for ${label}.`,
             })
             // The existing 3s usePool poll observes the consumed intent and
             // cleared disabledReason; no manual state refresh is needed.
@@ -363,7 +396,7 @@ function SidebarPanel(props: {
             clearReloginTargetInPool()
             props.api.ui.toast({
               variant: 'error',
-              message: `Re-login failed for ${label}.`,
+              message: `${action} failed for ${label}.`,
             })
           }
           dialog().clear()
@@ -372,7 +405,7 @@ function SidebarPanel(props: {
           dialog().clear()
           props.api.ui.toast({
             variant: 'error',
-            message: `Re-login failed for ${label}.`,
+            message: `${action} failed for ${label}.`,
           })
         }
       }
@@ -382,7 +415,7 @@ function SidebarPanel(props: {
         // to approve it for as long as the callback waits.
         dialog().replace(() =>
           props.api.ui.DialogAlert({
-            title: `Re-login "${label}"`,
+            title: `${action} "${label}"`,
             message: `${auth.instructions}\n\n${auth.url}`,
             onConfirm: () => dialog().clear(),
           }),
@@ -393,7 +426,7 @@ function SidebarPanel(props: {
 
       dialog().replace(() =>
         props.api.ui.DialogPrompt({
-          title: `Re-login "${label}"`,
+          title: `${action} "${label}"`,
           description: () => (
             <box>
               <text>{auth.instructions}</text>
@@ -421,25 +454,53 @@ function SidebarPanel(props: {
       dialog().clear()
       props.api.ui.toast({
         variant: 'error',
-        message: `Re-login failed for ${label}.`,
+        message: `${action} failed for ${label}.`,
       })
     }
   }
 
-  // Click an account -> a small menu so Rename, Disable/Enable, Re-login, and Delete are
-  // all reachable. Deliberately NOT api.ui.DialogSelect: that always renders an
+  // Click an account -> a small menu so Rename, Disable/Enable, Re-login, pairing, and
+  // Delete are all reachable. Deliberately NOT api.ui.DialogSelect: that always renders an
   // auto-focused filter <input>, and a focused opentui input swallows the FIRST
   // Esc (to blur itself) — so the menu needed TWO Esc presses to close. A plain
   // clickable list has no input, so the dialog stack's own Esc binding closes it
   // in ONE press. The menu is opened by a mouse click on the row, so mouse-driven
   // options stay consistent (there is no keyboard path that opens it).
-  function openMenu(
-    id: string,
-    label: string,
-    providerID: string,
-    manuallyDisabled: boolean,
-    apiKey: boolean,
-  ): void {
+  function openMenu(row: Row): void {
+    const { id, label, manuallyDisabled } = row
+    // A Claude row holds two logins — a setup-token serving inference, an
+    // OAuth login measuring usage (and serving inference without a token) —
+    // so it gets one item per login instead of an ambiguous "Re-login".
+    const hasOAuth = !row.apiKey
+    const hasToken = row.login !== ''
+    const logins =
+      row.providerID === 'anthropic'
+        ? [
+            {
+              action:
+                hasOAuth || row.oauthLost
+                  ? 'Re-login OAuth'
+                  : 'Add OAuth login',
+              role: hasToken ? 'usage' : 'inference + usage',
+              staticLogin: false,
+            },
+            {
+              action: hasToken
+                ? 'Replace setup-token'
+                : row.tokenLost
+                  ? 'Re-login setup-token'
+                  : 'Add setup-token',
+              role: 'inference',
+              staticLogin: true,
+            },
+          ]
+        : [
+            {
+              action: 'Re-login',
+              role: 're-authorize with the provider',
+              staticLogin: row.apiKey,
+            },
+          ]
     const items: { title: string; run: () => void }[] = [
       { title: 'Rename', run: () => openRename(id, label) },
       {
@@ -453,12 +514,12 @@ function SidebarPanel(props: {
           dialog().clear()
         },
       },
-      {
-        title: 'Re-login — re-authorize with the provider',
+      ...logins.map(({ action, role, staticLogin }) => ({
+        title: `${action} — ${role}`,
         run: () => {
-          void openRelogin(id, label, providerID, apiKey)
+          void openRelogin(row, staticLogin, action)
         },
-      },
+      })),
       { title: 'Delete — remove from pool', run: () => openDelete(id, label) },
     ]
     dialog().replace(() => {
@@ -517,17 +578,7 @@ function SidebarPanel(props: {
               <text fg={color().textMuted}>{g.provider}</text>
               <For each={g.rows}>
                 {(r) => (
-                  <box
-                    onMouseUp={() =>
-                      openMenu(
-                        r.id,
-                        r.label,
-                        r.providerID,
-                        r.manuallyDisabled,
-                        r.apiKey,
-                      )
-                    }
-                  >
+                  <box onMouseUp={() => openMenu(r)}>
                     <text
                       fg={
                         r.manuallyDisabled
@@ -541,6 +592,11 @@ function SidebarPanel(props: {
                       {(r.current ? '▶ ' : '  ') +
                         (r.rank ? `${r.rank}. ` : '  ') +
                         r.label}
+                      <Show when={r.login}>
+                        <span style={{ fg: color().textMuted }}>
+                          {` [${r.login}]`}
+                        </span>
+                      </Show>
                       <Show when={r.score !== null}>
                         <span style={{ fg: color().secondary }}>
                           {`  ${(r.score ?? 0).toFixed(2)}`}
@@ -555,6 +611,13 @@ function SidebarPanel(props: {
                     <text fg={color().textMuted}>
                       {`      wk ${r.weeklyPct} (${r.weeklyReset}) · 5h ${r.hourlyPct} (${r.hourlyReset})`}
                     </text>
+                    <For each={r.lostLines}>
+                      {(line) => (
+                        <text fg={color().textMuted} wrapMode="word">
+                          {`      ${line}`}
+                        </text>
+                      )}
+                    </For>
                   </box>
                 )}
               </For>

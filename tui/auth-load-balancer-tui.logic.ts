@@ -62,8 +62,18 @@ export interface PoolAccount {
   /** LEGACY pre-tier-map field (folded into `modelCooldownsUntil.opus` for display until the server migrates the file). */
   opusCooldownUntil?: number
   disabledReason?: string | null
-  /** Empty on a static API-key row (Kimi Code), which re-logs in with a new key. */
+  /** Empty on a static-credential row (Kimi Code API key, Claude setup-token), which re-logs in with a new one. */
   refresh?: string
+  /** A Claude setup-token serving the row's inference; only its presence is read. */
+  inferenceToken?: string
+  /** Logins refused for good, with when and why (`src/types.ts` `LostLogins`). */
+  lostLogins?: { oauth?: LostLogin | null; token?: LostLogin | null } | null
+  /** epoch ms the row's OAuth login itself expires. */
+  refreshExpires?: number
+}
+export interface LostLogin {
+  at?: number
+  reason?: string
 }
 /** Loosely-typed view of the on-disk pool JSON (one shape for reads AND read-modify-writes). */
 export interface PoolShape {
@@ -278,8 +288,9 @@ export function clearReloginTargetInPool(path: string = POOL_FILE): void {
  * opencode aggregates auth methods from every plugin registered for a provider,
  * so this plugin's position is not stable. Prefer its pooled-login label, then
  * fall back to the provider's first OAuth method when no such label is present.
- * A provider can offer both an account login and an API-key login (Kimi
- * Code), so `apiKey` picks the kind that matches how the row was added.
+ * A provider can offer both an account login and a static-credential login
+ * (Kimi Code's API key, Claude's `claude setup-token`), so `apiKey` picks the
+ * kind that matches how the row was added.
  */
 export function pickAuthMethodIndex(
   methods: readonly { type?: string; label?: string }[] | undefined,
@@ -288,16 +299,82 @@ export function pickAuthMethodIndex(
   const pooled = (method: { type?: string; label?: string }): boolean =>
     method.type === 'oauth' &&
     (method.label?.toLowerCase().includes('load balancer') ?? false)
+  const staticLogin = (method: { label?: string }): boolean => {
+    const label = method.label?.toLowerCase() ?? ''
+    return label.includes('api key') || label.includes('setup-token')
+  }
   const sameKind = methods?.findIndex(
-    (method) =>
-      pooled(method) &&
-      (method.label?.toLowerCase().includes('api key') ?? false) === apiKey,
+    (method) => pooled(method) && staticLogin(method) === apiKey,
   )
   if (sameKind !== undefined && sameKind >= 0) return sameKind
   const anyPooled = methods?.findIndex(pooled)
   if (anyPooled !== undefined && anyPooled >= 0) return anyPooled
   const oauth = methods?.findIndex((method) => method.type === 'oauth')
   return oauth !== undefined && oauth >= 0 ? oauth : null
+}
+
+/**
+ * A setup-token row's credentials — `token`, or `token+oauth` once paired
+ * with its OAuth login — and '' for any other row. Mirrors `src/status.ts`.
+ */
+export function credentialTag(a: PoolAccount): string {
+  if (typeof a.inferenceToken !== 'string' || a.inferenceToken === '') return ''
+  return a.refresh ? 'token+oauth' : 'token'
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+/** NOTE: copy of `src/status.ts`'s threshold — Claude Code's own 3-day login-expiry warning. */
+const LOGIN_EXPIRY_WARNING_MS = 3 * DAY_MS
+
+/** A well-formed lost-login record from the RAW pool file, or undefined. */
+function lostLoginOf(
+  a: PoolAccount,
+  login: 'oauth' | 'token',
+): { at: number; reason: string } | undefined {
+  const lost = a.lostLogins?.[login]
+  return lost && isFiniteNumber(lost.at) && typeof lost.reason === 'string'
+    ? { at: lost.at, reason: lost.reason }
+    : undefined
+}
+
+export function hasLostLogin(
+  a: PoolAccount,
+  login: 'oauth' | 'token',
+): boolean {
+  return lostLoginOf(a, login) !== undefined
+}
+
+/**
+ * Login trouble on a row still in service — `oauth re-login` / `token
+ * re-login` for a lost half of a paired row, `oauth expires Nd` for an OAuth
+ * login in its last days. A parked row shows none: its state already reads
+ * `re-login` / `disabled`. Mirrors `src/status.ts`.
+ */
+export function rowWarnings(a: PoolAccount, now: number): string[] {
+  if (a.disabledReason) return []
+  const warnings: string[] = []
+  if (hasLostLogin(a, 'oauth')) warnings.push('oauth re-login')
+  if (hasLostLogin(a, 'token')) warnings.push('token re-login')
+  const left = (isFiniteNumber(a.refreshExpires) ? a.refreshExpires : 0) - now
+  if (a.refresh && left > 0 && left <= LOGIN_EXPIRY_WARNING_MS)
+    warnings.push(`oauth expires ${Math.ceil(left / DAY_MS)}d`)
+  return warnings
+}
+
+/** Why each lost login stopped working, one line apiece (the dashboard's `!` lines). */
+export function lostLoginLines(a: PoolAccount, now: number): string[] {
+  const lines: string[] = []
+  for (const login of ['oauth', 'token'] as const) {
+    const lost = lostLoginOf(a, login)
+    if (lost) {
+      const ago =
+        now - lost.at < 60_000
+          ? 'just now'
+          : `${until(2 * now - lost.at, now)} ago`
+      lines.push(`${login} lost ${ago}: ${lost.reason}`)
+    }
+  }
+  return lines
 }
 
 export function renameInPool(

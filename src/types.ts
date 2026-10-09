@@ -47,6 +47,8 @@ export interface TokenSet {
    * replacing the row's OAuth login.
    */
   inferenceOnly?: boolean
+  /** epoch ms an `inferenceOnly` token lapses, when known: see `PoolAccount.inferenceExpires`. */
+  inferenceExpires?: number
   /** epoch ms the OAuth login itself expires: see `PoolAccount.refreshExpires`. */
   refreshExpires?: number
   /**

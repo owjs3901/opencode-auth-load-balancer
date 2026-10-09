@@ -4,6 +4,7 @@ export type SyncErrorCode =
   | 'bad-blob'
   | 'bad-version'
   | 'decrypt'
+  | 'rolled-back'
   | 'too-large'
   | 'rate-limited'
   | 'not-found'
@@ -18,6 +19,8 @@ const MESSAGES: Record<SyncErrorCode, string> = {
   'not-set-up': 'Sync is not set up on this machine.',
   'bad-blob': 'The gist does not hold a sync file.',
   'bad-version': 'The gist was written by a newer version; update this plugin.',
+  'rolled-back':
+    'The gist holds an older snapshot than one already applied; ignoring it.',
   decrypt:
     'The gist could not be decrypted: the link key is wrong or the gist was changed.',
   'too-large': 'The gist is larger than a sync file can be.',

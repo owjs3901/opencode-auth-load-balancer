@@ -1,5 +1,5 @@
 /** GitHub gist REST calls and the share link. The link's `#key` fragment never leaves this machine. */
-import { isPlainObject } from '../util'
+import { ignore, isPlainObject } from '../util'
 import { decodeKey, encodeKey, MAX_BLOB_BYTES } from './crypto'
 import { SyncError } from './errors'
 
@@ -7,6 +7,8 @@ import { SyncError } from './errors'
 export const GIST_FILE = 'auth-load-balancer-sync.json'
 const API = 'https://api.github.com/gists'
 const REQUEST_TIMEOUT_MS = 15_000
+/** The most of a gist API response that is read (the sync file itself is capped at MAX_BLOB_BYTES). */
+const MAX_RESPONSE_BYTES = 1024 * 1024
 const MIN_BACKOFF_MS = 60_000
 const MAX_BACKOFF_MS = 3_600_000
 const DEFAULT_BACKOFF_MS = 15 * 60_000
@@ -104,9 +106,47 @@ function headers(token?: string): Record<string, string> {
   }
 }
 
+/**
+ * The response body as text, read no further than MAX_RESPONSE_BYTES: the gist
+ * is the owner's, and may hold large unrelated files that would otherwise be
+ * buffered and parsed before any per-file limit applies.
+ */
+async function boundedText(res: Response): Promise<string> {
+  const declared = Number(res.headers.get('content-length'))
+  if (declared > MAX_RESPONSE_BYTES) {
+    await res.body?.cancel().catch(ignore)
+    throw new SyncError('too-large')
+  }
+  const reader = res.body?.getReader()
+  if (!reader) return ''
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(ignore)
+        throw new SyncError('too-large')
+      }
+      chunks.push(value)
+    }
+  } catch (error) {
+    throw error instanceof SyncError ? error : new SyncError('network')
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
 async function readJson(res: Response): Promise<Record<string, unknown>> {
   if (!res.ok) throw new SyncError('http')
-  const json: unknown = await res.json().catch(() => null)
+  const text = await boundedText(res)
+  let json: unknown
+  try {
+    json = JSON.parse(text)
+  } catch {
+    throw new SyncError('http')
+  }
   if (!isPlainObject(json)) throw new SyncError('http')
   return json
 }

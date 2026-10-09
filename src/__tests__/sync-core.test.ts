@@ -21,9 +21,10 @@ import {
   collectEntries,
   entriesDigest,
   parsePayload,
+  printable,
   type SyncEntry,
 } from '../sync/payload'
-import type { PoolFile } from '../types'
+import { type PoolFile, STATIC_CREDENTIAL_EXPIRES } from '../types'
 import { testAccount } from './fixtures/account'
 import { CLAUDE_TOKEN, CLAUDE_TOKEN_2, KIMI_KEY } from './fixtures/sync'
 
@@ -170,6 +171,17 @@ const pool = (...accounts: PoolFile['accounts']): PoolFile => ({
   sessions: {},
 })
 
+const kimiKeyRow = (over: Partial<PoolFile['accounts'][number]> = {}) =>
+  testAccount({
+    id: 'k-key',
+    providerID: 'kimi-code-plan-cn',
+    label: 'kimi',
+    access: KIMI_KEY,
+    refresh: '',
+    expires: STATIC_CREDENTIAL_EXPIRES,
+    ...over,
+  })
+
 describe('payload: what is collected', () => {
   test('only static credentials, never an OAuth field, sorted by row id', () => {
     const rows = [
@@ -191,13 +203,7 @@ describe('payload: what is collected', () => {
         refresh: '',
         inferenceToken: CLAUDE_TOKEN_2,
       }),
-      testAccount({
-        id: 'k-key',
-        providerID: 'kimi-code-plan-cn',
-        label: 'kimi',
-        access: KIMI_KEY,
-        refresh: '',
-      }),
+      kimiKeyRow(),
     ]
     const entries = collectEntries(pool(...rows))
     expect(entries.map((e) => e.id)).toEqual([
@@ -210,7 +216,6 @@ describe('payload: what is collected', () => {
       providerID: 'anthropic',
       label: 'paired',
       secret: CLAUDE_TOKEN,
-      orgId: 'org-1',
       expiresAt: 123,
     })
     const text = buildPayload(entries, 1)
@@ -221,6 +226,7 @@ describe('payload: what is collected', () => {
       'tokenGen',
       'usage',
       'cooldown',
+      'org-1',
     ])
       expect(text).not.toContain(secret)
   })
@@ -228,17 +234,13 @@ describe('payload: what is collected', () => {
   test('rows without a static credential, or with a dead one, are left out', () => {
     const rows = [
       testAccount({ id: 'oauth-only', access: 'a', refresh: 'r' }),
-      testAccount({
-        id: 'kimi-oauth',
-        providerID: 'kimi-code-plan-cn',
-        access: KIMI_KEY,
-        refresh: 'r',
-      }),
+      kimiKeyRow({ id: 'kimi-oauth', refresh: 'r' }),
       testAccount({
         id: 'codex',
         providerID: 'openai',
         access: KIMI_KEY,
         refresh: '',
+        expires: STATIC_CREDENTIAL_EXPIRES,
       }),
       testAccount({
         id: 'disabled',
@@ -252,14 +254,52 @@ describe('payload: what is collected', () => {
         lostLogins: { token: { at: 1, reason: '401' } },
       }),
       testAccount({ id: 'odd', inferenceToken: 'not-a-claude-token' }),
-      testAccount({
-        id: 'short-key',
-        providerID: 'kimi-code-plan-global',
-        access: 'abc',
-        refresh: '',
-      }),
+      kimiKeyRow({ id: 'short-key', access: 'abc' }),
+      testAccount({ id: 'constructor', providerID: 'constructor' }),
+      testAccount({ id: 'proto', providerID: '__proto__' }),
     ]
     expect(collectEntries(pool(...rows))).toEqual([])
+  })
+
+  test('a refresh-less Kimi row with a finite-lived OAuth access token is not a key and is never collected', () => {
+    const oauthShaped = kimiKeyRow({
+      id: 'kimi-oauth-no-refresh',
+      access: 'kimi-oauth-access-token-0123456789',
+      expires: Date.now() + 3_600_000,
+    })
+    expect(collectEntries(pool(oauthShaped))).toEqual([])
+    expect(
+      buildPayload(collectEntries(pool(oauthShaped, kimiKeyRow())), 1),
+    ).not.toContain('kimi-oauth-access-token')
+  })
+
+  test('the publisher never produces a snapshot its subscribers reject', () => {
+    const rows = [
+      kimiKeyRow({ id: 'long', label: 'L'.repeat(200) }),
+      kimiKeyRow({ id: 'blank', label: '\u0007 \u202e ' }),
+      kimiKeyRow({ id: 'bad id!' }),
+      kimiKeyRow({ id: 'sneaky', label: 'a\u202eb\u200bc\u0085d' }),
+    ]
+    const entries = collectEntries(pool(...rows))
+    expect(entries.map((e) => [e.id, e.label])).toEqual([
+      ['blank', 'kimi-code-plan-cn'],
+      ['long', 'L'.repeat(80)],
+      ['sneaky', 'a b c d'],
+    ])
+    const text = buildPayload(entries, 1)
+    expect(parsePayload(text).entries).toEqual(entries)
+  })
+
+  test('at most 64 entries are produced', () => {
+    const many = Array.from({ length: 70 }, (_, i) =>
+      kimiKeyRow({
+        id: `k${String(i).padStart(3, '0')}`,
+        access: `${KIMI_KEY}-${i}`,
+      }),
+    )
+    const entries = collectEntries(pool(...many))
+    expect(entries).toHaveLength(64)
+    expect(parsePayload(buildPayload(entries, 1)).entries).toHaveLength(64)
   })
 
   test('the digest follows the credentials and ignores the clock', () => {
@@ -279,6 +319,17 @@ describe('payload: what is collected', () => {
   })
 })
 
+describe('labels', () => {
+  test('controls, C1, bidi and zero-width characters become spaces', () => {
+    expect(printable('a\u0000b\nc\u007fd\u0085e\u009ff')).toBe('a b c d e f')
+    expect(printable('x\u202ey\u2066z\u2069w\u200ev\u061cu')).toBe(
+      'x y z w v u',
+    )
+    expect(printable('a\u200bb\u2060c\ufeffd\u2028e')).toBe('a b c d e')
+    expect(printable('  plain 한국어 🔑  ')).toBe('plain 한국어 🔑')
+  })
+})
+
 describe('payload: an untrusted read', () => {
   const entry = (over: Record<string, unknown> = {}) => ({
     id: 'row-1',
@@ -287,8 +338,10 @@ describe('payload: an untrusted read', () => {
     secret: CLAUDE_TOKEN,
     ...over,
   })
+  const snapshot = (entries: unknown[], v: unknown = 1, at: unknown = 10) =>
+    parsePayload(JSON.stringify({ v, at, entries }))
   const parse = (entries: unknown[], v: unknown = 1): SyncEntry[] =>
-    parsePayload(JSON.stringify({ v, entries }))
+    snapshot(entries, v).entries
 
   test('a well-formed entry survives, and only its allow-listed fields', () => {
     const [got] = parse([
@@ -306,7 +359,6 @@ describe('payload: an untrusted read', () => {
       providerID: 'anthropic',
       label: 'work',
       secret: CLAUDE_TOKEN,
-      orgId: 'org-9',
       expiresAt: 5,
     })
   })
@@ -314,11 +366,18 @@ describe('payload: an untrusted read', () => {
   test('envelope errors', () => {
     expect(codeOf(() => parsePayload('nope'))).toBe('bad-blob')
     expect(codeOf(() => parsePayload('[]'))).toBe('bad-blob')
-    expect(codeOf(() => parsePayload('{"v":1,"entries":{}}'))).toBe('bad-blob')
+    expect(codeOf(() => parsePayload('{"v":1,"at":1,"entries":{}}'))).toBe(
+      'bad-blob',
+    )
+    expect(codeOf(() => parsePayload('{"v":1,"entries":[]}'))).toBe('bad-blob')
+    expect(codeOf(() => parsePayload('{"v":1,"at":"x","entries":[]}'))).toBe(
+      'bad-blob',
+    )
     expect(codeOf(() => parse([], 2))).toBe('bad-version')
     expect(codeOf(() => parse(Array.from({ length: 65 }, () => entry())))).toBe(
       'too-large',
     )
+    expect(snapshot([], 1, 42).at).toBe(42)
   })
 
   test('entries that break any rule are dropped, not trusted', () => {
@@ -331,6 +390,8 @@ describe('payload: an untrusted read', () => {
       entry({ id: 'x'.repeat(65) }),
       entry({ providerID: 'openai' }),
       entry({ providerID: 5 }),
+      entry({ providerID: 'constructor' }),
+      entry({ providerID: '__proto__' }),
       entry({ label: '' }),
       entry({ label: '  \t ' }),
       entry({ label: 'x'.repeat(81) }),
@@ -342,6 +403,20 @@ describe('payload: an untrusted read', () => {
     expect(parse([kept, ...dropped]).map((e) => e.id)).toEqual(['ok'])
   })
 
+  test('an entry that fails validation is still listed, so it never reads as removed', () => {
+    const got = snapshot([
+      entry({ id: 'too-long', label: 'x'.repeat(81) }),
+      entry({ id: 'future', providerID: 'future-provider' }),
+      entry({ id: 'ok' }),
+      entry({ id: 'ok', label: 'second' }),
+      entry({ id: 'bad id!' }),
+      null,
+      { id: 5 },
+    ])
+    expect(got.entries.map((e) => e.id)).toEqual(['ok'])
+    expect([...got.listed].sort()).toEqual(['future', 'ok', 'too-long'])
+  })
+
   test('duplicates keep the first; control characters in a label become spaces', () => {
     const got = parse([
       entry({ id: 'd', label: 'a\u0000b\nc\u007fd' }),
@@ -351,29 +426,38 @@ describe('payload: an untrusted read', () => {
     expect(got[0]?.label).toBe('a b c d')
   })
 
-  test('optional fields are validated or dropped', () => {
-    const [got] = parse([
-      entry({ orgId: 'bad org!', expiresAt: 'soon' }),
+  test('expiresAt is a Claude-only positive number', () => {
+    const got = parse([
+      entry({ id: 'a', expiresAt: 'soon' }),
+      entry({ id: 'b', expiresAt: -1 }),
+      entry({ id: 'c', expiresAt: 7 }),
       entry({
         id: 'k',
         providerID: 'kimi-code-plan-cn',
         secret: KIMI_KEY,
         expiresAt: 5,
       }),
-      entry({ id: 'neg', expiresAt: -1 }),
     ])
-    expect(got).not.toHaveProperty('orgId')
-    expect(got).not.toHaveProperty('expiresAt')
-    const rest = parse([
-      entry({
-        id: 'k',
-        providerID: 'kimi-code-plan-cn',
-        secret: KIMI_KEY,
-        expiresAt: 5,
-      }),
-      entry({ id: 'neg', expiresAt: -1 }),
+    expect(got.map((e) => e.expiresAt)).toEqual([
+      undefined,
+      undefined,
+      7,
+      undefined,
     ])
-    expect(rest.every((e) => e.expiresAt === undefined)).toBe(true)
+  })
+
+  test('ids such as __proto__ and constructor are ordinary ids', () => {
+    const got = snapshot([
+      entry({ id: '__proto__' }),
+      entry({ id: 'constructor', secret: CLAUDE_TOKEN_2 }),
+      entry({ id: 'prototype', secret: `${CLAUDE_TOKEN_2}x` }),
+    ])
+    expect(got.entries.map((e) => e.id)).toEqual([
+      '__proto__',
+      'constructor',
+      'prototype',
+    ])
+    expect(got.listed.has('__proto__')).toBe(true)
   })
 })
 
@@ -388,9 +472,13 @@ describe('merge plan', () => {
     accountId,
     fingerprint: fingerprint(secret),
   })
+  const snap = (entries: SyncEntry[], extraListed: string[] = []) => ({
+    entries,
+    listed: new Set([...entries.map((e) => e.id), ...extraListed]),
+  })
 
   test('a new entry is imported', () => {
-    expect(planMerge([], [entry('e1')], {})).toEqual({
+    expect(planMerge([], snap([entry('e1')]), {})).toEqual({
       imports: [{ entry: entry('e1') }],
       drops: [],
     })
@@ -401,9 +489,12 @@ describe('merge plan', () => {
       testAccount({ id: 'own', refresh: '', access: CLAUDE_TOKEN }),
       testAccount({ id: 'paired', inferenceToken: CLAUDE_TOKEN_2 }),
     ]
-    const plan = planMerge(own, [entry('e1'), entry('e2', CLAUDE_TOKEN_2)], {})
+    const plan = planMerge(
+      own,
+      snap([entry('e1'), entry('e2', CLAUDE_TOKEN_2)]),
+      {},
+    )
     expect(plan).toEqual({ imports: [], drops: [] })
-    expect(plan.drops).toEqual([])
   })
 
   test('a held secret of another provider does not block the import', () => {
@@ -415,20 +506,29 @@ describe('merge plan', () => {
         access: CLAUDE_TOKEN,
       }),
     ]
-    expect(planMerge(own, [entry('e1')], {}).imports).toHaveLength(1)
+    expect(planMerge(own, snap([entry('e1')]), {}).imports).toHaveLength(1)
   })
 
   test('a changed secret is imported again, remembering where it was', () => {
     const imported = { e1: ref('row', CLAUDE_TOKEN) }
-    const plan = planMerge([], [entry('e1', CLAUDE_TOKEN_2)], imported)
+    const plan = planMerge([], snap([entry('e1', CLAUDE_TOKEN_2)]), imported)
     expect(plan.imports).toEqual([
       { entry: entry('e1', CLAUDE_TOKEN_2), previous: imported.e1 },
     ])
   })
 
+  test("a rotation to a secret the user already holds releases the old one instead of claiming the user's row", () => {
+    const imported = { e1: ref('row', CLAUDE_TOKEN) }
+    const own = [
+      testAccount({ id: 'mine', refresh: '', access: CLAUDE_TOKEN_2 }),
+    ]
+    const plan = planMerge(own, snap([entry('e1', CLAUDE_TOKEN_2)]), imported)
+    expect(plan).toEqual({ imports: [], drops: [['e1', imported.e1]] })
+  })
+
   test('an unchanged secret is left alone, whatever the local row became', () => {
     const imported = { e1: ref('gone', CLAUDE_TOKEN) }
-    expect(planMerge([], [entry('e1')], imported)).toEqual({
+    expect(planMerge([], snap([entry('e1')]), imported)).toEqual({
       imports: [],
       drops: [],
     })
@@ -438,10 +538,30 @@ describe('merge plan', () => {
     const imported = { e1: ref('row', CLAUDE_TOKEN), e2: ref('row2', KIMI_KEY) }
     const plan = planMerge(
       [testAccount({ id: 'local-own', refresh: '', access: 'mine' })],
-      [entry('e2', KIMI_KEY)],
+      snap([entry('e2', KIMI_KEY)]),
       imported,
     )
     expect(plan.drops).toEqual([['e1', imported.e1]])
+  })
+
+  test('an imported entry that is still listed but invalid is not dropped', () => {
+    const imported = { e1: ref('row', CLAUDE_TOKEN) }
+    const plan = planMerge([], snap([], ['e1']), imported)
+    expect(plan).toEqual({ imports: [], drops: [] })
+  })
+
+  test('reserved ids never find inherited members', () => {
+    const imported = { other: ref('row', KIMI_KEY) }
+    const plan = planMerge(
+      [],
+      snap([entry('__proto__'), entry('constructor', CLAUDE_TOKEN_2)]),
+      imported,
+    )
+    expect(plan.imports.map((j) => j.entry.id)).toEqual([
+      '__proto__',
+      'constructor',
+    ])
+    expect(plan.imports.every((j) => j.previous === undefined)).toBe(true)
   })
 
   test('holdsFingerprint reads the static credential of either row shape', () => {

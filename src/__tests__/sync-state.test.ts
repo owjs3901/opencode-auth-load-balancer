@@ -12,8 +12,14 @@ import {
   syncStatusFilePath,
 } from '../pool/paths'
 import { encodeKey, generateKey } from '../sync/crypto'
-import { INTENT_TTL_MS, takeIntent } from '../sync/intent'
 import {
+  INTENT_SKEW_MS,
+  INTENT_TTL_MS,
+  intentPending,
+  takeIntent,
+} from '../sync/intent'
+import {
+  newRefs,
   readSyncState,
   type SyncState,
   updateSyncState,
@@ -58,6 +64,9 @@ describe('sync state file', () => {
       etag: 'W/"1"',
       syncedAt: 5,
       uploadedDigest: 'abc',
+      uploadedAt: 9,
+      appliedAt: 8,
+      retryAt: 7,
       imported: { e: { accountId: 'a', fingerprint: 'f' } },
     })
     expect(await updateSyncState(() => full)).toEqual(full)
@@ -106,6 +115,9 @@ describe('sync state file', () => {
         etag: 5,
         syncedAt: 'now',
         uploadedDigest: 5,
+        uploadedAt: 'x',
+        appliedAt: 'x',
+        retryAt: 'x',
         imported: {
           good: { accountId: 'a', fingerprint: 'f' },
           bad: { accountId: 5 },
@@ -123,6 +135,9 @@ describe('sync state file', () => {
       'etag',
       'syncedAt',
       'uploadedDigest',
+      'uploadedAt',
+      'appliedAt',
+      'retryAt',
     ])
       expect(read).not.toHaveProperty(field)
     await writeFile(
@@ -153,6 +168,36 @@ describe('sync state file', () => {
     await writeFile(blocker, 'x')
     process.env.OPENCODE_AUTH_LB_DIR = join(blocker, 'dir')
     await writeSyncStatus({ at: 1, ok: true, message: 'm' })
+  })
+})
+
+describe('imported references', () => {
+  test('ids such as __proto__ are ordinary keys that survive a write and a read', async () => {
+    const refs = newRefs()
+    for (const id of ['__proto__', 'constructor', 'prototype'])
+      refs[id] = { accountId: `row-${id}`, fingerprint: 'f' }
+    await updateSyncState(() => state({ imported: refs }))
+    const file = await readFile(syncStateFilePath(), 'utf8')
+    expect(file).toContain('"__proto__":{"accountId":"row-__proto__"')
+    const read = (await readSyncState())?.imported ?? newRefs()
+    expect(Object.keys(read).sort()).toEqual([
+      '__proto__',
+      'constructor',
+      'prototype',
+    ])
+    expect(Object.getPrototypeOf(read)).toBeNull()
+    expect(read['__proto__']?.accountId).toBe('row-__proto__')
+    expect(Object.hasOwn(newRefs(), 'toString')).toBe(false)
+    expect(newRefs()['toString']).toBeUndefined()
+  })
+
+  test('a copy keeps every key and shares nothing', () => {
+    const refs = newRefs()
+    refs['__proto__'] = { accountId: 'a', fingerprint: 'f' }
+    const copy = newRefs(refs)
+    delete copy['__proto__']
+    expect(Object.keys(refs)).toEqual(['__proto__'])
+    expect(Object.keys(copy)).toEqual([])
   })
 })
 
@@ -192,6 +237,46 @@ describe('TUI request handshake', () => {
       await held.release()
     }
     expect(await takeIntent(150)).toEqual({ action: 'sync', at: 100 })
+  })
+
+  test('a newer request the TUI writes while the old one is being read is left alone, not deleted', async () => {
+    await write({ action: 'sync', at: 100 })
+    const taken = await takeIntent(150, undefined, () =>
+      write({ action: 'upload', at: 120 }),
+    )
+    expect(taken).toEqual({ action: 'sync', at: 100 })
+    expect(await intentPending()).toBe(true)
+    expect(await takeIntent(150)).toEqual({ action: 'upload', at: 120 })
+    expect(await intentPending()).toBe(false)
+  })
+  test('a request taken by someone else while we wait for the lock is simply gone', async () => {
+    await write({ action: 'sync', at: 100 })
+    const held = await acquireLock(`${syncIntentFilePath()}.lock`, {
+      staleMs: 60_000,
+      timeoutMs: 1_000,
+      retryMs: 5,
+      heartbeatMs: 5_000,
+    })
+    const waiting = takeIntent(150, 2_000)
+    await rm(syncIntentFilePath(), { force: true })
+    await held.release()
+    expect(await waiting).toBeNull()
+  })
+  test('pending reports a waiting request without claiming it', async () => {
+    expect(await intentPending()).toBe(false)
+    await write({ action: 'sync', at: 100 })
+    expect(await intentPending()).toBe(true)
+    expect(await intentPending()).toBe(true)
+  })
+
+  test('a request stamped in the far future is refused (it would outlive the TTL)', async () => {
+    await write({ action: 'sync', at: 100 + INTENT_SKEW_MS + 1 })
+    expect(await takeIntent(100)).toBeNull()
+    await write({ action: 'sync', at: 100 + INTENT_SKEW_MS })
+    expect(await takeIntent(100)).toEqual({
+      action: 'sync',
+      at: 100 + INTENT_SKEW_MS,
+    })
   })
 
   test('every action parses; the link is only kept when it is a short string', async () => {

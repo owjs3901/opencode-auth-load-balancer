@@ -16,15 +16,18 @@ export function fakeGithub() {
   const calls: { method: string; url: string; authorization: string | null }[] =
     []
   const hooks: {
-    before?: (method: string, url: string) => Response | undefined
+    before?: (
+      method: string,
+      url: string,
+    ) => Response | undefined | Promise<Response | undefined>
   } = {}
   let counter = 0
 
-  const respond: Responder = (url, init) => {
+  const respond: Responder = async (url, init) => {
     const method = init?.method ?? 'GET'
     const headers = new Headers(init?.headers)
     calls.push({ method, url, authorization: headers.get('authorization') })
-    const injected = hooks.before?.(method, url)
+    const injected = await hooks.before?.(method, url)
     if (injected) return injected
     const id = url.split('/gists/')[1]
     const body = init?.body ? JSON.parse(String(init.body)) : undefined

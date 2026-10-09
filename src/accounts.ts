@@ -167,59 +167,14 @@ export async function addAccount(
   })
 }
 
-/** Where a synced credential lands: its label, and the row it replaces in place. */
-export interface ImportPlacement {
-  label: string
-  /** The row that holds this credential's previous value, when it is still there. */
-  targetId?: string
-}
-
-/** `label`, or `label (n)` when another row already carries it (labels are unique pool-wide). */
-function uniqueLabel(pool: PoolFile, label: string): string {
-  const used = new Set(pool.accounts.map((a) => a.label))
-  let candidate = label
-  for (let n = 2; used.has(candidate); n++) candidate = `${label} (${n})`
-  return candidate
-}
-
-/**
- * Land a credential synced from another machine through the same pairing a
- * pasted one takes (`placeTokens`), without spending a pending re-login hint
- * that belongs to a login the user is doing. A static credential that
- * resolves to a row holding an OAuth login of its own leaves that row alone:
- * only the OAuth-less rows a synced key may replace.
- */
-export async function importStaticToken(
-  providerID: string,
-  tokens: TokenSet,
-  place: ImportPlacement,
-): Promise<PoolAccount> {
-  return mutatePool((pool) => {
-    if (!tokens.inferenceOnly) {
-      const holder = pool.accounts.find(
-        (a) =>
-          a.providerID === providerID &&
-          !!a.refresh &&
-          holdsCredential(a, tokens),
-      )
-      if (holder) return holder
-    }
-    return placeTokens(
-      pool,
-      providerID,
-      tokens,
-      uniqueLabel(pool, place.label),
-      place.targetId,
-    )
-  })
-}
-
 /**
  * The shared body of every login landing: fold `tokens` onto the row that
- * already holds them, else the hinted row, else the organization's partner,
- * else append a new row.
+ * already holds them, else the hinted row (of the same provider: a hint can
+ * never carry a login onto another provider's row), else the organization's
+ * partner, else append a new row. Gist sync lands its credentials through here
+ * too, inside its own pool transaction.
  */
-function placeTokens(
+export function placeTokens(
   pool: PoolFile,
   providerID: string,
   tokens: TokenSet,
@@ -255,7 +210,7 @@ function placeTokens(
     rows.find((a) => holdsCredential(a, tokens)) ??
     (hintedId === undefined
       ? undefined
-      : pool.accounts.find((a) => a.id === hintedId)) ??
+      : rows.find((a) => a.id === hintedId)) ??
     orgPartner(rows, tokens)
   if (target)
     return tokens.inferenceOnly

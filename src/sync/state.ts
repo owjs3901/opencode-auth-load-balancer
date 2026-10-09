@@ -40,8 +40,26 @@ export interface SyncState {
   syncedAt?: number
   /** Digest of the entries last uploaded (publisher). */
   uploadedDigest?: string
+  /** The t stamped on the last upload (publisher): the next one is strictly later, whatever the clock does. */
+  uploadedAt?: number
+  /** The newest snapshot t applied (subscriber): an older ciphertext replayed from the gist is refused. */
+  appliedAt?: number
+  /** No background download or upload before this time: the shared poll schedule, retry delay and rate-limit back-off. */
+  retryAt?: number
   /** Entry id ??the local row it was imported into (subscriber). */
   imported: Record<string, ImportedRef>
+}
+
+/**
+ * An id-keyed map of what was imported. Entry ids come from another machine, so the record has no prototype: `__proto__`, `constructor` and `prototype` are
+ * then ordinary keys, and a lookup never finds an inherited member.
+ */
+export function newRefs(
+  from?: Readonly<Record<string, ImportedRef>>,
+): Record<string, ImportedRef> {
+  const refs: Record<string, ImportedRef> = Object.create(null)
+  if (from) for (const [id, ref] of Object.entries(from)) refs[id] = ref
+  return refs
 }
 
 const STATE_LOCK: LockOptions = {
@@ -77,11 +95,12 @@ function parseState(text: string): SyncState | null {
     !decodeKey(json.key)
   )
     return null
-  const imported: Record<string, ImportedRef> = {}
+  const imported = newRefs()
   if (isPlainObject(json.imported))
     for (const [id, ref] of Object.entries(json.imported))
       if (isRef(ref)) imported[id] = ref
   const { owner, etag, syncedAt, uploadedDigest } = json
+  const { uploadedAt, appliedAt, retryAt } = json
   return {
     v: 1,
     role: json.role,
@@ -92,6 +111,9 @@ function parseState(text: string): SyncState | null {
     ...(typeof etag === 'string' ? { etag } : {}),
     ...(isFiniteNumber(syncedAt) ? { syncedAt } : {}),
     ...(typeof uploadedDigest === 'string' ? { uploadedDigest } : {}),
+    ...(isFiniteNumber(uploadedAt) ? { uploadedAt } : {}),
+    ...(isFiniteNumber(appliedAt) ? { appliedAt } : {}),
+    ...(isFiniteNumber(retryAt) ? { retryAt } : {}),
   }
 }
 

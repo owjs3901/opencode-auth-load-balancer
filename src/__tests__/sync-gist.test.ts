@@ -262,3 +262,58 @@ describe('GitHub token discovery', () => {
     expect(ghAuthToken(failing)).rejects.toThrow('ENOENT')
   })
 })
+
+describe('response size cap', () => {
+  const read = () => readGist(ID)
+
+  test('a declared length over the cap is refused before anything is read', async () => {
+    github.hooks.before = () =>
+      new Response('{}', {
+        status: 200,
+        headers: { 'content-length': String(2 * 1024 * 1024) },
+      })
+    expect((await codeOf(read)).code).toBe('too-large')
+  })
+
+  test('a body that grows past the cap without declaring it is cut off', async () => {
+    let pulled = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1
+        controller.enqueue(new Uint8Array(256 * 1024).fill(32))
+      },
+    })
+    github.hooks.before = () => new Response(body, { status: 200 })
+    expect((await codeOf(read)).code).toBe('too-large')
+    expect(pulled).toBeLessThan(10)
+  })
+
+  test('a stream that dies mid-read is a network error', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error('reset'))
+      },
+    })
+    github.hooks.before = () => new Response(body, { status: 200 })
+    expect((await codeOf(read)).code).toBe('network')
+  })
+
+  test('an empty 200 is not a gist', async () => {
+    github.hooks.before = () => new Response(null, { status: 200 })
+    expect((await codeOf(read)).code).toBe('http')
+  })
+
+  test('a gist with large unrelated files still reads when it fits', async () => {
+    const { id } = await createGist('t', 'ok')
+    github.hooks.before = (method, url) =>
+      method === 'GET' && url.endsWith(id)
+        ? Response.json({
+            files: {
+              [GIST_FILE]: { content: 'ok' },
+              'notes.txt': { content: 'n'.repeat(200 * 1024) },
+            },
+          })
+        : undefined
+    expect(await readGist(id)).toMatchObject({ changed: true, content: 'ok' })
+  })
+})

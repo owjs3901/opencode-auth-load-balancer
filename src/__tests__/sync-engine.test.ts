@@ -11,7 +11,8 @@ import { decodeKey, fingerprint, open, seal } from '../sync/crypto'
 import { createEngine, type SyncEngine } from '../sync/engine'
 import { formatGistLink } from '../sync/gist'
 import { readSyncState, updateSyncState } from '../sync/state'
-import type { PoolAccount } from '../types'
+import { POLL_MS, PUBLISH_RETRY_MS } from '../sync/timing'
+import { type PoolAccount, STATIC_CREDENTIAL_EXPIRES } from '../types'
 import { testAccount } from './fixtures/account'
 import { fakeAdapter } from './fixtures/adapter'
 import { responderFetch } from './fixtures/fetch-mock'
@@ -398,6 +399,7 @@ describe('subscribing', () => {
         label: 'kimi',
         access: KIMI_KEY,
         refresh: '',
+        expires: STATIC_CREDENTIAL_EXPIRES,
         ...over,
       })
     const link = await publish(kimi())
@@ -411,7 +413,7 @@ describe('subscribing', () => {
       }),
     )
     expect((await on('pc2', () => engine().subscribe(link))).message).toBe(
-      'Synced: 1 added, 0 updated, 0 removed.',
+      'Synced: 0 added, 0 updated, 0 removed.',
     )
     expect((await rows('pc2'))[0]).toMatchObject({
       id: 'kimi-oauth',
@@ -436,6 +438,7 @@ describe('subscribing', () => {
         label: 'kimi',
         access,
         refresh: '',
+        expires: STATIC_CREDENTIAL_EXPIRES,
       })
     const link = await publish(kimi(KIMI_KEY))
     await on('pc2', () => engine().subscribe(link))
@@ -495,6 +498,7 @@ describe('subscribing', () => {
         providerID: 'kimi-code-plan-cn',
         access: KIMI_KEY,
         refresh: '',
+        expires: STATIC_CREDENTIAL_EXPIRES,
       }),
     )
     const throwing = fakeAdapter({
@@ -706,5 +710,349 @@ describe('stopping and dispatch', () => {
     )
     expect(state).not.toContain(CLAUDE_TOKEN)
     expect(state).toContain(fingerprint(CLAUDE_TOKEN))
+  })
+})
+
+const tokenRow = (id: string, token: string, over: Partial<PoolAccount> = {}) =>
+  publisherRow({
+    id,
+    label: id,
+    refresh: '',
+    access: token,
+    inferenceToken: token,
+    inferenceExpires: undefined,
+    ...over,
+  })
+
+const kimiRow = (id: string, access = KIMI_KEY) =>
+  testAccount({
+    id,
+    providerID: 'kimi-code-plan-cn',
+    label: id,
+    access,
+    refresh: '',
+    expires: STATIC_CREDENTIAL_EXPIRES,
+  })
+
+describe('ownership of imported rows', () => {
+  async function follow(...pc1Rows: PoolAccount[]): Promise<void> {
+    await seed('pc1', ...pc1Rows)
+    await on('pc1', () => engine().upload(false))
+  }
+  const subscribe = async (pc: string) =>
+    on(pc, async () => engine().subscribe(await linkOf('pc1')))
+  const republish = async (...pc1Rows: PoolAccount[]) => {
+    await seed('pc1', ...pc1Rows)
+    await on('pc1', () => engine().upload(false))
+  }
+
+  test('a token the user pasted meanwhile stays theirs when the publisher rotates to it, and is not removed later', async () => {
+    await follow(tokenRow('p1', CLAUDE_TOKEN))
+    await subscribe('pc2')
+    await on('pc2', () =>
+      mutatePool((pool) => {
+        pool.accounts.push(
+          tokenRow('mine', CLAUDE_TOKEN_2, { orgId: 'org-other' }),
+        )
+      }),
+    )
+
+    await republish(tokenRow('p1', CLAUDE_TOKEN_2))
+    expect((await on('pc2', () => engine().poll())).message).toBe(
+      'Synced: 0 added, 0 updated, 1 removed.',
+    )
+    expect((await rows('pc2')).map((r) => r.id)).toEqual(['mine'])
+    expect((await on('pc2', readSyncState))?.imported).toEqual({})
+
+    await republish()
+    await on('pc2', () => engine().poll())
+    expect((await rows('pc2')).map((r) => r.id)).toEqual(['mine'])
+  })
+
+  test('an entry that turns into another provider takes the old credential back and leaves the own OAuth login alone', async () => {
+    await follow(publisherRow({ id: 'p1' }))
+    await seed('pc2', ownOauthRow())
+    await subscribe('pc2')
+    expect((await rows('pc2'))[0]).toMatchObject({
+      id: 'mine',
+      inferenceToken: CLAUDE_TOKEN,
+    })
+
+    await republish(kimiRow('p1'))
+    expect((await on('pc2', () => engine().poll())).message).toBe(
+      'Synced: 0 added, 1 updated, 0 removed.',
+    )
+    const after = await rows('pc2')
+    const own = after.find((r) => r.id === 'mine')
+    expect(own).toMatchObject({
+      access: 'MY-ACCESS',
+      refresh: 'MY-REFRESH',
+      orgId: 'org-1',
+    })
+    expect(own).not.toHaveProperty('inferenceToken')
+    const kimi = after.find((r) => r.providerID === 'kimi-code-plan-cn')
+    expect(kimi).toMatchObject({ access: KIMI_KEY, refresh: '' })
+    expect(after).toHaveLength(2)
+    expect((await on('pc2', readSyncState))?.imported.p1?.accountId).toBe(
+      kimi?.id,
+    )
+  })
+
+  test('only the organization the provider confirmed pairs a token; none confirmed means a row of its own', async () => {
+    await follow(publisherRow({ id: 'p1' }))
+    await seed('pc2', ownOauthRow())
+    const headerless = engine([claudeSyncAdapter(null), kimiSyncAdapter()])
+    const link = await linkOf('pc1')
+    await on('pc2', () => headerless.subscribe(link))
+    const after = await rows('pc2')
+    expect(after).toHaveLength(2)
+    expect(after.find((r) => r.id === 'mine')).not.toHaveProperty(
+      'inferenceToken',
+    )
+    expect(after.find((r) => r.id !== 'mine')).toMatchObject({
+      refresh: '',
+      inferenceToken: CLAUDE_TOKEN,
+    })
+  })
+
+  test('reserved ids import, rotate and remove like any other', async () => {
+    await follow(
+      tokenRow('__proto__', CLAUDE_TOKEN),
+      tokenRow('constructor', CLAUDE_TOKEN_2),
+    )
+    expect((await subscribe('pc2')).message).toBe(
+      'Synced: 2 added, 0 updated, 0 removed.',
+    )
+    const state = await on('pc2', readSyncState)
+    expect(Object.keys(state?.imported ?? {}).sort()).toEqual([
+      '__proto__',
+      'constructor',
+    ])
+
+    await republish(
+      tokenRow('__proto__', `${CLAUDE_TOKEN}9`),
+      tokenRow('constructor', CLAUDE_TOKEN_2),
+    )
+    expect((await on('pc2', () => engine().poll())).message).toBe(
+      'Synced: 0 added, 1 updated, 0 removed.',
+    )
+    await republish()
+    expect((await on('pc2', () => engine().poll())).message).toBe(
+      'Synced: 0 added, 0 updated, 2 removed.',
+    )
+    expect(await rows('pc2')).toEqual([])
+    expect((await on('pc2', readSyncState))?.imported).toEqual({})
+  })
+
+  test('a still-listed entry the receiver cannot read is never mistaken for a removal', async () => {
+    await follow(tokenRow('p1', CLAUDE_TOKEN), tokenRow('p2', CLAUDE_TOKEN_2))
+    await subscribe('pc2')
+    const state = await on('pc2', readSyncState)
+    const key = decodeKey(state?.key ?? '') ?? Buffer.alloc(0)
+    const now = clock + 1_000
+    const damaged = JSON.stringify({
+      v: 1,
+      at: now,
+      entries: [
+        {
+          id: 'p1',
+          providerID: 'anthropic',
+          label: 'x'.repeat(200),
+          secret: CLAUDE_TOKEN,
+        },
+        {
+          id: 'p2',
+          providerID: 'future-provider',
+          label: 'p2',
+          secret: 'whatever-secret',
+        },
+      ],
+    })
+    for (const gist of github.gists.values()) {
+      gist.content = seal(damaged, key)
+      gist.etag += 1
+    }
+    expect((await on('pc2', () => engine().poll())).message).toBe(
+      'Synced: 0 added, 0 updated, 0 removed.',
+    )
+    expect((await rows('pc2')).map((r) => r.inferenceToken).sort()).toEqual(
+      [CLAUDE_TOKEN, CLAUDE_TOKEN_2].sort(),
+    )
+    expect(
+      Object.keys((await on('pc2', readSyncState))?.imported ?? {}),
+    ).toEqual(['p1', 'p2'])
+  })
+})
+
+describe('rollback and clock steps', () => {
+  const snapshotAt = async (pc: string): Promise<number> => {
+    const state = await on(pc, readSyncState)
+    const key = decodeKey(state?.key ?? '') ?? Buffer.alloc(0)
+    const blob = [...github.gists.values()][0]?.content ?? ''
+    return JSON.parse(open(blob, key)).at
+  }
+
+  test('the publisher stamps every upload later than the last, even when its clock steps back', async () => {
+    await seed('pc1', publisherRow())
+    await on('pc1', () => engine().upload(false))
+    const first = await snapshotAt('pc1')
+    clock -= 500_000
+    await on('pc1', () => engine().upload(false))
+    const second = await snapshotAt('pc1')
+    expect(second).toBe(first + 1)
+    clock += 2_000_000
+    await on('pc1', () => engine().upload(false))
+    expect(await snapshotAt('pc1')).toBe(clock)
+  })
+
+  test('an older ciphertext restored to the gist is refused; a newer one applies; a new gist resets the mark', async () => {
+    await seed('pc1', tokenRow('p1', CLAUDE_TOKEN))
+    await on('pc1', () => engine().upload(false))
+    const older = [...github.gists.values()][0]?.content ?? ''
+    await on('pc2', async () => engine().subscribe(await linkOf('pc1')))
+
+    clock += 1_000
+    await seed('pc1', tokenRow('p1', CLAUDE_TOKEN_2))
+    await on('pc1', () => engine().upload(false))
+    await on('pc2', () => engine().poll())
+    const applied = await rows('pc2')
+    expect(applied[0]?.inferenceToken).toBe(CLAUDE_TOKEN_2)
+
+    for (const gist of github.gists.values()) {
+      gist.content = older
+      gist.etag += 1
+    }
+    const out = await on('pc2', () => engine().poll())
+    expect(out).toMatchObject({ ok: false })
+    expect(out.message).toContain('older snapshot')
+    expect(await rows('pc2')).toEqual(applied)
+
+    await seed('pc3', tokenRow('x1', CLAUDE_TOKEN))
+    await on('pc3', () => engine().upload(true))
+    await on('pc2', async () => engine().subscribe(await linkOf('pc3')))
+    expect((await on('pc2', readSyncState))?.appliedAt).toBeLessThanOrEqual(
+      clock,
+    )
+    expect(
+      (await rows('pc2')).some((r) => r.inferenceToken === CLAUDE_TOKEN),
+    ).toBe(true)
+  })
+})
+
+describe('scheduled work is decided again under the lock', () => {
+  const FAR = 'f'.repeat(32)
+  async function following(): Promise<string> {
+    await seed('pc1', publisherRow())
+    await on('pc1', () => engine().upload(false))
+    await on('pc2', async () => engine().subscribe(await linkOf('pc1')))
+    return (await on('pc2', readSyncState))?.gistId ?? ''
+  }
+  const poll = (gistId: string, eng = engine()) =>
+    on('pc2', () => eng.backgroundPoll(gistId))
+
+  test('a download is due once the persisted poll interval has passed, not before', async () => {
+    const gistId = await following()
+    expect((await on('pc2', readSyncState))?.retryAt).toBe(clock + POLL_MS)
+    expect(await poll(gistId)).toBeNull()
+    clock += POLL_MS
+    expect(await poll(gistId)).toEqual({ ok: true, message: 'Up to date.' })
+    expect((await on('pc2', readSyncState))?.retryAt).toBe(clock + POLL_MS)
+  })
+
+  test('a download of another gist, after forgetting, or by a publisher, does nothing', async () => {
+    const gistId = await following()
+    clock += POLL_MS
+    expect(await poll(FAR)).toBeNull()
+    await on('pc2', () => engine().forget())
+    expect(await poll(gistId)).toBeNull()
+    await seed('pc1', publisherRow())
+    expect(await on('pc1', () => engine().backgroundPoll(gistId))).toBeNull()
+  })
+
+  test('a rate limit is remembered on disk, so another window stays away', async () => {
+    const gistId = await following()
+    clock += POLL_MS
+    github.hooks.before = () =>
+      new Response('{}', { status: 429, headers: { 'retry-after': '300' } })
+    const first = await poll(gistId)
+    expect(first).toMatchObject({ ok: false, backoffMs: 300_000 })
+    expect((await on('pc2', readSyncState))?.retryAt).toBe(clock + 300_000)
+    const calls = github.calls.length
+    expect(await poll(gistId, engine())).toBeNull()
+    expect(github.calls).toHaveLength(calls)
+    clock += 300_000
+    github.hooks.before = undefined
+    expect((await poll(gistId))?.ok).toBe(true)
+  })
+
+  test('an upload is skipped for a forgotten, replaced or already uploaded state, and creates no gist', async () => {
+    await seed('pc1', publisherRow())
+    await on('pc1', () => engine().upload(false))
+    const gistId = (await on('pc1', readSyncState))?.gistId ?? ''
+    await seed('pc1', publisherRow({ inferenceToken: CLAUDE_TOKEN_2 }))
+    const digest = await on('pc1', () => engine().unpublishedDigest())
+    expect(digest).not.toBeNull()
+    const publish = (id: string, d: string | null) =>
+      on('pc1', () => engine().backgroundPublish(id, d ?? ''))
+
+    expect(await publish(FAR, digest)).toBeNull()
+    expect(await publish(gistId, 'stale')).toBeNull()
+    await on('pc1', () => engine().forget())
+    expect(await publish(gistId, digest)).toBeNull()
+    expect(github.gists.size).toBe(1)
+    expect(await on('pc1', readSyncState)).toBeNull()
+    expect(
+      await on('pc2', () => engine().backgroundPublish(gistId, 'x')),
+    ).toBeNull()
+  })
+
+  test('an upload goes ahead when everything still matches', async () => {
+    await seed('pc1', publisherRow())
+    await on('pc1', () => engine().upload(false))
+    const gistId = (await on('pc1', readSyncState))?.gistId ?? ''
+    await seed('pc1', publisherRow({ inferenceToken: CLAUDE_TOKEN_2 }))
+    const digest = (await on('pc1', () => engine().unpublishedDigest())) ?? ''
+    const out = await on('pc1', () =>
+      engine().backgroundPublish(gistId, digest),
+    )
+    expect(out).toEqual({ ok: true, message: 'Uploaded 1 credential.' })
+    expect(await on('pc1', () => engine().unpublishedDigest())).toBeNull()
+    expect((await on('pc1', readSyncState))?.retryAt).toBeUndefined()
+  })
+
+  test('a failed automatic upload delays the next attempt on disk', async () => {
+    await seed('pc1', publisherRow())
+    await on('pc1', () => engine().upload(false))
+    const gistId = (await on('pc1', readSyncState))?.gistId ?? ''
+    await seed('pc1', publisherRow({ inferenceToken: CLAUDE_TOKEN_2 }))
+    const digest = (await on('pc1', () => engine().unpublishedDigest())) ?? ''
+    delete process.env.GITHUB_TOKEN
+    const failed = await on('pc1', () =>
+      engine().backgroundPublish(gistId, digest),
+    )
+    expect(failed).toMatchObject({ ok: false })
+    expect((await on('pc1', readSyncState))?.retryAt).toBe(
+      clock + PUBLISH_RETRY_MS,
+    )
+    process.env.GITHUB_TOKEN = 'ghp_test'
+    expect(
+      await on('pc1', () => engine().backgroundPublish(gistId, digest)),
+    ).toBeNull()
+    clock += PUBLISH_RETRY_MS
+    expect(
+      (await on('pc1', () => engine().backgroundPublish(gistId, digest)))?.ok,
+    ).toBe(true)
+  })
+
+  test('a publisher forgotten while its upload is in flight does not come back', async () => {
+    await seed('pc1', publisherRow())
+    await on('pc1', () => engine().upload(false))
+    github.hooks.before = async (method) => {
+      if (method === 'PATCH') await updateSyncState(() => null)
+      return undefined
+    }
+    const out = await on('pc1', () => engine().upload(false))
+    expect(out.ok).toBe(true)
+    expect(await on('pc1', readSyncState)).toBeNull()
   })
 })

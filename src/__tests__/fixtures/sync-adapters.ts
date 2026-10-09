@@ -11,7 +11,9 @@ import { REJECTED_TOKEN } from './sync'
 const USAGE: UsageSnapshot = { hourly: null, weekly: null, capturedAt: 0 }
 
 /** Claude adapter whose setup-token probe accepts every token but `REJECTED_TOKEN`. */
-export function claudeSyncAdapter(orgId = 'org-1'): ProviderAdapter {
+export function claudeSyncAdapter(
+  orgId: string | null = 'org-1',
+): ProviderAdapter {
   return fakeAdapter({
     id: 'anthropic',
     tokenLogin: {
@@ -26,7 +28,7 @@ export function claudeSyncAdapter(orgId = 'org-1'): ProviderAdapter {
               refresh: '',
               expires: STATIC_CREDENTIAL_EXPIRES,
               inferenceOnly: true,
-              orgId,
+              ...(orgId ? { orgId } : {}),
               usage: { ...USAGE },
             },
     },

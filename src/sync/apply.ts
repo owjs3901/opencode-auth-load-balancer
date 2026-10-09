@@ -1,11 +1,12 @@
-import { importStaticToken } from '../accounts'
-import { findAccount, mutatePool, readPool } from '../pool/store'
+import { placeTokens } from '../accounts'
+import { holdsCredential } from '../pairing'
+import { findAccount, mutatePool } from '../pool/store'
 import { adapterFor, ADAPTERS } from '../providers/registry'
 import type { ProviderAdapter } from '../providers/types'
-import type { PoolFile, TokenSet } from '../types'
+import type { PoolAccount, PoolFile, TokenSet } from '../types'
 import { fingerprint } from './crypto'
-import { holdsFingerprint, type MergePlan } from './merge'
-import type { ImportedRef } from './state'
+import { holdsFingerprint, type ImportJob, type MergePlan } from './merge'
+import { type ImportedRef, newRefs } from './state'
 
 export interface ApplyResult {
   /** The imported map after this plan. */
@@ -16,6 +17,9 @@ export interface ApplyResult {
   /** Entries that could not be landed yet (the provider could not be reached, or refused the secret). */
   deferred: number
 }
+
+/** What became of one import: the row it landed on, or left alone because the user already holds it. */
+export type Landing = { kind: 'placed'; row: PoolAccount } | { kind: 'held' }
 
 /** The secret verified the way a pasted one is: Claude's setup-token probe, Kimi's key check. */
 async function exchangeSecret(
@@ -40,66 +44,137 @@ function dropRow(pool: PoolFile, id: string): void {
     if (session.accountId === id) delete pool.sessions[key]
 }
 
+/** Take an imported credential out of `row`: a row with an OAuth login of its own keeps that and loses only the token; a credential-only row goes. */
+function release(pool: PoolFile, row: PoolAccount): void {
+  if (row.refresh) {
+    delete row.inferenceToken
+    delete row.inferenceExpires
+  } else dropRow(pool, row.id)
+}
+
+/** `label`, or `label (n)` when another row already carries it (labels are unique pool-wide). */
+function uniqueLabel(pool: PoolFile, label: string): string {
+  const used = new Set(pool.accounts.map((a) => a.label))
+  let candidate = label
+  for (let n = 2; used.has(candidate); n++) candidate = `${label} (${n})`
+  return candidate
+}
+
 /**
- * Take an imported credential back out of its row, if the row still holds it:
- * a row with an OAuth login of its own keeps that and loses only the token;
- * a credential-only row goes. A row the user pointed at something else stays.
+ * Take an imported credential back out of its row, if the row still holds it.
+ * A row the user pointed at something else stays.
  */
 async function strip(ref: ImportedRef): Promise<boolean> {
   return mutatePool((pool) => {
     const row = findAccount(pool, ref.accountId)
     if (!row || !holdsFingerprint(row, ref.fingerprint)) return false
-    if (row.refresh) {
-      delete row.inferenceToken
-      delete row.inferenceExpires
-    } else dropRow(pool, row.id)
+    release(pool, row)
     return true
   })
 }
 
-/** Carry out a merge plan. Each entry is landed independently: one failing never blocks the rest. */
+/**
+ * Land one verified credential, deciding everything from the pool as it is
+ * under the lock (callers run this inside `mutatePool`):
+ * - a row of this provider that already holds the secret — or, for a key, the
+ *   same account — is the user's own, whatever the plan saw earlier: it is
+ *   left alone, never tracked, and the old imported secret (if the entry is a
+ *   rotation) is taken back;
+ * - an earlier import still held by its row is replaced in place, but only by
+ *   a credential of the same provider; if the entry changed provider the old
+ *   one is taken back and the new one placed on its own;
+ * - anything else is placed by the shared pairing (`placeTokens`), with the
+ *   provider-confirmed identity of the probe only.
+ */
+export function land(
+  pool: PoolFile,
+  { entry, previous }: ImportJob,
+  tokens: TokenSet,
+): Landing {
+  const digest = fingerprint(entry.secret)
+  const sameProvider = (a: PoolAccount): boolean =>
+    a.providerID === entry.providerID
+  const owned = previous
+    ? pool.accounts.find(
+        (a) =>
+          a.id === previous.accountId &&
+          holdsFingerprint(a, previous.fingerprint),
+      )
+    : undefined
+  const prev = owned && sameProvider(owned) ? owned : undefined
+  if (owned && !prev) release(pool, owned)
+  const userHolds = pool.accounts.some(
+    (a) =>
+      a !== prev &&
+      sameProvider(a) &&
+      (holdsFingerprint(a, digest) ||
+        (!tokens.inferenceOnly && holdsCredential(a, tokens))),
+  )
+  if (userHolds) {
+    if (prev) release(pool, prev)
+    return { kind: 'held' }
+  }
+  return {
+    kind: 'placed',
+    row: placeTokens(
+      pool,
+      entry.providerID,
+      tokens,
+      uniqueLabel(pool, entry.label),
+      prev?.id,
+    ),
+  }
+}
+
+/**
+ * Carry out a merge plan. Each entry is landed independently: one failing
+ * (a probe that cannot be reached, a pool write that throws) is deferred and
+ * never blocks the rest, and what was already landed stays recorded.
+ */
 export async function applyPlan(
   plan: MergePlan,
   imported: Readonly<Record<string, ImportedRef>>,
   adapters: readonly ProviderAdapter[] = ADAPTERS,
 ): Promise<ApplyResult> {
   const result: ApplyResult = {
-    imported: { ...imported },
+    imported: newRefs(imported),
     added: 0,
     updated: 0,
     removed: 0,
     deferred: 0,
   }
-  for (const { entry, previous } of plan.imports) {
-    const adapter = adapterFor(adapters, entry.providerID)
-    const tokens = adapter && (await exchangeSecret(adapter, entry.secret))
-    if (!tokens) {
+  for (const job of plan.imports) {
+    const { entry, previous } = job
+    try {
+      const adapter = adapterFor(adapters, entry.providerID)
+      const tokens = adapter && (await exchangeSecret(adapter, entry.secret))
+      if (!tokens) {
+        result.deferred += 1
+        continue
+      }
+      if (tokens.inferenceOnly && entry.expiresAt)
+        tokens.inferenceExpires = entry.expiresAt
+      const landing = await mutatePool((pool) => land(pool, job, tokens))
+      if (landing.kind === 'held') delete result.imported[entry.id]
+      else {
+        result.imported[entry.id] = {
+          accountId: landing.row.id,
+          fingerprint: fingerprint(entry.secret),
+        }
+        if (previous) result.updated += 1
+        else result.added += 1
+      }
+    } catch {
       result.deferred += 1
-      continue
     }
-    if (tokens.inferenceOnly && entry.expiresAt)
-      tokens.inferenceExpires = entry.expiresAt
-    if (entry.orgId && !tokens.orgId) tokens.orgId = entry.orgId
-    const before = previous && findAccount(await readPool(), previous.accountId)
-    const targetId =
-      previous && before && holdsFingerprint(before, previous.fingerprint)
-        ? previous.accountId
-        : undefined
-    const row = await importStaticToken(entry.providerID, tokens, {
-      label: entry.label,
-      ...(targetId ? { targetId } : {}),
-    })
-    if (previous && previous.accountId !== row.id) await strip(previous)
-    result.imported[entry.id] = {
-      accountId: row.id,
-      fingerprint: fingerprint(entry.secret),
-    }
-    if (previous) result.updated += 1
-    else result.added += 1
   }
   for (const [id, ref] of plan.drops) {
-    if (await strip(ref)) result.removed += 1
-    delete result.imported[id]
+    try {
+      if (await strip(ref)) result.removed += 1
+      delete result.imported[id]
+    } catch {
+      result.deferred += 1
+    }
   }
   return result
 }

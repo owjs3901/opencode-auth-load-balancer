@@ -1,4 +1,5 @@
-import { access, readFile, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { access, readFile, rename, rm } from 'node:fs/promises'
 
 import { type LockOptions, withLock } from '../pool/lock'
 import { syncIntentFilePath } from '../pool/paths'
@@ -9,6 +10,8 @@ export type SyncAction =
 
 /** A TUI request is dead after this long, so an abandoned one cannot fire later. */
 export const INTENT_TTL_MS = 10 * 60_000
+/** A request stamped further ahead than this is not from a sane clock; it would otherwise outlive the TTL. */
+export const INTENT_SKEW_MS = 60_000
 const MAX_LINK_CHARS = 2048
 /** How long a claim waits for another process's claim to finish. */
 const CLAIM_WAIT_MS = 2_000
@@ -51,7 +54,8 @@ function parseIntent(text: string, now: number): SyncIntent | null {
     !isPlainObject(json) ||
     !isAction(json.action) ||
     !isFiniteNumber(json.at) ||
-    now - json.at > INTENT_TTL_MS
+    now - json.at > INTENT_TTL_MS ||
+    json.at - now > INTENT_SKEW_MS
   )
     return null
   const link =
@@ -61,30 +65,46 @@ function parseIntent(text: string, now: number): SyncIntent | null {
   return { action: json.action, at: json.at, ...(link ? { link } : {}) }
 }
 
+/** Whether a request is waiting (without claiming it). */
+export function intentPending(): Promise<boolean> {
+  return access(syncIntentFilePath()).then(
+    () => true,
+    () => false,
+  )
+}
+
 /**
- * Claim the pending request, if any: read and delete it under a lock, so of
- * several opencode processes exactly one acts on it. (A bare rename is not an
+ * Claim the pending request, if any. Under a lock the file is renamed to a
+ * name of our own and THAT file is read and deleted, so of several opencode
+ * processes exactly one acts on it, and a newer request the TUI writes while
+ * we read is a different file that is left alone. (A bare rename is not an
  * exclusive claim on Windows: two concurrent renames of one file can both
- * succeed.) The file is deleted even when it does not parse.
+ * succeed, which is why it runs under the lock.) The claimed file is deleted
+ * even when it does not parse. fterClaim is a test seam: it runs once the
+ * request is ours and before it is read, which is where the TUI can write a
+ * newer one.
  */
 export async function takeIntent(
   now: number,
   waitMs: number = CLAIM_WAIT_MS,
+  afterClaim?: () => Promise<void>,
 ): Promise<SyncIntent | null> {
   const path = syncIntentFilePath()
-  if (
-    !(await access(path).then(
-      () => true,
-      () => false,
-    ))
-  )
-    return null
+  if (!(await intentPending())) return null
   try {
     return await withLock(`${path}.lock`, claimLock(waitMs), async () => {
-      const text = await readFile(path, 'utf8').catch(() => null)
-      if (text === null) return null
-      await rm(path, { force: true })
-      return parseIntent(text, now)
+      const claimed = `${path}.${randomUUID()}.claimed`
+      try {
+        await rename(path, claimed)
+      } catch {
+        return null
+      }
+      try {
+        await afterClaim?.()
+        return parseIntent(await readFile(claimed, 'utf8'), now)
+      } finally {
+        await rm(claimed, { force: true })
+      }
     })
   } catch {
     return null

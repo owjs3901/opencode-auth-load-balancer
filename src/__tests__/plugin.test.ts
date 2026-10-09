@@ -1,5 +1,5 @@
 import { mkdtempSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -21,6 +21,7 @@ import {
 import type { ToastClient } from '../notify'
 import { listPendingForWorkspace, upsertPending } from '../pending/store'
 import { LockTimeoutError } from '../pool/lock'
+import { syncIntentFilePath } from '../pool/paths'
 import {
   mutatePool,
   PoolReadError,
@@ -56,6 +57,9 @@ beforeEach(async () => {
   // in the background (token-mint.ts), adding token-endpoint calls to every
   // count here. The `claude auto token` tests below turn it back on.
   process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN = '0'
+  // Gist sync ticks a timer for the life of the status plugin; the tests that
+  // load it do not all dispose it, so it stays off except in its own test.
+  process.env.OPENCODE_AUTH_LB_SYNC = '0'
   await rm(POOL, { force: true })
   await rm(PENDING, { force: true })
   respond = () => new Response('{}', { status: 200 })
@@ -65,6 +69,7 @@ afterEach(() => {
   globalThis.fetch = realFetch
   delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_CLAUDE_CODE_VERSION
   delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN
+  delete process.env.OPENCODE_AUTH_LB_SYNC
 })
 
 // Minimal structural views of the (untyped-in-public-API) hook shape.
@@ -3237,5 +3242,70 @@ describe('claude auto token', () => {
       [MINT, '/v1/messages Bearer tokA'].sort(),
     )
     expect(calls.slice(2)).toEqual([`/v1/messages Bearer ${MINTED}`])
+  })
+})
+
+describe('gist sync wiring', () => {
+  const requestForget = () =>
+    writeFile(
+      syncIntentFilePath(),
+      JSON.stringify({ action: 'forget', at: Date.now() }),
+    )
+  const pending = () => Bun.file(syncIntentFilePath()).exists()
+
+  async function untilServed(): Promise<void> {
+    const answered = () =>
+      Bun.file(join(DIR, 'auth-load-balancer-sync-status.json')).exists()
+    const deadline = Date.now() + 5_000
+    while ((await pending()) || !(await answered())) {
+      if (Date.now() > deadline) throw new Error('request never served')
+      await sleep(10)
+    }
+  }
+
+  test('the status plugin starts sync, which serves the TUI request file until disposed', async () => {
+    delete process.env.OPENCODE_AUTH_LB_SYNC
+    await rm(syncIntentFilePath(), { force: true })
+    const hooks = await loadHooks<ToolHooks & { dispose: () => Promise<void> }>(
+      AuthLoadBalancerStatusPlugin,
+    )
+    try {
+      await requestForget()
+      await untilServed()
+      const status = JSON.parse(
+        await readFile(
+          join(DIR, 'auth-load-balancer-sync-status.json'),
+          'utf8',
+        ),
+      )
+      expect(status.message).toContain('Stopped syncing')
+    } finally {
+      await hooks.dispose()
+    }
+    await requestForget()
+    await sleep(1_300)
+    expect(await pending()).toBe(true)
+    await rm(syncIntentFilePath(), { force: true })
+  })
+
+  test('OPENCODE_AUTH_LB_SYNC=0 leaves requests unserved', async () => {
+    await rm(syncIntentFilePath(), { force: true })
+    const hooks = await loadHooks<ToolHooks & { dispose: () => Promise<void> }>(
+      AuthLoadBalancerStatusPlugin,
+    )
+    await requestForget()
+    await sleep(1_300)
+    expect(await pending()).toBe(true)
+    await hooks.dispose()
+    await rm(syncIntentFilePath(), { force: true })
+  })
+
+  test('no agent tool reaches sync: the link embeds the key and would land in chat history', async () => {
+    const hooks = await loadHooks<ToolHooks>(AuthLoadBalancerStatusPlugin)
+    expect(Object.keys(hooks.tool).sort()).toEqual([
+      'auth_lb_disable',
+      'auth_lb_rename',
+      'auth_lb_status',
+    ])
   })
 })

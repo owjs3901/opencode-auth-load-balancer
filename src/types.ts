@@ -39,7 +39,47 @@ export interface TokenSet {
   expires: number
   /** Provider account id (e.g. chatgpt-account-id), when present. */
   accountId?: string
+  /** Organization the credential acts for (Anthropic), when known: see `PoolAccount.orgId`. */
+  orgId?: string
+  /**
+   * A long-lived bearer that only serves inference (Claude's `claude
+   * setup-token`). It joins a row as its `inferenceToken` instead of
+   * replacing the row's OAuth login.
+   */
+  inferenceOnly?: boolean
+  /** epoch ms the OAuth login itself expires: see `PoolAccount.refreshExpires`. */
+  refreshExpires?: number
+  /**
+   * Usage measured while logging in (a setup-token's validation probe, an
+   * OAuth login's first poll). It seeds the row, and its weekly reset anchor
+   * tells pairing which row the login belongs to.
+   */
+  usage?: UsageSnapshot
 }
+
+/** When and why a login stopped working. */
+export interface LostLogin {
+  at: number
+  reason: string
+}
+
+/**
+ * The logins of a row the provider refused for good: `oauth` when its
+ * refresh was refused (invalid_grant), `token` when its static credential (a
+ * setup-token or API key) answered 401.
+ */
+export interface LostLogins {
+  oauth?: LostLogin
+  token?: LostLogin
+}
+
+/**
+ * `expires` stamped on a static credential (a Kimi API key, a Claude
+ * setup-token): it has no refresh token behind it, so `needsRefresh` must
+ * never fire — one that stops working answers 401 instead. Finite, so the
+ * pool store's `Number.isFinite(expires)` normalization keeps it.
+ */
+export const STATIC_CREDENTIAL_EXPIRES = Number.MAX_SAFE_INTEGER
 
 /** One pooled credential. */
 export type CooldownKind = 'quota' | 'auth' | 'transient'
@@ -64,6 +104,36 @@ export interface PoolAccount {
   tokenGen?: number
   /** Provider account id (e.g. chatgpt-account-id), or null. */
   accountId: string | null
+  /**
+   * A long-lived inference-only bearer (Claude's `claude setup-token`). When
+   * set it serves every request, and the row's OAuth login (`access` +
+   * `refresh`), if any, only polls usage — so an OAuth logout no longer stops
+   * inference. On a row without an OAuth login, `access` mirrors it with
+   * `refresh: ''` and a never-due expiry, like any static credential.
+   */
+  inferenceToken?: string
+  /**
+   * Logins of this row the provider refused for good, each kept with when
+   * and why until that login is replaced. While the row's other login still
+   * works the row keeps serving on it, and the lost one shows as `oauth
+   * re-login` / `token re-login` — distinct from a whole-row `re-login`,
+   * which is what remains when nothing works.
+   */
+  lostLogins?: LostLogins
+  /**
+   * epoch ms the row's OAuth login itself expires — its refresh token, from
+   * `refresh_token_expires_in` or else Claude Code's own 30-day assumption at
+   * login. Refreshes do not extend it, so the dashboards warn in its last
+   * days, as Claude Code does.
+   */
+  refreshExpires?: number
+  /**
+   * Organization the row's credentials act for (Anthropic), when known. A
+   * setup-token carries no account identity — only the organization its
+   * responses report — so this is the key that pairs it with its account's
+   * OAuth login on one row.
+   */
+  orgId?: string
   usage: UsageSnapshot
   /** epoch ms; the account is skipped until this time. 0 = no cooldown. */
   cooldownUntil: number

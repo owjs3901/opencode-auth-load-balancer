@@ -736,6 +736,47 @@ export async function awaitSyncResult(
   return null
 }
 
+/**
+ * Withdraw the request stamped `at` when nobody answered it: it may hold the
+ * link and key, and a file nobody serves would otherwise linger. A different
+ * request (another `at`) is left alone. Nothing to do when the server already
+ * claimed it.
+ */
+export function discardSyncIntent(
+  at: number,
+  path: string = SYNC_INTENT_FILE,
+  ops: FsOps = realFsOps,
+): void {
+  try {
+    const parsed: unknown = JSON.parse(ops.readFileSync(path, 'utf8'))
+    if (isPlainRecordValue(parsed) && (parsed as { at?: unknown }).at === at)
+      ops.unlinkSync(path)
+  } catch {
+    /* absent, unreadable, or already claimed */
+  }
+}
+
+/**
+ * A label made safe to draw: control, bidi and zero-width characters become
+ * spaces. NOTE: copy of `src/sync/payload.ts`'s `printable` by design — the
+ * TUI cannot import `src/`.
+ */
+export function cleanLabel(label: string): string {
+  return Array.from(label, (ch) => {
+    const code = ch.codePointAt(0) ?? 0
+    const hidden =
+      code < 0x20 ||
+      (code >= 0x7f && code <= 0x9f) ||
+      code === 0x61c ||
+      (code >= 0x200b && code <= 0x200f) ||
+      (code >= 0x2028 && code <= 0x202e) ||
+      (code >= 0x2060 && code <= 0x2069) ||
+      code === 0xfeff
+    return hidden ? ' ' : ch
+  })
+    .join('')
+    .trim()
+}
 function ago(at: number, now: number): string {
   return now - at < 60_000 ? 'just now' : `${until(2 * now - at, now)} ago`
 }

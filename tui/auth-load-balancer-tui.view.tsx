@@ -33,10 +33,12 @@ import {
 import {
   awaitSyncResult,
   cfg,
+  cleanLabel,
   clearReloginTargetInPool,
   compareAscii,
   credentialTag,
   deleteFromPool,
+  discardSyncIntent,
   hasLostLogin,
   isGistLinkShape,
   lostLoginLines,
@@ -183,7 +185,7 @@ function BottomBar(props: { api: TuiPluginApi }) {
       if (!a) continue
       out.push({
         name: providerLabel(providerID),
-        label: a.label,
+        label: cleanLabel(a.label),
         weeklyPct: winPct(a.usage?.weekly, now),
         weeklyReset: until(a.usage?.weekly?.resetAt, now),
         hourlyPct: winPct(a.usage?.hourly, now),
@@ -289,7 +291,7 @@ function SidebarPanel(props: {
         if (available) rank += 1
         return {
           id: a.id,
-          label: a.label,
+          label: cleanLabel(a.label),
           providerID,
           current: sessionAcct === a.id,
           score: available ? score : null,
@@ -601,6 +603,7 @@ function SidebarPanel(props: {
     const at = writeSyncIntent(action, link)
     if (action === 'forget') return
     const status = await awaitSyncResult(at)
+    if (!status) discardSyncIntent(at)
     props.api.ui.toast({
       variant: status?.ok ? 'success' : 'error',
       message: status?.message ?? 'Sync is taking longer than expected.',

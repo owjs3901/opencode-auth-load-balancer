@@ -6,6 +6,8 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   awaitSyncResult,
+  cleanLabel,
+  discardSyncIntent,
   type FsOps,
   isGistLinkShape,
   POOL_FILE,
@@ -24,6 +26,7 @@ import { syncIntentFilePath } from '../pool/paths'
 import { encodeKey, generateKey } from '../sync/crypto'
 import { parseGistLink } from '../sync/gist'
 import { takeIntent } from '../sync/intent'
+import { printable } from '../sync/payload'
 
 const ROOT = mkdtempSync(join(tmpdir(), 'auth-lb-tui-sync-'))
 let seq = 0
@@ -301,3 +304,63 @@ function readFileSyncOrNull(path: string): string | null {
     return null
   }
 }
+
+describe('request lifetime', () => {
+  test('an unanswered request is withdrawn, but only our own', () => {
+    const path = scratch('intent')
+    writeFileSync(
+      path,
+      JSON.stringify({ action: 'subscribe', at: 5, link: 'x' }),
+    )
+    discardSyncIntent(6, path)
+    expect(readFileSyncOrNull(path)).not.toBeNull()
+    discardSyncIntent(5, path)
+    expect(readFileSyncOrNull(path)).toBeNull()
+  })
+
+  test('nothing to withdraw is fine: absent, claimed, or not a request', () => {
+    const path = scratch('intent')
+    discardSyncIntent(5, path)
+    writeFileSync(path, 'not json')
+    discardSyncIntent(5, path)
+    writeFileSync(path, '[]')
+    discardSyncIntent(5, path)
+    expect(readFileSyncOrNull(path)).toBe('[]')
+  })
+
+  test('a withdrawn request is gone for the server too', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'auth-lb-tui-discard-'))
+    const previous = process.env.OPENCODE_AUTH_LB_DIR
+    process.env.OPENCODE_AUTH_LB_DIR = dir
+    try {
+      const path = syncIntentFilePath()
+      const at = writeSyncIntent('sync', undefined, Date.now(), path)
+      discardSyncIntent(at, path)
+      expect(await takeIntent(Date.now())).toBeNull()
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_AUTH_LB_DIR
+      else process.env.OPENCODE_AUTH_LB_DIR = previous
+    }
+  })
+})
+
+describe('labels on screen', () => {
+  test('control, bidi and zero-width characters never reach the sidebar', () => {
+    expect(cleanLabel('a\u0000b\u0085c\u202ed\u200be\u2066f\ufeffg')).toBe(
+      'a b c d e f g',
+    )
+    expect(cleanLabel('  work 한국어  ')).toBe('work 한국어')
+    expect(cleanLabel('x\u061cy\u2028z')).toBe('x y z')
+  })
+
+  test('agrees with the server on what is hidden', () => {
+    for (const label of [
+      'a\u0085b',
+      'a\u202eb',
+      'a\u200fb',
+      'a\u2060b',
+      'a\u007fb',
+    ])
+      expect(cleanLabel(label)).toBe(printable(label))
+  })
+})

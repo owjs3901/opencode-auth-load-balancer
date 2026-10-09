@@ -8,7 +8,7 @@ Selection is **not** round-robin. It is weighted primarily by **weekly** usage, 
 
 ## Features
 
-- **Account pool** — register many Claude / Codex / Kimi Code accounts (Kimi also by API key); the plugin manages and rotates them.
+- **Account pool** — register many Claude / Codex / Kimi Code accounts (Claude also by a long-lived `claude setup-token` token, Kimi also by API key); the plugin manages and rotates them.
 - **Weekly-usage-weighted scheduling** — `urgency = weeklyRemaining / daysUntilWeeklyReset`. A sooner reset (e.g. 3 days) outranks a later one (7 days) at equal headroom; perishable quota is drained progressively, never crammed into the final hour.
 - **Automatic rotation** — on `429`/auth errors an account is cooled down and the next-best is tried; `retry-after` is honored.
 - **Model-tier fallback ladder (Fable, Opus, …)** — Claude Max accounts have *separate* weekly caps per premium model tier. When one is exhausted (a 429 whose `representative-claim` names a tier window, e.g. `seven_day_fable` / `seven_day_opus`), the balancer records a **per-tier** cooldown instead of cooling the whole account down (which used to cascade every account into a false "cooldown" and block *every* model on it). Requests for that tier then **steer to an account with tier headroom** — keeping the model you asked for — and only when the *whole pool* is tier-limited does the request descend **one rung down the fallback ladder**: the next model family in `fable → opus → sonnet → haiku` (order configurable via `OPENCODE_AUTH_LB_ANTHROPIC_FAMILY_ORDER`), picking the **highest-versioned model your provider config actually has** (a capped `claude-fable-5` prefers `claude-opus-4-9` over `claude-opus-4-8`). If that tier is capped too, it descends again (`fable → opus → sonnet`), each step toasted, preferably on the session's pinned account (keeping its prompt cache). Pin a fixed target or disable entirely via `OPENCODE_AUTH_LB_ANTHROPIC_OPUS_FALLBACK_MODEL`.
@@ -99,6 +99,31 @@ Durable turn references live beside the pool as `auth-load-balancer-pending.json
 A third file, `auth-load-balancer-cc-version.json`, caches the discovered Claude Code version (`{"version","fetchedAt"}` — see [Claude Code version](#claude-code-version)). It holds no account data and is safe to delete; it is rebuilt on the next start.
 
 > **OpenAI/Codex note:** the OpenAI path assumes opencode is configured to use the **Responses API** (the standard ChatGPT/Codex setup); `/responses` requests are routed to the Codex backend.
+
+### Claude long-lived token (`claude setup-token`)
+
+An OAuth login lives on a refresh token that rotates on every refresh, and once it is revoked the row drops to `re-login`. Claude Code's `claude setup-token` mints a token valid for a year that never refreshes, so it cannot be logged out that way. A Claude account can hold both on **one** row, each with one job:
+
+- **setup-token → inference.** Every request is sent with it; the OAuth login is never refreshed on the request path.
+- **OAuth login → usage.** It polls Anthropic's usage endpoint, which a setup-token cannot use (it is scoped to inference only, and the endpoint answers it `403 OAuth token does not meet scope requirement user:profile`).
+
+To add one:
+
+1. Run `claude setup-token` and approve it in the browser; it prints a token (`sk-ant-oat01-…`).
+2. `opencode auth login` → **Anthropic** → **"Claude Pro/Max setup-token (add account to load balancer)"**, and paste the token at the prompt. The CLI labels it "authorization code", but paste the token; line breaks from a wrapped terminal are ignored.
+3. Optionally add the OAuth login too (**"Claude Pro/Max (add account to load balancer)"**), before or after the token.
+
+**Pairing.** The token is checked with one request before it joins the pool (the same request seeds its usage), and that request names the organization the token acts for and when the account's usage windows reset. A setup-token has no account identity beyond that. An OAuth login is measured the same way before it lands, so the two halves pair automatically only when they belong to exactly one Claude row lacking that half. The organization must match, and the reset times must not disagree: the weekly window resets at a fixed per-account anchor, and a live 5h window starts with the account's own first request. That is exact for personal Pro/Max accounts (one organization each), and it tells Team/Enterprise seats apart whenever their reset times differ. A working credential is replaced only when the reset times confirm the same account, as with a token renewed before its year is up. To pair explicitly, click the row in the TUI sidebar: a Claude row offers one item per login (**Re-login OAuth / Add OAuth login**, **Replace / Re-login / Add setup-token**). Every completed pair is toasted, and the dashboards tag such rows `token` or `token+oauth`.
+
+**When one half stops working**, the row stays in rotation on the other. The dashboards show why, with the server's own reason (e.g. `400 invalid_grant: …`, `401 authentication_error: OAuth token has expired`) as a `!` line under the `auth_lb_status` table and under the row in the TUI sidebar:
+
+| What happened | Result |
+|---|---|
+| The OAuth login is revoked or expires | The row keeps serving inference on its token and is marked **`oauth re-login`** — in the dashboard state, in the TUI sidebar (with a **Re-login OAuth** menu item), and in the bottom bar — until an OAuth login is paired again. Meanwhile usage falls back to the response headers and, while the account sits idle, Claude Code's own quota check: a one-token `claude-haiku-4-5` request, sent at most once per 5 minutes per account. |
+| The token is revoked or expires (after a year) | The token is dropped, the same request is retried on the OAuth login, and the row is marked **`token re-login`** until a token is added again. |
+| Both are gone, or a token-only row's token answers `401` | The row switches to `re-login`; the TUI's re-login asks for a new token on a token-only row. |
+
+**OAuth logins expire on their own.** Anthropic gives an OAuth login a fixed lifetime that refreshes do not extend: `refresh_token_expires_in` when the token endpoint states it, otherwise the 30 days Claude Code itself assumes. In its last 3 days a row shows **`oauth expires Nd`**, mirroring Claude Code's own "Your login expires in N days" notice. Re-login OAuth then, or pair a setup-token so the expiry only costs usage measurement.
 
 ### Kimi Code
 
@@ -287,6 +312,8 @@ src/
   fetch.ts              # load-balanced fetch — the per-request choke point
   refresh.ts            # singleflight OAuth refresh, invalid_grant handling
   accounts.ts           # append / bootstrap accounts into the pool
+  pairing.ts            # which row a login lands on (setup-token ↔ OAuth pairing)
+  login-health.ts       # login tags, re-login / expiry warnings, why a login was lost
   session.ts            # derive a stable session key (affinity)
   types.ts              # provider-agnostic data model (accounts, usage windows, pool file)
   usage-merge.ts        # fixed weekly-anchor preservation / roll-forward
@@ -299,7 +326,7 @@ src/
   scheduler/            # config, score-core (shared scorer), select
   pool/                 # data-dir resolution + atomic, serialized pool store
   providers/            # ProviderAdapter contract + headers
-    anthropic/          #   Claude OAuth + Claude Code request transforms + usage
+    anthropic/          #   Claude OAuth + setup-token login + Claude Code request transforms + usage
     openai/             #   ChatGPT/Codex OAuth + Responses transforms + usage
     kimi/               #   Kimi Code device-code OAuth + API-key login + /usages (kimi.com + kimi.ai)
   cli/status.ts         # `bun run status`

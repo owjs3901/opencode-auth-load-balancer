@@ -203,6 +203,71 @@ describe('anthropic oauth', () => {
     expect(refreshed.refresh).toBe('r1') // falls back to the sent token
   })
 
+  test('exchange and refresh name the account and organization the token is for', async () => {
+    respond = () =>
+      Response.json({
+        access_token: 'a',
+        refresh_token: 'r',
+        expires_in: 3600,
+        account: { uuid: 'acc-1', email_address: 'me@example.com' },
+        organization: { uuid: 'org-1', name: 'Personal' },
+      })
+
+    const exchanged = await aExchange(
+      'https://cb?code=C&state=S',
+      'v',
+      'u',
+      'S',
+    )
+    const refreshed = await aRefresh('r0')
+
+    for (const tokens of [exchanged, refreshed])
+      expect(tokens).toMatchObject({ accountId: 'acc-1', orgId: 'org-1' })
+  })
+
+  test('a login expires when the token endpoint says, else in 30 days; a silent refresh keeps the old expiry', async () => {
+    const tokenResponse = (extra: object) => () =>
+      Response.json({
+        access_token: 'a',
+        refresh_token: 'r',
+        expires_in: 3600,
+        ...extra,
+      })
+    const daysLeft = (tokens: { refreshExpires?: number } | null) =>
+      ((tokens?.refreshExpires ?? 0) - Date.now()) / 86_400_000
+
+    respond = tokenResponse({ refresh_token_expires_in: 7 * 86_400 })
+    const stated = await aExchange('https://cb?code=C&state=S', 'v', 'u', 'S')
+    respond = tokenResponse({})
+    const assumed = await aExchange('https://cb?code=C&state=S', 'v', 'u', 'S')
+    const silentRefresh = await aRefresh('r0')
+
+    expect(daysLeft(stated)).toBeCloseTo(7, 2)
+    expect(daysLeft(assumed)).toBeCloseTo(30, 2)
+    expect(silentRefresh.refreshExpires).toBeUndefined()
+  })
+
+  test('a token response without a usable account or organization uuid names neither', async () => {
+    for (const identity of [
+      {},
+      { account: 'acc-1', organization: null },
+      { account: { uuid: 7 }, organization: { uuid: '' } },
+    ]) {
+      respond = () =>
+        Response.json({
+          access_token: 'a',
+          refresh_token: 'r',
+          expires_in: 3600,
+          ...identity,
+        })
+
+      const tokens = await aRefresh('r0')
+
+      expect(tokens.accountId).toBeUndefined()
+      expect(tokens.orgId).toBeUndefined()
+    }
+  })
+
   test('refresh returns rotated tokens and throws on non-ok', async () => {
     respond = () =>
       new Response(

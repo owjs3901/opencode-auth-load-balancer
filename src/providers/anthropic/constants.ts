@@ -45,6 +45,13 @@ export const OAUTH_SCOPES = [
   'user:file_upload',
 ]
 
+/**
+ * What `claude setup-token` asks for: an inference-only token valid for a
+ * year. `mintInferenceToken` (oauth.ts) asks a refresh grant for the same.
+ */
+export const INFERENCE_SCOPE = 'user:inference'
+export const INFERENCE_TOKEN_LIFETIME_S = 365 * 24 * 60 * 60
+
 export const TOOL_PREFIX = 'mcp_'
 
 /**

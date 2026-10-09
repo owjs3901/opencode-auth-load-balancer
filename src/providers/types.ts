@@ -157,6 +157,13 @@ export interface ProviderAdapter {
    * no refresh token, so it never rotates and a 401 parks it for a re-login.
    */
   tokenLogin?: TokenLogin
+  /**
+   * Present on providers whose OAuth login can mint the bearer `tokenLogin`
+   * takes (Claude): spends `refreshToken` like `refresh`, returning the
+   * minted token as `access`/`expires` beside the rotated refresh token.
+   * Throws on failure.
+   */
+  mintInferenceToken?(refreshToken: string): Promise<TokenSet>
 
   // --- request shaping -----------------------------------------------------
   /** Set auth + provider headers on an outgoing request for the chosen account. */

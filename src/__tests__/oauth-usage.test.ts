@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   authorize as aAuthorize,
   exchange as aExchange,
+  mintInferenceToken as aMint,
   refresh as aRefresh,
 } from '../providers/anthropic/oauth'
 import {
@@ -281,6 +282,41 @@ describe('anthropic oauth', () => {
     expect((await aRefresh('r1')).refresh).toBe('r2')
     respond = () => new Response('bad', { status: 401 })
     await expect(aRefresh('r1')).rejects.toThrow('401')
+  })
+
+  test('mint asks a refresh grant for a one-year inference-only token, keeping the rotated refresh token', async () => {
+    const sent: { url: string; body: unknown }[] = []
+    respond = (url, init) => {
+      sent.push({ url, body: JSON.parse(String(init?.body)) })
+      return Response.json({
+        access_token: 'sk-ant-oat01-minted',
+        refresh_token: 'r2',
+        expires_in: 31_536_000,
+        scope: 'user:inference',
+      })
+    }
+
+    const tokens = await aMint('r1')
+
+    expect(sent).toEqual([
+      {
+        url: 'https://platform.claude.com/v1/oauth/token',
+        body: {
+          grant_type: 'refresh_token',
+          refresh_token: 'r1',
+          client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+          scope: 'user:inference',
+          expires_in: 31_536_000,
+        },
+      },
+    ])
+    expect(tokens).toMatchObject({
+      access: 'sk-ant-oat01-minted',
+      refresh: 'r2',
+    })
+    expect((tokens.expires - Date.now()) / 86_400_000).toBeCloseTo(365, 2)
+    respond = () => new Response('bad', { status: 400 })
+    await expect(aMint('r1')).rejects.toThrow('400')
   })
 
   test('refresh keeps the previous refresh token when the server omits one', async () => {

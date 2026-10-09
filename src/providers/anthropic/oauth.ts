@@ -14,6 +14,8 @@ import {
   AUTHORIZE_URL,
   CLIENT_ID,
   CODE_CALLBACK_URL,
+  INFERENCE_SCOPE,
+  INFERENCE_TOKEN_LIFETIME_S,
   OAUTH_HTTP_TIMEOUT_MS,
   OAUTH_SCOPES,
   TOKEN_URL,
@@ -138,6 +140,28 @@ export async function refresh(refreshToken: string): Promise<TokenSet> {
 
   // readRefreshResponse throws the status-prefixed error contract on a non-OK
   // status or a malformed 200 body (see its doc comment in ../oauth-callback).
+  const json = await readRefreshResponse<AnthropicTokenResponse>(response)
+  return withAccount(toTokenSet(json, refreshToken), json, false)
+}
+
+/**
+ * Mint the token `claude setup-token` prints from an OAuth login, with no
+ * Claude Code and no second browser approval: a refresh grant naming the
+ * scope and lifetime it wants, as Claude Code's own `claude auth login`
+ * mints its one-year token from a refresh token. The grant spends the
+ * refresh token like `refresh`, so the result carries the rotated one;
+ * `access`/`expires` are the minted token. Throws like `refresh`.
+ */
+export async function mintInferenceToken(
+  refreshToken: string,
+): Promise<TokenSet> {
+  const response = await postToken({
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    client_id: CLIENT_ID,
+    scope: INFERENCE_SCOPE,
+    expires_in: INFERENCE_TOKEN_LIFETIME_S,
+  })
   const json = await readRefreshResponse<AnthropicTokenResponse>(response)
   return withAccount(toTokenSet(json, refreshToken), json, false)
 }

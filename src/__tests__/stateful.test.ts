@@ -9,7 +9,11 @@ const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-stateful-'))
 const POOL = join(DIR, 'auth-load-balancer.json')
 
 import { setReloginTargetInPool } from '../../tui/auth-load-balancer-tui.logic'
-import { addAccount, bootstrapFromOpencodeAuth } from '../accounts'
+import {
+  addAccount,
+  bootstrapFromOpencodeAuth,
+  dropInferenceToken,
+} from '../accounts'
 import { ACCOUNT_COOLDOWN_MS } from '../fetch'
 import { classifyProviderRecovery } from '../pending/recovery'
 import {
@@ -473,6 +477,58 @@ describe('pool store', () => {
     expect(row?.access).toBe('')
     expect(row?.refresh).toBe('')
     expect(row && needsRefresh(row, Date.now())).toBe(true)
+  })
+
+  test('readPool drops hand-edited garbage in the setup-token and login-health fields', async () => {
+    const lost = { at: 1, reason: '400 invalid_grant' }
+    const valid = account({
+      inferenceToken: 'tok',
+      orgId: 'org-1',
+      refreshExpires: 123,
+      lostLogins: { oauth: lost },
+    })
+    const broken = (fields: Record<string, unknown>) => ({
+      ...JSON.parse(JSON.stringify(account())),
+      ...fields,
+    })
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          valid,
+          broken({ inferenceToken: 42, orgId: '', refreshExpires: -1 }),
+          broken({
+            inferenceToken: '',
+            orgId: { uuid: 'x' },
+            refreshExpires: 'soon',
+            lostLogins: 'x',
+          }),
+          broken({
+            lostLogins: { oauth: { at: 'x', reason: 'r' }, token: null },
+          }),
+          broken({ lostLogins: { oauth: lost, token: { at: 2 } } }),
+        ],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+
+    const [kept, empty1, empty2, empty3, partial] = (await readPool()).accounts
+
+    expect(kept).toMatchObject({
+      inferenceToken: 'tok',
+      orgId: 'org-1',
+      refreshExpires: 123,
+      lostLogins: { oauth: lost },
+    })
+    for (const row of [empty1, empty2, empty3]) {
+      expect(row).not.toHaveProperty('inferenceToken')
+      expect(row).not.toHaveProperty('orgId')
+      expect(row).not.toHaveProperty('refreshExpires')
+      expect(row).not.toHaveProperty('lostLogins')
+    }
+    expect(partial?.lostLogins).toEqual({ oauth: lost })
   })
 
   test('readPool heals Infinity (JSON `1e999`) in every numeric field — typeof alone is not enough', async () => {
@@ -1796,6 +1852,282 @@ describe('accounts', () => {
       throw new Error('no auth')
     })
     expect((await readPool()).accounts).toHaveLength(0)
+  })
+})
+
+describe('credential pairing', () => {
+  const TOKEN: TokenSet = {
+    access: 'tok-1',
+    refresh: '',
+    expires: Number.MAX_SAFE_INTEGER,
+    inferenceOnly: true,
+    orgId: 'org-1',
+  }
+  const OAUTH: TokenSet = {
+    access: 'oat-1',
+    refresh: 'ort-1',
+    expires: 123,
+    accountId: 'acc-1',
+    orgId: 'org-1',
+  }
+  const PAIRED = {
+    inferenceToken: 'tok-1',
+    access: 'oat-1',
+    refresh: 'ort-1',
+    expires: 123,
+    accountId: 'acc-1',
+    orgId: 'org-1',
+  }
+
+  test('a pasted setup-token becomes a static row whose login mirrors the token', async () => {
+    const row = await addAccount('anthropic', TOKEN)
+
+    expect(row).toMatchObject({
+      access: 'tok-1',
+      refresh: '',
+      expires: Number.MAX_SAFE_INTEGER,
+      inferenceToken: 'tok-1',
+      orgId: 'org-1',
+    })
+  })
+
+  test("the OAuth login of a token-only row's organization joins that row; the token keeps inference", async () => {
+    await addAccount('anthropic', TOKEN)
+
+    await addAccount('anthropic', OAUTH)
+
+    const rows = (await readPool()).accounts
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject(PAIRED)
+  })
+
+  test("the setup-token of an OAuth row's organization joins that row; the OAuth login keeps usage", async () => {
+    await addAccount('anthropic', OAUTH)
+
+    await addAccount('anthropic', TOKEN)
+
+    const rows = (await readPool()).accounts
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject(PAIRED)
+  })
+
+  test('a re-pasted setup-token stays on its row', async () => {
+    const first = await addAccount('anthropic', { ...TOKEN, orgId: undefined })
+
+    const again = await addAccount('anthropic', { ...TOKEN, orgId: undefined })
+
+    expect(again.id).toBe(first.id)
+    expect((await readPool()).accounts).toHaveLength(1)
+  })
+
+  test('never auto-pairs inside an organization holding several rows (Team seats)', async () => {
+    await addAccount('anthropic', OAUTH)
+    await addAccount('anthropic', {
+      ...OAUTH,
+      access: 'oat-2',
+      refresh: 'ort-2',
+      accountId: 'acc-2',
+    })
+
+    const token = await addAccount('anthropic', TOKEN)
+
+    expect((await readPool()).accounts).toHaveLength(3)
+    expect(token.refresh).toBe('')
+  })
+
+  test('never lets a setup-token displace a working one of its organization: that is another seat', async () => {
+    const first = await addAccount('anthropic', TOKEN)
+
+    const second = await addAccount('anthropic', { ...TOKEN, access: 'tok-2' })
+
+    expect(second.id).not.toBe(first.id)
+    expect(findAccount(await readPool(), first.id)?.inferenceToken).toBe(
+      'tok-1',
+    )
+  })
+
+  test('never lets an OAuth login displace a working one of its organization: that is another seat', async () => {
+    const first = await addAccount('anthropic', OAUTH)
+
+    const second = await addAccount('anthropic', {
+      ...OAUTH,
+      access: 'oat-2',
+      refresh: 'ort-2',
+      accountId: 'acc-2',
+    })
+
+    expect(second.id).not.toBe(first.id)
+    expect(findAccount(await readPool(), first.id)?.accountId).toBe('acc-1')
+  })
+
+  test('an OAuth login paired onto a row whose OAuth login died clears its lost record and records its expiry', async () => {
+    const row = await addAccount('anthropic', TOKEN)
+    await mutatePool((pool) => {
+      const stored = findAccount(pool, row.id)
+      if (stored) stored.lostLogins = { oauth: { at: 1, reason: 'gone' } }
+    })
+
+    const repaired = await addAccount('anthropic', {
+      ...OAUTH,
+      refreshExpires: 999,
+    })
+
+    expect(repaired.id).toBe(row.id)
+    const stored = findAccount(await readPool(), row.id)
+    expect(stored).not.toHaveProperty('lostLogins')
+    expect(stored?.refreshExpires).toBe(999)
+  })
+
+  test('a setup-token parked for re-login is replaced by the next token of its organization', async () => {
+    const parked = await addAccount('anthropic', TOKEN)
+    await mutatePool((pool) => {
+      const row = findAccount(pool, parked.id)
+      if (!row) return
+      row.disabledReason = 'credential rejected (401): re-login'
+      row.lostLogins = { token: { at: 1, reason: '401' } }
+    })
+
+    const renewed = await addAccount('anthropic', {
+      ...TOKEN,
+      access: 'tok-2',
+    })
+
+    expect(renewed.id).toBe(parked.id)
+    expect(renewed).toMatchObject({
+      inferenceToken: 'tok-2',
+      access: 'tok-2',
+      disabledReason: null,
+    })
+    expect(renewed).not.toHaveProperty('lostLogins')
+  })
+
+  const DAY = 24 * 60 * 60 * 1000
+  const reading = (weeklyResetAt: number, hourlyResetAt = 0) => ({
+    hourly: hourlyResetAt ? { utilization: 0.1, resetAt: hourlyResetAt } : null,
+    weekly: { utilization: 0.2, resetAt: weeklyResetAt },
+    capturedAt: Date.now(),
+  })
+
+  test('a weekly reset anchor that differs rules out pairing with a row of another account', async () => {
+    const anchor = Date.now() + 2 * DAY
+    await addAccount('anthropic', { ...OAUTH, usage: reading(anchor) })
+
+    const token = await addAccount('anthropic', {
+      ...TOKEN,
+      usage: reading(anchor + 3 * 60 * 60 * 1000),
+    })
+
+    expect(token.refresh).toBe('')
+    expect((await readPool()).accounts).toHaveLength(2)
+  })
+
+  test('weekly reset anchors tell Team seats apart: a token pairs with the seat whose anchor matches', async () => {
+    const anchor = Date.now() + 2 * DAY
+    const seat1 = await addAccount('anthropic', {
+      ...OAUTH,
+      usage: reading(anchor),
+    })
+    await addAccount('anthropic', {
+      ...OAUTH,
+      access: 'oat-2',
+      refresh: 'ort-2',
+      accountId: 'acc-2',
+      usage: reading(anchor + DAY),
+    })
+
+    const token = await addAccount('anthropic', {
+      ...TOKEN,
+      usage: reading(anchor + 7 * DAY + 30_000),
+    })
+
+    expect(token.id).toBe(seat1.id)
+    expect(token.inferenceToken).toBe('tok-1')
+  })
+
+  test('a live 5h window that disagrees rules the pairing out', async () => {
+    const anchor = Date.now() + 2 * DAY
+    const fiveHour = Date.now() + 60 * 60 * 1000
+    await addAccount('anthropic', {
+      ...OAUTH,
+      usage: reading(anchor, fiveHour),
+    })
+
+    const token = await addAccount('anthropic', {
+      ...TOKEN,
+      usage: reading(anchor, fiveHour + 60 * 60 * 1000),
+    })
+
+    expect(token.refresh).toBe('')
+  })
+
+  test('a renewed token replaces a working one when the reset anchors confirm the same account', async () => {
+    const anchor = Date.now() + 2 * DAY
+    const row = await addAccount('anthropic', {
+      ...TOKEN,
+      usage: reading(anchor),
+    })
+
+    const renewed = await addAccount('anthropic', {
+      ...TOKEN,
+      access: 'tok-2',
+      usage: reading(anchor),
+    })
+
+    expect(renewed.id).toBe(row.id)
+    expect(renewed.inferenceToken).toBe('tok-2')
+  })
+
+  test('the usage a login measured seeds its new row and folds into the row it joins', async () => {
+    const anchor = Date.now() + 2 * DAY
+    const row = await addAccount('anthropic', {
+      ...TOKEN,
+      usage: reading(anchor, Date.now() + 60_000),
+    })
+    expect(row.usage.weekly?.utilization).toBe(0.2)
+
+    await addAccount('anthropic', {
+      ...OAUTH,
+      usage: {
+        hourly: null,
+        weekly: { utilization: 0.5, resetAt: anchor },
+        capturedAt: Date.now(),
+      },
+    })
+
+    const stored = findAccount(await readPool(), row.id)
+    expect(stored?.usage.weekly?.utilization).toBe(0.5)
+    expect(stored?.usage.hourly?.utilization).toBe(0.1)
+  })
+
+  test('the TUI hint attaches a setup-token to the clicked row with no organization to go by', async () => {
+    const clicked = await addAccount('anthropic', {
+      ...OAUTH,
+      orgId: undefined,
+    })
+    await mutatePool((pool) => {
+      pool.relogin = {
+        accountId: clicked.id,
+        providerID: 'anthropic',
+        expiresAt: Date.now() + 60_000,
+      }
+    })
+
+    const row = await addAccount('anthropic', { ...TOKEN, orgId: undefined })
+
+    expect(row.id).toBe(clicked.id)
+    expect(row).toMatchObject({ inferenceToken: 'tok-1', refresh: 'ort-1' })
+  })
+
+  test('dropping a rejected setup-token records why, and spares a row that holds a newer one', async () => {
+    const row = await addAccount('anthropic', OAUTH)
+    await addAccount('anthropic', TOKEN)
+
+    await dropInferenceToken(row.id, 'tok-old', '401 expired')
+    await dropInferenceToken(row.id, 'tok-1', '401 revoked')
+
+    const stored = findAccount(await readPool(), row.id)
+    expect(stored).not.toHaveProperty('inferenceToken')
+    expect(stored?.lostLogins?.token?.reason).toBe('401 revoked')
   })
 })
 

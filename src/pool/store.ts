@@ -9,7 +9,7 @@ import {
   type SessionAssignment,
   type UsageWindow,
 } from '../types'
-import { clamp01, ignore, isPlainObject, sleep } from '../util'
+import { clamp01, ignore, isFiniteNumber, isPlainObject, sleep } from '../util'
 import { type LockOptions, withLock as withFileLock } from './lock'
 import { poolFilePath } from './paths'
 
@@ -244,6 +244,32 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     // null restores the working JWT-decode fallback.
     if (row.accountId !== null && typeof row.accountId !== 'string') {
       row.accountId = null
+    }
+    // The optional pairing fields get the same heal, dropped rather than
+    // defaulted: a non-string `inferenceToken` would ship as the Bearer of
+    // every request, and a garbage `orgId` could pair credentials wrongly.
+    if (typeof row.inferenceToken !== 'string' || row.inferenceToken === '')
+      delete row.inferenceToken
+    if (typeof row.orgId !== 'string' || row.orgId === '') delete row.orgId
+    if (!isFiniteNumber(row.refreshExpires) || row.refreshExpires <= 0)
+      delete row.refreshExpires
+    // Lost-login records feed the dashboards' warnings and their "why": keep
+    // only well-formed entries, and drop the map once nothing is left in it.
+    if (row.lostLogins !== undefined) {
+      const lost: Record<string, unknown> = isPlainObject(row.lostLogins)
+        ? row.lostLogins
+        : {}
+      for (const login of ['oauth', 'token'] as const) {
+        const entry = lost[login]
+        if (
+          !isPlainObject(entry) ||
+          !isFiniteNumber(entry.at) ||
+          typeof entry.reason !== 'string'
+        )
+          delete lost[login]
+      }
+      if (lost.oauth === undefined && lost.token === undefined)
+        delete row.lostLogins
     }
     // A hand-edited string `tokenGen` survives `genOf`'s `?? 0`, and
     // `commitRefresh`'s `gen + 1` becomes string CONCATENATION ("abc" →

@@ -1,0 +1,7 @@
+{
+  "changes": {
+    "package.json": "Minor"
+  },
+  "note": "Make gist sync two-way: every machine that follows the gist link downloads and applies it, and a machine with a GitHub token (GITHUB_TOKEN, GH_TOKEN or gh) that can write the gist also uploads its own Claude tokens and Kimi keys; each machine has a random origin and only ever adds or removes its own entries, a credential sync imported is never uploaded back, an account that already has a token never has it replaced by another machine's, a write is a read-apply-merge of the current gist and only happens when the list differs, and a PATCH refused with 403 or 404 turns uploading off for an hour while downloads continue; payload version 2",
+  "date": "2026-10-10T07:00:00.0000000Z"
+}

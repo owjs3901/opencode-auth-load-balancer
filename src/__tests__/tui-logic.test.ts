@@ -6,11 +6,14 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   clearReloginTargetInPool,
+  credentialTag,
   deleteFromPool,
   type FsOps,
+  hasLostLogin,
   isAbsentOrPlainRecord,
   isFiniteNumber,
   isPlainRecordValue,
+  lostLoginLines,
   MANUAL_DISABLED_REASON,
   mutatePoolFile,
   pct,
@@ -20,6 +23,7 @@ import {
   readPool,
   RELOGIN_TTL_MS,
   renameInPool,
+  rowWarnings,
   sessionAccountId,
   sessionFallback,
   setDisabledInPool,
@@ -603,6 +607,15 @@ describe('pickAuthMethodIndex', () => {
     ]
     expect(pickAuthMethodIndex(kimi)).toBe(0)
     expect(pickAuthMethodIndex(kimi, true)).toBe(1)
+    const claude = [
+      { type: 'oauth', label: 'Claude Pro/Max (add account to load balancer)' },
+      {
+        type: 'oauth',
+        label: 'Claude Pro/Max setup-token (add account to load balancer)',
+      },
+    ]
+    expect(pickAuthMethodIndex(claude)).toBe(0)
+    expect(pickAuthMethodIndex(claude, true)).toBe(1)
     // With no key login on offer, a key row still re-logs in through the pooled one.
     expect(
       pickAuthMethodIndex(
@@ -615,6 +628,84 @@ describe('pickAuthMethodIndex', () => {
         true,
       ),
     ).toBe(0)
+  })
+})
+
+describe('credentialTag', () => {
+  test('tags a setup-token row with the logins it holds, mirroring the dashboard', () => {
+    const row = (over: Partial<PoolAccount>): PoolAccount => ({
+      id: 'a',
+      providerID: 'anthropic',
+      label: 'a',
+      refresh: 'ort',
+      ...over,
+    })
+
+    expect(credentialTag(row({ inferenceToken: 'tok' }))).toBe('token+oauth')
+    expect(credentialTag(row({ inferenceToken: 'tok', refresh: '' }))).toBe(
+      'token',
+    )
+    expect(credentialTag(row({}))).toBe('')
+    expect(credentialTag(row({ inferenceToken: '' }))).toBe('')
+  })
+})
+
+describe('login warnings', () => {
+  const NOW = 1_000_000_000_000
+  const DAY = 24 * 60 * 60 * 1000
+  const row = (over: Partial<PoolAccount>): PoolAccount => ({
+    id: 'a',
+    providerID: 'anthropic',
+    label: 'a',
+    refresh: 'ort',
+    ...over,
+  })
+
+  test('flags a lost half and an OAuth login in its last 3 days, mirroring the dashboard', () => {
+    const lost = { at: NOW - 1000, reason: '401' }
+
+    expect(rowWarnings(row({ lostLogins: { oauth: lost } }), NOW)).toEqual([
+      'oauth re-login',
+    ])
+    expect(rowWarnings(row({ lostLogins: { token: lost } }), NOW)).toEqual([
+      'token re-login',
+    ])
+    expect(rowWarnings(row({ refreshExpires: NOW + DAY / 2 }), NOW)).toEqual([
+      'oauth expires 1d',
+    ])
+    expect(rowWarnings(row({ refreshExpires: NOW + 4 * DAY }), NOW)).toEqual([])
+  })
+
+  test('a parked row, or a hand-edited record, raises no warning', () => {
+    const lost = { at: NOW, reason: '401' }
+
+    expect(
+      rowWarnings(
+        row({ disabledReason: 're-login', lostLogins: { oauth: lost } }),
+        NOW,
+      ),
+    ).toEqual([])
+    expect(
+      rowWarnings(
+        row({ lostLogins: JSON.parse('{"oauth":{"at":"soon","reason":"r"}}') }),
+        NOW,
+      ),
+    ).toEqual([])
+    expect(hasLostLogin(row({ lostLogins: null }), 'token')).toBe(false)
+  })
+
+  test('says why each lost login stopped working, and how long ago', () => {
+    const a = row({
+      lostLogins: {
+        oauth: { at: NOW - 3 * 60 * 60 * 1000, reason: '400 invalid_grant' },
+        token: { at: NOW - 1000, reason: '401 revoked' },
+      },
+    })
+
+    expect(lostLoginLines(a, NOW)).toEqual([
+      'oauth lost 3h ago: 400 invalid_grant',
+      'token lost just now: 401 revoked',
+    ])
   })
 })
 

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   authorize as aAuthorize,
   exchange as aExchange,
+  mintInferenceToken as aMint,
   refresh as aRefresh,
 } from '../providers/anthropic/oauth'
 import {
@@ -203,6 +204,71 @@ describe('anthropic oauth', () => {
     expect(refreshed.refresh).toBe('r1') // falls back to the sent token
   })
 
+  test('exchange and refresh name the account and organization the token is for', async () => {
+    respond = () =>
+      Response.json({
+        access_token: 'a',
+        refresh_token: 'r',
+        expires_in: 3600,
+        account: { uuid: 'acc-1', email_address: 'me@example.com' },
+        organization: { uuid: 'org-1', name: 'Personal' },
+      })
+
+    const exchanged = await aExchange(
+      'https://cb?code=C&state=S',
+      'v',
+      'u',
+      'S',
+    )
+    const refreshed = await aRefresh('r0')
+
+    for (const tokens of [exchanged, refreshed])
+      expect(tokens).toMatchObject({ accountId: 'acc-1', orgId: 'org-1' })
+  })
+
+  test('a login expires when the token endpoint says, else in 30 days; a silent refresh keeps the old expiry', async () => {
+    const tokenResponse = (extra: object) => () =>
+      Response.json({
+        access_token: 'a',
+        refresh_token: 'r',
+        expires_in: 3600,
+        ...extra,
+      })
+    const daysLeft = (tokens: { refreshExpires?: number } | null) =>
+      ((tokens?.refreshExpires ?? 0) - Date.now()) / 86_400_000
+
+    respond = tokenResponse({ refresh_token_expires_in: 7 * 86_400 })
+    const stated = await aExchange('https://cb?code=C&state=S', 'v', 'u', 'S')
+    respond = tokenResponse({})
+    const assumed = await aExchange('https://cb?code=C&state=S', 'v', 'u', 'S')
+    const silentRefresh = await aRefresh('r0')
+
+    expect(daysLeft(stated)).toBeCloseTo(7, 2)
+    expect(daysLeft(assumed)).toBeCloseTo(30, 2)
+    expect(silentRefresh.refreshExpires).toBeUndefined()
+  })
+
+  test('a token response without a usable account or organization uuid names neither', async () => {
+    for (const identity of [
+      {},
+      { account: 'acc-1', organization: null },
+      { account: { uuid: 7 }, organization: { uuid: '' } },
+    ]) {
+      respond = () =>
+        Response.json({
+          access_token: 'a',
+          refresh_token: 'r',
+          expires_in: 3600,
+          ...identity,
+        })
+
+      const tokens = await aRefresh('r0')
+
+      expect(tokens.accountId).toBeUndefined()
+      expect(tokens.orgId).toBeUndefined()
+    }
+  })
+
   test('refresh returns rotated tokens and throws on non-ok', async () => {
     respond = () =>
       new Response(
@@ -216,6 +282,41 @@ describe('anthropic oauth', () => {
     expect((await aRefresh('r1')).refresh).toBe('r2')
     respond = () => new Response('bad', { status: 401 })
     await expect(aRefresh('r1')).rejects.toThrow('401')
+  })
+
+  test('mint asks a refresh grant for a one-year inference-only token, keeping the rotated refresh token', async () => {
+    const sent: { url: string; body: unknown }[] = []
+    respond = (url, init) => {
+      sent.push({ url, body: JSON.parse(String(init?.body)) })
+      return Response.json({
+        access_token: 'sk-ant-oat01-minted',
+        refresh_token: 'r2',
+        expires_in: 31_536_000,
+        scope: 'user:inference',
+      })
+    }
+
+    const tokens = await aMint('r1')
+
+    expect(sent).toEqual([
+      {
+        url: 'https://platform.claude.com/v1/oauth/token',
+        body: {
+          grant_type: 'refresh_token',
+          refresh_token: 'r1',
+          client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+          scope: 'user:inference',
+          expires_in: 31_536_000,
+        },
+      },
+    ])
+    expect(tokens).toMatchObject({
+      access: 'sk-ant-oat01-minted',
+      refresh: 'r2',
+    })
+    expect((tokens.expires - Date.now()) / 86_400_000).toBeCloseTo(365, 2)
+    respond = () => new Response('bad', { status: 400 })
+    await expect(aMint('r1')).rejects.toThrow('400')
   })
 
   test('refresh keeps the previous refresh token when the server omits one', async () => {

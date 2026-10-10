@@ -11,7 +11,7 @@
  */
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import {
   displayUtil,
@@ -62,8 +62,18 @@ export interface PoolAccount {
   /** LEGACY pre-tier-map field (folded into `modelCooldownsUntil.opus` for display until the server migrates the file). */
   opusCooldownUntil?: number
   disabledReason?: string | null
-  /** Empty on a static API-key row (Kimi Code), which re-logs in with a new key. */
+  /** Empty on a static-credential row (Kimi Code API key, Claude setup-token), which re-logs in with a new one. */
   refresh?: string
+  /** A Claude setup-token serving the row's inference; only its presence is read. */
+  inferenceToken?: string
+  /** Logins refused for good, with when and why (`src/types.ts` `LostLogins`). */
+  lostLogins?: { oauth?: LostLogin | null; token?: LostLogin | null } | null
+  /** epoch ms the row's OAuth login itself expires. */
+  refreshExpires?: number
+}
+export interface LostLogin {
+  at?: number
+  reason?: string
 }
 /** Loosely-typed view of the on-disk pool JSON (one shape for reads AND read-modify-writes). */
 export interface PoolShape {
@@ -278,8 +288,9 @@ export function clearReloginTargetInPool(path: string = POOL_FILE): void {
  * opencode aggregates auth methods from every plugin registered for a provider,
  * so this plugin's position is not stable. Prefer its pooled-login label, then
  * fall back to the provider's first OAuth method when no such label is present.
- * A provider can offer both an account login and an API-key login (Kimi
- * Code), so `apiKey` picks the kind that matches how the row was added.
+ * A provider can offer both an account login and a static-credential login
+ * (Kimi Code's API key, Claude's `claude setup-token`), so `apiKey` picks the
+ * kind that matches how the row was added.
  */
 export function pickAuthMethodIndex(
   methods: readonly { type?: string; label?: string }[] | undefined,
@@ -288,16 +299,82 @@ export function pickAuthMethodIndex(
   const pooled = (method: { type?: string; label?: string }): boolean =>
     method.type === 'oauth' &&
     (method.label?.toLowerCase().includes('load balancer') ?? false)
+  const staticLogin = (method: { label?: string }): boolean => {
+    const label = method.label?.toLowerCase() ?? ''
+    return label.includes('api key') || label.includes('setup-token')
+  }
   const sameKind = methods?.findIndex(
-    (method) =>
-      pooled(method) &&
-      (method.label?.toLowerCase().includes('api key') ?? false) === apiKey,
+    (method) => pooled(method) && staticLogin(method) === apiKey,
   )
   if (sameKind !== undefined && sameKind >= 0) return sameKind
   const anyPooled = methods?.findIndex(pooled)
   if (anyPooled !== undefined && anyPooled >= 0) return anyPooled
   const oauth = methods?.findIndex((method) => method.type === 'oauth')
   return oauth !== undefined && oauth >= 0 ? oauth : null
+}
+
+/**
+ * A setup-token row's credentials — `token`, or `token+oauth` once paired
+ * with its OAuth login — and '' for any other row. Mirrors `src/status.ts`.
+ */
+export function credentialTag(a: PoolAccount): string {
+  if (typeof a.inferenceToken !== 'string' || a.inferenceToken === '') return ''
+  return a.refresh ? 'token+oauth' : 'token'
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+/** NOTE: copy of `src/status.ts`'s threshold — Claude Code's own 3-day login-expiry warning. */
+const LOGIN_EXPIRY_WARNING_MS = 3 * DAY_MS
+
+/** A well-formed lost-login record from the RAW pool file, or undefined. */
+function lostLoginOf(
+  a: PoolAccount,
+  login: 'oauth' | 'token',
+): { at: number; reason: string } | undefined {
+  const lost = a.lostLogins?.[login]
+  return lost && isFiniteNumber(lost.at) && typeof lost.reason === 'string'
+    ? { at: lost.at, reason: lost.reason }
+    : undefined
+}
+
+export function hasLostLogin(
+  a: PoolAccount,
+  login: 'oauth' | 'token',
+): boolean {
+  return lostLoginOf(a, login) !== undefined
+}
+
+/**
+ * Login trouble on a row still in service — `oauth re-login` / `token
+ * re-login` for a lost half of a paired row, `oauth expires Nd` for an OAuth
+ * login in its last days. A parked row shows none: its state already reads
+ * `re-login` / `disabled`. Mirrors `src/status.ts`.
+ */
+export function rowWarnings(a: PoolAccount, now: number): string[] {
+  if (a.disabledReason) return []
+  const warnings: string[] = []
+  if (hasLostLogin(a, 'oauth')) warnings.push('oauth re-login')
+  if (hasLostLogin(a, 'token')) warnings.push('token re-login')
+  const left = (isFiniteNumber(a.refreshExpires) ? a.refreshExpires : 0) - now
+  if (a.refresh && left > 0 && left <= LOGIN_EXPIRY_WARNING_MS)
+    warnings.push(`oauth expires ${Math.ceil(left / DAY_MS)}d`)
+  return warnings
+}
+
+/** Why each lost login stopped working, one line apiece (the dashboard's `!` lines). */
+export function lostLoginLines(a: PoolAccount, now: number): string[] {
+  const lines: string[] = []
+  for (const login of ['oauth', 'token'] as const) {
+    const lost = lostLoginOf(a, login)
+    if (lost) {
+      const ago =
+        now - lost.at < 60_000
+          ? 'just now'
+          : `${until(2 * now - lost.at, now)} ago`
+      lines.push(`${login} lost ${ago}: ${lost.reason}`)
+    }
+  }
+  return lines
 }
 
 export function renameInPool(
@@ -500,4 +577,283 @@ export function stateOf(
   if (tiers.length > 0)
     return tiers.map(([tier, at]) => `${tier} ${until(at, now)}`).join(' · ')
   return ''
+}
+
+// ---------------------------------------------------------------------------
+// Gist sync. The server runs it; the TUI only asks (an intent file beside the
+// pool, which the server claims and deletes) and shows what comes back. None
+// of this may put the share link anywhere but the dialog the user asked for.
+// ---------------------------------------------------------------------------
+
+const DATA_DIR = dirname(POOL_FILE)
+export const SYNC_STATE_FILE = join(DATA_DIR, 'auth-load-balancer-sync.json')
+export const SYNC_STATUS_FILE = join(
+  DATA_DIR,
+  'auth-load-balancer-sync-status.json',
+)
+export const SYNC_INTENT_FILE = join(
+  DATA_DIR,
+  'auth-load-balancer-sync-intent.json',
+)
+
+export type SyncAction =
+  'upload' | 'upload-new' | 'subscribe' | 'sync' | 'forget'
+export type SyncMenuId = SyncAction | 'show-link'
+
+export interface SyncStatusView {
+  at: number
+  ok: boolean
+  message: string
+  reqAt?: number
+}
+/** What this machine can do besides downloading, as the server last found it. */
+export type SyncWriteView = 'ok' | 'no-token' | 'denied' | 'unreadable'
+const WRITE_VIEWS: readonly string[] = [
+  'ok',
+  'no-token',
+  'denied',
+  'unreadable',
+]
+
+export interface SyncView {
+  /** This machine has joined a gist (created it, or followed its link). */
+  joined: boolean
+  /** It created the gist: only then may it show the link. */
+  creator: boolean
+  write?: SyncWriteView
+  syncedAt?: number
+  status?: SyncStatusView
+}
+function readJsonFile(path: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    return isPlainRecordValue(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The latest outcome the server wrote, or undefined. */
+export function readSyncStatus(
+  path: string = SYNC_STATUS_FILE,
+): SyncStatusView | undefined {
+  const raw = readJsonFile(path)
+  if (
+    !raw ||
+    !isFiniteNumber(raw.at) ||
+    typeof raw.ok !== 'boolean' ||
+    typeof raw.message !== 'string'
+  )
+    return undefined
+  return {
+    at: raw.at,
+    ok: raw.ok,
+    message: raw.message,
+    ...(isFiniteNumber(raw.reqAt) ? { reqAt: raw.reqAt } : {}),
+  }
+}
+
+/** Whether this machine joined a gist, what it can do, the last sync time and the latest outcome: everything the sidebar shows, and no key. */
+export function readSyncView(
+  statePath: string = SYNC_STATE_FILE,
+  statusPath: string = SYNC_STATUS_FILE,
+): SyncView {
+  const state = readJsonFile(statePath)
+  const joined =
+    typeof state?.gistId === 'string' && typeof state.key === 'string'
+  const status = readSyncStatus(statusPath)
+  const write = state?.write
+  return {
+    joined,
+    creator: joined && state?.creator === true,
+    ...(joined && typeof write === 'string' && WRITE_VIEWS.includes(write)
+      ? { write: write as SyncWriteView }
+      : {}),
+    ...(joined && isFiniteNumber(state?.syncedAt)
+      ? { syncedAt: state.syncedAt }
+      : {}),
+    ...(status ? { status } : {}),
+  }
+}
+/** The share link, read only when the user asks to see it; only the machine that created the gist has it to show. */
+export function readShareLink(
+  statePath: string = SYNC_STATE_FILE,
+): string | undefined {
+  const state = readJsonFile(statePath)
+  if (
+    state?.creator !== true ||
+    typeof state.gistId !== 'string' ||
+    typeof state.key !== 'string'
+  )
+    return undefined
+  const owner = typeof state.owner === 'string' ? `${state.owner}/` : ''
+  return `https://gist.github.com/${owner}${state.gistId}#${state.key}`
+}
+
+/** Mirror of the server's link check, so a typo is caught before it is sent. */
+export function isGistLinkShape(text: string): boolean {
+  return /^https:\/\/gist\.github\.com\/(?:[\w-]{1,39}\/)?[\da-f]{20,40}#[\w-]{43}$/i.test(
+    text.trim(),
+  )
+}
+
+/**
+ * Ask the server to do `action`. Written atomically (temp + rename) with an
+ * owner-only mode; a `subscribe` carries the link, so the server deletes the
+ * file the moment it reads it. Returns the request's timestamp, which the
+ * server echoes in its outcome.
+ */
+export function writeSyncIntent(
+  action: SyncAction,
+  link?: string,
+  now: number = Date.now(),
+  path: string = SYNC_INTENT_FILE,
+  ops: FsOps = realFsOps,
+): number {
+  const tmp = `${path}.${process.pid}.${now}.tmp`
+  try {
+    ops.writeFileSync(
+      tmp,
+      JSON.stringify({
+        action,
+        at: now,
+        ...(link ? { link: link.trim() } : {}),
+      }),
+      { mode: 0o600 },
+    )
+    ops.renameSync(tmp, path)
+  } catch {
+    try {
+      ops.unlinkSync(tmp)
+    } catch {
+      /* ignore — best-effort cleanup */
+    }
+  }
+  return now
+}
+
+/** The outcome answering the request stamped `since`, or null when the server does not answer in time. */
+export async function awaitSyncResult(
+  since: number,
+  read: () => SyncStatusView | undefined = readSyncStatus,
+  sleep: (ms: number) => Promise<unknown> = (ms) => Bun.sleep(ms),
+  timeoutMs = 25_000,
+  stepMs = 500,
+): Promise<SyncStatusView | null> {
+  for (let waited = 0; waited <= timeoutMs; waited += stepMs) {
+    const status = read()
+    if (status?.reqAt === since) return status
+    await sleep(stepMs)
+  }
+  return null
+}
+
+/**
+ * Withdraw the request stamped `at` when nobody answered it: it may hold the
+ * link and key, and a file nobody serves would otherwise linger. A different
+ * request (another `at`) is left alone. Nothing to do when the server already
+ * claimed it.
+ */
+export function discardSyncIntent(
+  at: number,
+  path: string = SYNC_INTENT_FILE,
+  ops: FsOps = realFsOps,
+): void {
+  try {
+    const parsed: unknown = JSON.parse(ops.readFileSync(path, 'utf8'))
+    if (isPlainRecordValue(parsed) && (parsed as { at?: unknown }).at === at)
+      ops.unlinkSync(path)
+  } catch {
+    /* absent, unreadable, or already claimed */
+  }
+}
+
+/**
+ * A label made safe to draw: control, bidi and zero-width characters become
+ * spaces. NOTE: copy of `src/sync/payload.ts`'s `printable` by design — the
+ * TUI cannot import `src/`.
+ */
+export function cleanLabel(label: string): string {
+  return Array.from(label, (ch) => {
+    const code = ch.codePointAt(0) ?? 0
+    const hidden =
+      code < 0x20 ||
+      (code >= 0x7f && code <= 0x9f) ||
+      code === 0x61c ||
+      (code >= 0x200b && code <= 0x200f) ||
+      (code >= 0x2028 && code <= 0x202e) ||
+      (code >= 0x2060 && code <= 0x2069) ||
+      code === 0xfeff
+    return hidden ? ' ' : ch
+  })
+    .join('')
+    .trim()
+}
+function ago(at: number, now: number): string {
+  return now - at < 60_000 ? 'just now' : `${until(2 * now - at, now)} ago`
+}
+
+const WRITE_LINES: Record<SyncWriteView, string> = {
+  ok: 'syncing (upload + download)',
+  'no-token': 'syncing (download only: no GitHub login)',
+  denied: 'syncing (download only: this GitHub account cannot update the gist)',
+  unreadable: 'syncing (download only: update this plugin to upload)',
+}
+
+/** The sidebar's sync lines. */
+export function syncLines(view: SyncView, now: number): string[] {
+  const lines: string[] = []
+  if (!view.joined) lines.push('off')
+  else {
+    const verb = view.write ? WRITE_LINES[view.write] : 'syncing'
+    lines.push(
+      view.syncedAt === undefined
+        ? verb
+        : `${verb} · synced ${ago(view.syncedAt, now)}`,
+    )
+  }
+  if (view.status)
+    lines.push(`${view.status.ok ? '' : '! '}${view.status.message}`)
+  return lines
+}
+
+export interface SyncMenuItem {
+  id: SyncMenuId
+  title: string
+}
+
+/**
+ * The sync menu: what this machine can do. A machine that cannot upload (no
+ * GitHub login, an account that cannot update the gist, a gist from a newer
+ * version) is offered no upload action; the sidebar says why.
+ */
+export function syncMenu(view: SyncView): SyncMenuItem[] {
+  if (!view.joined)
+    return [
+      { id: 'subscribe', title: 'Follow a gist link' },
+      {
+        id: 'upload-new',
+        title: "Create a new secret gist from this pool's static credentials",
+      },
+    ]
+  const canWrite = view.write === undefined || view.write === 'ok'
+  return [
+    ...(view.creator
+      ? [{ id: 'show-link' as const, title: 'Show the share link' }]
+      : []),
+    ...(canWrite ? [{ id: 'upload' as const, title: 'Upload now' }] : []),
+    { id: 'sync', title: 'Sync now' },
+    { id: 'subscribe', title: 'Follow a different link' },
+    ...(view.write === 'no-token'
+      ? []
+      : [
+          {
+            id: 'upload-new' as const,
+            title: 'Create a new gist (new link and key)',
+          },
+        ]),
+    { id: 'forget', title: 'Stop syncing' },
+  ]
 }

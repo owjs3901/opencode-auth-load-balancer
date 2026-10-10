@@ -49,6 +49,20 @@ export interface AuthorizeRequest {
   instructions?: string
 }
 
+/** A paste login for a long-lived token the provider's own CLI mints (see `ProviderAdapter.tokenLogin`). */
+export interface TokenLogin {
+  /**
+   * What the token is called, spliced into the method label. The TUI
+   * re-logs a static row through the method whose label carries it.
+   */
+  readonly label: string
+  /** Page explaining how to mint the token. */
+  readonly url: string
+  readonly instructions: string
+  /** The pasted token, verified; null when malformed or refused. */
+  exchange(input: string): Promise<TokenSet | null>
+}
+
 /** A device-code login (RFC 8628) in flight: where to approve it, and the wait for approval. */
 export interface DeviceLogin {
   /** Verification URL to open (the user code rides in it). */
@@ -136,6 +150,20 @@ export interface ProviderAdapter {
    *    instead of cooling it down — no refresh can repair a revoked key.
    */
   tokensFromApiKey?(key: string): TokenSet
+  /**
+   * Present on providers whose own CLI mints a long-lived bearer (Claude's
+   * `claude setup-token`: one year, inference-only). Registered as a paste
+   * login after the OAuth one; the token joins the pool as a static row —
+   * no refresh token, so it never rotates and a 401 parks it for a re-login.
+   */
+  tokenLogin?: TokenLogin
+  /**
+   * Present on providers whose OAuth login can mint the bearer `tokenLogin`
+   * takes (Claude): spends `refreshToken` like `refresh`, returning the
+   * minted token as `access`/`expires` beside the rotated refresh token.
+   * Throws on failure.
+   */
+  mintInferenceToken?(refreshToken: string): Promise<TokenSet>
 
   // --- request shaping -----------------------------------------------------
   /** Set auth + provider headers on an outgoing request for the chosen account. */

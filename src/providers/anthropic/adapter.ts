@@ -9,8 +9,10 @@ import {
 import {
   authorize as oauthAuthorize,
   exchange as oauthExchange,
+  mintInferenceToken,
   refresh as oauthRefresh,
 } from './oauth'
+import { setupTokenLogin } from './setup-token'
 import {
   createStrippedStream,
   rewriteRequestBody,
@@ -32,6 +34,8 @@ export const anthropicAdapter: ProviderAdapter = {
   authorize: oauthAuthorize,
   exchange: oauthExchange,
   refresh: oauthRefresh,
+  tokenLogin: setupTokenLogin,
+  mintInferenceToken,
 
   // Sole wrapper left: adapts (headers, account) → (headers, account.access).
   applyAuth(headers: Headers, account: PoolAccount): void {

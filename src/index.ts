@@ -4,12 +4,14 @@ import { tool } from '@opencode-ai/plugin/tool'
 import {
   addAccount,
   bootstrapFromOpencodeAuth,
+  makeAccount,
   type OpencodeAuthGetter,
 } from './accounts'
 import { createLoadBalancedFetch } from './fetch'
 import {
   notifyModelFallback,
   notifyOnSwitch,
+  notifyPaired,
   notifyPending,
   notifyPendingRestored,
   notifyPendingRestoreError,
@@ -33,6 +35,8 @@ import type { ProviderAdapter } from './providers/types'
 import { loadConfig } from './scheduler/config'
 import { MESSAGE_HEADER, SESSION_HEADER } from './session'
 import { readStatus, renderPendingStatus, renderStatus } from './status'
+import { startSync } from './sync/start'
+import { maintainTokens, mintAtLogin } from './token-mint'
 import { MANUAL_DISABLED_REASON, type TokenSet } from './types'
 import {
   refreshAllUsageInBackground,
@@ -74,7 +78,8 @@ function zeroOutCost(provider: LoaderProvider): void {
  *    the load-balanced fetch so every request flows through the scheduler.
  *  - `methods`: logins that APPEND each account to the pool (instead of
  *    overwriting opencode's single auth slot) — a pasted OAuth code for
- *    Claude/Codex; for Kimi Code a device-code OAuth login, then a pasted key.
+ *    Claude/Codex, then for Claude a pasted `claude setup-token` token; for
+ *    Kimi Code a device-code OAuth login, then a pasted key.
  */
 function buildAuthHook(
   adapter: ProviderAdapter,
@@ -83,11 +88,23 @@ function buildAuthHook(
 ): AuthHook {
   const label = PROVIDER_LABELS[adapter.id] ?? adapter.id
   const startDeviceLogin = adapter.startDeviceLogin
+  const tokenLogin = adapter.tokenLogin
   // Seed the just-registered account's usage right away — awaited so the
   // dashboard shows usage immediately after login (no extra latency on the
   // request path; this is the one-time login flow). Throttled inside.
   const register = async (tokens: TokenSet): Promise<void> => {
-    await addAccount(adapter.id, tokens)
+    // Measure the login before it lands (a setup-token's probe already did):
+    // pairing compares reset times, and the new row shows usage at once.
+    if (!tokens.usage) {
+      const usage = await adapter
+        .fetchUsage(makeAccount(adapter.id, '', tokens), Date.now())
+        .catch(ignore)
+      if (usage) tokens.usage = usage
+    }
+    const account = await addAccount(adapter.id, tokens)
+    const minted = await mintAtLogin(adapter, account)
+    if (minted || (account.inferenceToken !== undefined && account.refresh))
+      void notifyPaired(client, adapter.id, account)
     await refreshUsageInBackground(adapter, Date.now()).catch(ignore)
   }
   const oauthSuccess = (tokens: TokenSet) => ({
@@ -119,6 +136,7 @@ function buildAuthHook(
       void refreshUsageInBackground(adapter, Date.now())
         .then(() => primeInUse(adapter.id, Date.now()))
         .catch(ignore)
+      void maintainTokens(adapter, Date.now()).catch(ignore)
       return {
         apiKey: '',
         fetch: createLoadBalancedFetch(
@@ -207,6 +225,30 @@ function buildAuthHook(
           }
         },
       },
+      // A long-lived token the provider's CLI mints (`claude setup-token`),
+      // pasted as-is; it pairs with the account's OAuth login on one row
+      // (see addAccount). An `oauth` method like the key login above, so the
+      // TUI re-login can drive it; opencode keeps it as an OAuth pair whose
+      // expiry never comes due, which a plain Bearer client can still use.
+      ...(tokenLogin
+        ? [
+            {
+              label: `${label} ${tokenLogin.label} (add account to load balancer)`,
+              type: 'oauth' as const,
+              authorize: async () => ({
+                url: tokenLogin.url,
+                instructions: tokenLogin.instructions,
+                method: 'code' as const,
+                callback: async (code: string) => {
+                  const tokens = await tokenLogin.exchange(code)
+                  if (!tokens) return { type: 'failed' as const }
+                  await register(tokens)
+                  return oauthSuccess(tokens)
+                },
+              }),
+            },
+          ]
+        : []),
     ],
   }
 }
@@ -276,134 +318,148 @@ const lbResult = (output: string) => ({ title: 'Auth Load Balancer', output })
  * cooldowns, and the ranked next candidates) across ALL providers. Registered once
  * (not per provider) so the tool name doesn't collide.
  */
-export const AuthLoadBalancerStatusPlugin: Plugin = async (input) => ({
-  tool: {
-    auth_lb_status: tool({
-      description:
-        "Show the auth load-balancer pool: the in-use account per provider, each account's weekly and 5h usage, cooldowns, and the ranked next-candidate accounts. Refreshes stale usage from the provider usage endpoints (throttled) before rendering.",
-      args: {},
-      execute: async () => {
-        // The pool only converges to server-side truth via response headers (needs
-        // model requests in flight) or the usage-endpoint poll (request-path /
-        // startup only). Checking the dashboard is exactly when a user wants an
-        // out-of-band change — e.g. Anthropic's promotional weekly-quota reset —
-        // reflected NOW, so poll stale accounts here too. AWAITED so the freshly
-        // fetched numbers are in THIS render; the internal SEED_TTL/lastPoll
-        // throttle keeps repeat calls cheap, and failures fall back to the
-        // last-known snapshot (never fail the dashboard).
-        const now = Date.now()
-        // ONE serialized pool read for the whole refresh: without the snapshot
-        // it performs its own readPool() just for the staleness gates (the
-        // actual usage write still goes through mutatePool, which re-reads
-        // under the lock). The final readStatus below re-reads regardless, so
-        // freshly polled numbers still render. Every provider in one call —
-        // the registry (providers/registry.ts) is the single source of truth,
-        // so a third provider needs no edit here.
-        const pool = await readPool()
-        await refreshAllUsageInBackground(now, pool).catch(ignore)
-        // ONE clock for ranking (readStatus → available/rank/displayUtil) AND
-        // rendering (renderStatus → stateOf/relTime): two separate Date.now()
-        // stamps let an account whose cooldown expires between them rank as
-        // unavailable yet render `exhausted` instead of `cooldown …`, and skew
-        // countdowns from the ranks printed beside them. Taken AFTER the
-        // awaited refresh so the freshly polled numbers are in this render.
-        const renderedAt = Date.now()
-        const status = renderStatus(await readStatus(renderedAt), renderedAt)
-        const pending = renderPendingStatus(
-          await listPendingForWorkspace(input.worktree || input.directory),
-          renderedAt,
-        )
-        return lbResult(pending ? `${status}\n\n${pending}` : status)
-      },
-    }),
-    auth_lb_rename: tool({
-      description:
-        'Rename a pooled account. Match the account by its current label or its id, then set a new label. The new label appears in the switch toast, the auth_lb_status dashboard, and the TUI bar/sidebar.',
-      args: {
-        account: tool.schema
-          .string()
-          .describe('Current label or id of the account to rename'),
-        name: tool.schema.string().describe('New label for the account'),
-      },
-      execute: async ({ account, name }) => {
-        // An empty label renders blank in the toast/dashboard/TUI and can never
-        // be matched by label again — reject before touching the pool.
-        const trimmed = name.trim()
-        if (!trimmed) return lbResult('New label must not be empty.')
-        const result = await mutatePool((pool) => {
-          const target = pool.accounts.find(
-            (a) => a.id === account || a.label === account,
+export const AuthLoadBalancerStatusPlugin: Plugin = async (input) => {
+  // Gist sync is process-wide, not per provider, so it starts with this
+  // once-registered plugin. It is driven from the TUI sidebar only: there is
+  // deliberately no tool for it, since the link embeds the encryption key and
+  // a tool call would put it in the chat history.
+  const sync = startSync()
+  return {
+    dispose: async () => sync?.dispose(),
+    tool: {
+      auth_lb_status: tool({
+        description:
+          "Show the auth load-balancer pool: the in-use account per provider, each account's weekly and 5h usage, cooldowns, and the ranked next-candidate accounts. Refreshes stale usage from the provider usage endpoints (throttled) before rendering.",
+        args: {},
+        execute: async () => {
+          // The pool only converges to server-side truth via response headers (needs
+          // model requests in flight) or the usage-endpoint poll (request-path /
+          // startup only). Checking the dashboard is exactly when a user wants an
+          // out-of-band change — e.g. Anthropic's promotional weekly-quota reset —
+          // reflected NOW, so poll stale accounts here too. AWAITED so the freshly
+          // fetched numbers are in THIS render; the internal SEED_TTL/lastPoll
+          // throttle keeps repeat calls cheap, and failures fall back to the
+          // last-known snapshot (never fail the dashboard).
+          const now = Date.now()
+          // ONE serialized pool read for the whole refresh: without the snapshot
+          // it performs its own readPool() just for the staleness gates (the
+          // actual usage write still goes through mutatePool, which re-reads
+          // under the lock). The final readStatus below re-reads regardless, so
+          // freshly polled numbers still render. Every provider in one call —
+          // the registry (providers/registry.ts) is the single source of truth,
+          // so a third provider needs no edit here.
+          const pool = await readPool()
+          await refreshAllUsageInBackground(now, pool).catch(ignore)
+          // ONE clock for ranking (readStatus → available/rank/displayUtil) AND
+          // rendering (renderStatus → stateOf/relTime): two separate Date.now()
+          // stamps let an account whose cooldown expires between them rank as
+          // unavailable yet render `exhausted` instead of `cooldown …`, and skew
+          // countdowns from the ranks printed beside them. Taken AFTER the
+          // awaited refresh so the freshly polled numbers are in this render.
+          const renderedAt = Date.now()
+          const status = renderStatus(await readStatus(renderedAt), renderedAt)
+          const pending = renderPendingStatus(
+            await listPendingForWorkspace(input.worktree || input.directory),
+            renderedAt,
           )
-          if (!target)
-            return {
-              ok: false as const,
-              reason: 'missing' as const,
-              labels: pool.accounts.map((a) => `${a.label} (${a.providerID})`),
-            }
-          // Duplicate labels make rename-by-label ambiguous (the first match
-          // wins), so refuse to create a second account with the same label.
-          if (
-            pool.accounts.some((a) => a.id !== target.id && a.label === trimmed)
-          )
-            return { ok: false as const, reason: 'taken' as const }
-          const previous = target.label
-          target.label = trimmed
-          return { ok: true as const, previous }
-        })
-        if (!result.ok)
+          return lbResult(pending ? `${status}\n\n${pending}` : status)
+        },
+      }),
+      auth_lb_rename: tool({
+        description:
+          'Rename a pooled account. Match the account by its current label or its id, then set a new label. The new label appears in the switch toast, the auth_lb_status dashboard, and the TUI bar/sidebar.',
+        args: {
+          account: tool.schema
+            .string()
+            .describe('Current label or id of the account to rename'),
+          name: tool.schema.string().describe('New label for the account'),
+        },
+        execute: async ({ account, name }) => {
+          // An empty label renders blank in the toast/dashboard/TUI and can never
+          // be matched by label again — reject before touching the pool.
+          const trimmed = name.trim()
+          if (!trimmed) return lbResult('New label must not be empty.')
+          const result = await mutatePool((pool) => {
+            const target = pool.accounts.find(
+              (a) => a.id === account || a.label === account,
+            )
+            if (!target)
+              return {
+                ok: false as const,
+                reason: 'missing' as const,
+                labels: pool.accounts.map(
+                  (a) => `${a.label} (${a.providerID})`,
+                ),
+              }
+            // Duplicate labels make rename-by-label ambiguous (the first match
+            // wins), so refuse to create a second account with the same label.
+            if (
+              pool.accounts.some(
+                (a) => a.id !== target.id && a.label === trimmed,
+              )
+            )
+              return { ok: false as const, reason: 'taken' as const }
+            const previous = target.label
+            target.label = trimmed
+            return { ok: true as const, previous }
+          })
+          if (!result.ok)
+            return lbResult(
+              result.reason === 'taken'
+                ? `Label "${trimmed}" is already used by another account.`
+                : `No account matching "${account}". Available: ${
+                    result.labels.join(', ') || '(none)'
+                  }`,
+            )
+          return lbResult(`Renamed "${result.previous}" → "${trimmed}".`)
+        },
+      }),
+      auth_lb_disable: tool({
+        description:
+          'Disable a pooled account so the load balancer stops selecting it (match by current label or id), or re-enable a previously disabled one with `enable: true`. A disabled account is skipped by scheduling and shows as `disabled` in the auth_lb_status dashboard — separate from an account that needs re-login.',
+        args: {
+          account: tool.schema
+            .string()
+            .describe('Current label or id of the account to disable/enable'),
+          enable: tool.schema
+            .boolean()
+            .optional()
+            .describe(
+              'Set true to re-enable a previously disabled account; omit or false to disable it',
+            ),
+        },
+        execute: async ({ account, enable }) => {
+          const result = await mutatePool((pool) => {
+            const target = pool.accounts.find(
+              (a) => a.id === account || a.label === account,
+            )
+            if (!target)
+              return {
+                ok: false as const,
+                labels: pool.accounts.map(
+                  (a) => `${a.label} (${a.providerID})`,
+                ),
+              }
+            // Toggle ONLY the manual sentinel. A revoked-token `re-login` reason
+            // is overwritten by an explicit disable (the account was already
+            // excluded) and cleared by an explicit enable (self-heals: the next
+            // request re-detects invalid_grant and re-disables it).
+            target.disabledReason = enable ? null : MANUAL_DISABLED_REASON
+            return { ok: true as const, label: target.label, enabled: !!enable }
+          })
+          if (!result.ok)
+            return lbResult(
+              `No account matching "${account}". Available: ${
+                result.labels.join(', ') || '(none)'
+              }`,
+            )
           return lbResult(
-            result.reason === 'taken'
-              ? `Label "${trimmed}" is already used by another account.`
-              : `No account matching "${account}". Available: ${
-                  result.labels.join(', ') || '(none)'
-                }`,
+            result.enabled
+              ? `Enabled "${result.label}" — back in the load-balancer rotation.`
+              : `Disabled "${result.label}" — the load balancer will skip it until you re-enable it.`,
           )
-        return lbResult(`Renamed "${result.previous}" → "${trimmed}".`)
-      },
-    }),
-    auth_lb_disable: tool({
-      description:
-        'Disable a pooled account so the load balancer stops selecting it (match by current label or id), or re-enable a previously disabled one with `enable: true`. A disabled account is skipped by scheduling and shows as `disabled` in the auth_lb_status dashboard — separate from an account that needs re-login.',
-      args: {
-        account: tool.schema
-          .string()
-          .describe('Current label or id of the account to disable/enable'),
-        enable: tool.schema
-          .boolean()
-          .optional()
-          .describe(
-            'Set true to re-enable a previously disabled account; omit or false to disable it',
-          ),
-      },
-      execute: async ({ account, enable }) => {
-        const result = await mutatePool((pool) => {
-          const target = pool.accounts.find(
-            (a) => a.id === account || a.label === account,
-          )
-          if (!target)
-            return {
-              ok: false as const,
-              labels: pool.accounts.map((a) => `${a.label} (${a.providerID})`),
-            }
-          // Toggle ONLY the manual sentinel. A revoked-token `re-login` reason
-          // is overwritten by an explicit disable (the account was already
-          // excluded) and cleared by an explicit enable (self-heals: the next
-          // request re-detects invalid_grant and re-disables it).
-          target.disabledReason = enable ? null : MANUAL_DISABLED_REASON
-          return { ok: true as const, label: target.label, enabled: !!enable }
-        })
-        if (!result.ok)
-          return lbResult(
-            `No account matching "${account}". Available: ${
-              result.labels.join(', ') || '(none)'
-            }`,
-          )
-        return lbResult(
-          result.enabled
-            ? `Enabled "${result.label}" — back in the load-balancer rotation.`
-            : `Disabled "${result.label}" — the load balancer will skip it until you re-enable it.`,
-        )
-      },
-    }),
-  },
-})
+        },
+      }),
+    },
+  }
+}

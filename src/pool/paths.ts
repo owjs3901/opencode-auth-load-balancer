@@ -114,3 +114,40 @@ export function versionCacheFilePath(): string {
   cachedVersion = { override, xdg, path }
   return path
 }
+
+const syncPathMemo = new Map<string, { key: string; path: string }>()
+
+/** A file in the data dir, memoized per env like the paths above. */
+function dataFilePath(file: string): string {
+  const override = process.env.OPENCODE_AUTH_LB_DIR
+  const xdg = process.env.XDG_DATA_HOME
+  const key = `${override ?? ''}\0${xdg ?? ''}`
+  const hit = syncPathMemo.get(file)
+  if (hit?.key === key) return hit.path
+  const path = join(
+    resolveDataDir({ override, xdgDataHome: xdg }, homedir()),
+    file,
+  )
+  syncPathMemo.set(file, { key, path })
+  return path
+}
+
+/** Path to the gist-sync state (role, gist id, encryption key, imported ids). Holds the key: owner-only. */
+export function syncStateFilePath(): string {
+  return dataFilePath('auth-load-balancer-sync.json')
+}
+
+/** Path to this machine's sync origin (random, not secret; outlives "stop syncing"). */
+export function syncOriginFilePath(): string {
+  return dataFilePath('auth-load-balancer-sync-origin.json')
+}
+
+/** Path to the one-shot TUI → server sync request (consumed and deleted on read). */
+export function syncIntentFilePath(): string {
+  return dataFilePath('auth-load-balancer-sync-intent.json')
+}
+
+/** Path to the latest sync outcome shown by the TUI (no secrets). */
+export function syncStatusFilePath(): string {
+  return dataFilePath('auth-load-balancer-sync-status.json')
+}

@@ -1,7 +1,16 @@
 import { randomUUID } from 'node:crypto'
 
-import { mutatePool, readPool } from './pool/store'
-import { emptyUsage, type PoolAccount, type TokenSet } from './types'
+import { holdsCredential, orgPartner } from './pairing'
+import { findAccount, mutatePool, readPool } from './pool/store'
+import {
+  emptyUsage,
+  type LostLogins,
+  type PoolAccount,
+  type PoolFile,
+  type TokenSet,
+  type UsageSnapshot,
+} from './types'
+import { preserveWeeklyAnchor } from './usage-merge'
 
 /** A credential from opencode's auth store (`oauth` token pair or `api` key). */
 interface OpencodeAuth {
@@ -15,12 +24,13 @@ interface OpencodeAuth {
 /** The credential getter opencode passes to an auth loader. */
 export type OpencodeAuthGetter = () => Promise<OpencodeAuth>
 
-function makeAccount(
+/** A pool row for `tokens` (also the throwaway row a login is measured through). */
+export function makeAccount(
   providerID: string,
   label: string,
   tokens: TokenSet,
 ): PoolAccount {
-  return {
+  const account: PoolAccount = {
     id: randomUUID(),
     providerID,
     label,
@@ -29,9 +39,49 @@ function makeAccount(
     expires: tokens.expires,
     tokenGen: 0,
     accountId: tokens.accountId ?? null,
-    usage: emptyUsage(),
+    usage: tokens.usage ?? emptyUsage(),
     cooldownUntil: 0,
     disabledReason: null,
+  }
+  if (tokens.inferenceOnly) {
+    account.inferenceToken = tokens.access
+    if (tokens.inferenceExpires)
+      account.inferenceExpires = tokens.inferenceExpires
+  }
+  if (tokens.orgId) account.orgId = tokens.orgId
+  if (tokens.refreshExpires) account.refreshExpires = tokens.refreshExpires
+  return account
+}
+
+export function recordLostLogin(
+  row: PoolAccount,
+  login: keyof LostLogins,
+  reason: string,
+): void {
+  row.lostLogins = { ...row.lostLogins, [login]: { at: Date.now(), reason } }
+}
+
+export function clearLostLogin(
+  row: PoolAccount,
+  login: keyof LostLogins,
+): void {
+  if (!row.lostLogins?.[login]) return
+  delete row.lostLogins[login]
+  if (!row.lostLogins.oauth && !row.lostLogins.token) delete row.lostLogins
+}
+
+/** Fold the usage a login measured into the row it landed on (same account). */
+function mergeLoginUsage(
+  row: PoolAccount,
+  usage: UsageSnapshot | undefined,
+): void {
+  if (!usage) return
+  row.usage = {
+    hourly: usage.hourly ?? row.usage.hourly,
+    weekly: usage.weekly
+      ? preserveWeeklyAnchor(usage.weekly, row.usage.weekly, usage.capturedAt)
+      : row.usage.weekly,
+    capturedAt: usage.weekly ? usage.capturedAt : row.usage.capturedAt,
   }
 }
 
@@ -46,13 +96,60 @@ function applyTokens(row: PoolAccount, tokens: TokenSet): PoolAccount {
   // propagate it so a row bootstrapped with `accountId: null` stops falling
   // back to the per-request JWT decode. Never clear an existing id.
   if (tokens.accountId) row.accountId = tokens.accountId
+  if (tokens.orgId) row.orgId = tokens.orgId
+  if (tokens.refreshExpires) row.refreshExpires = tokens.refreshExpires
+  clearLostLogin(row, 'oauth')
+  mergeLoginUsage(row, tokens.usage)
   return row
+}
+
+/**
+ * Land a setup-token on a row as its inference credential, leaving the row's
+ * OAuth login in place to poll usage. A row without one stays a static row,
+ * whose `access` mirrors the token. A pasted token's lifetime is unknown, so
+ * it inherits no renewal date from a minted token it replaces; one that
+ * arrives with its own (a synced token) keeps it.
+ */
+function attachToken(row: PoolAccount, tokens: TokenSet): PoolAccount {
+  row.inferenceToken = tokens.access
+  delete row.inferenceExpires
+  if (tokens.inferenceExpires) row.inferenceExpires = tokens.inferenceExpires
+  if (!row.refresh) {
+    row.access = tokens.access
+    row.expires = tokens.expires
+  }
+  if (tokens.orgId) row.orgId = tokens.orgId
+  row.disabledReason = null
+  clearLostLogin(row, 'token')
+  mergeLoginUsage(row, tokens.usage)
+  return row
+}
+
+/**
+ * Forget a setup-token the API rejected, leaving its row on the OAuth login —
+ * but only while the row still holds that token, so one pasted mid-request
+ * survives — and record why for the dashboards.
+ */
+export async function dropInferenceToken(
+  accountId: string,
+  token: string,
+  reason: string,
+): Promise<void> {
+  await mutatePool((pool) => {
+    const row = findAccount(pool, accountId)
+    if (row?.inferenceToken !== token) return
+    delete row.inferenceToken
+    delete row.inferenceExpires
+    recordLostLogin(row, 'token', reason)
+  })
 }
 
 /**
  * Append a freshly-authorized account to the pool, deduped by refresh token
  * or provider account id. Re-authorizing the same account refreshes its
- * tokens instead of duplicating it.
+ * tokens instead of duplicating it. A setup-token and an OAuth login of one
+ * account share a row in either order: the TUI hint or the organization
+ * pairs them, each keeping its own role.
  */
 export async function addAccount(
   providerID: string,
@@ -66,60 +163,72 @@ export async function addAccount(
     // branch below claims the tokens. Consuming it up front guarantees a stale
     // hint can never redirect a later, unrelated login onto this row.
     if (intent) delete pool.relogin
-
-    // Dedup intent: "same account re-authorized" → fold the new tokens onto
-    // the existing pool row instead of creating a duplicate. The signal is a
-    // matching refresh token (the only stable, per-account identifier OAuth
-    // gives us up front). RFC 6749 §5.1 lets the server OMIT `refresh_token`
-    // at exchange time, and BOTH adapters commit to writing `''` in that case
-    // (anthropic/oauth.ts: `refresh: json.refresh_token || ''`; openai/oauth.ts:
-    // `toTokenSet(json, '')`). An empty refresh is therefore the OPPOSITE of a
-    // stable identifier — it means "we don't have one" — so it must NOT match.
-    // Without this guard, the second empty-refresh exchange (e.g. two ChatGPT
-    // logins where the server skipped issuing a refresh_token) silently
-    // overwrites the first pool row, and the user loses one of the two
-    // accounts they thought they just registered.
-    // Second key: the provider's stable account id (OpenAI decodes the
-    // ChatGPT account id from the id_token at exchange time). Refresh tokens
-    // are single-use and ROTATE on every refresh, so a re-login of an account
-    // that has been in use carries a DIFFERENT refresh token and the
-    // refresh-key match misses — pre-fix that appended a duplicate row whose
-    // one server-side quota the scheduler then double-counted. The
-    // `tokens.accountId &&` guard keeps null/undefined ids from ever matching
-    // (Anthropic rows always store `accountId: null`).
-    const existing = pool.accounts.find(
-      (a) =>
-        a.providerID === providerID &&
-        ((tokens.refresh && a.refresh === tokens.refresh) ||
-          (tokens.accountId && a.accountId === tokens.accountId)),
-    )
-    // Explicit token/account identity always outranks the TUI hint. If the user
-    // signs into a different account than the clicked row, a stable identity
-    // match can never graft those credentials onto the hinted row.
-    if (existing) return applyTokens(existing, tokens)
-
-    const target = intent
-      ? pool.accounts.find((account) => account.id === intent.accountId)
-      : undefined
-    if (target) return applyTokens(target, tokens)
-    // Pool-WIDE label set (not per-provider): `auth_lb_rename` enforces
-    // pool-wide label uniqueness (rename-by-label picks the first match), and
-    // renames can move a `${providerID}-${n}` style label across providers —
-    // e.g. an OpenAI account renamed to `anthropic-1`. A per-provider set then
-    // let the next Anthropic login mint a duplicate `anthropic-1`, creating
-    // exactly the ambiguity the rename tool refuses to create. The generated
-    // names are provider-prefixed, so same-provider numbering is unchanged.
-    const used = new Set(pool.accounts.map((a) => a.label))
-    let n = 1
-    while (used.has(`${providerID}-${n}`)) n++
-    const account = makeAccount(
-      providerID,
-      label ?? `${providerID}-${n}`,
-      tokens,
-    )
-    pool.accounts.push(account)
-    return account
+    return placeTokens(pool, providerID, tokens, label, intent?.accountId)
   })
+}
+
+/**
+ * The shared body of every login landing: fold `tokens` onto the row that
+ * already holds them, else the hinted row (of the same provider: a hint can
+ * never carry a login onto another provider's row), else the organization's
+ * partner, else append a new row. Gist sync lands its credentials through here
+ * too, inside its own pool transaction.
+ */
+export function placeTokens(
+  pool: PoolFile,
+  providerID: string,
+  tokens: TokenSet,
+  label: string | undefined,
+  hintedId: string | undefined,
+): PoolAccount {
+  // Dedup intent: "same account re-authorized" → fold the new tokens onto
+  // the existing pool row instead of creating a duplicate. The signal is a
+  // matching refresh token (the only stable, per-account identifier OAuth
+  // gives us up front). RFC 6749 §5.1 lets the server OMIT `refresh_token`
+  // at exchange time, and BOTH adapters commit to writing `''` in that case
+  // (anthropic/oauth.ts: `refresh: json.refresh_token || ''`; openai/oauth.ts:
+  // `toTokenSet(json, '')`). An empty refresh is therefore the OPPOSITE of a
+  // stable identifier — it means "we don't have one" — so it must NOT match.
+  // Without this guard, the second empty-refresh exchange (e.g. two ChatGPT
+  // logins where the server skipped issuing a refresh_token) silently
+  // overwrites the first pool row, and the user loses one of the two
+  // accounts they thought they just registered.
+  // Second key: the provider's stable account id (OpenAI decodes the
+  // ChatGPT account id from the id_token at exchange time). Refresh tokens
+  // are single-use and ROTATE on every refresh, so a re-login of an account
+  // that has been in use carries a DIFFERENT refresh token and the
+  // refresh-key match misses — pre-fix that appended a duplicate row whose
+  // one server-side quota the scheduler then double-counted. The
+  // `tokens.accountId &&` guard keeps null/undefined ids from ever matching.
+  // A setup-token re-pasted is recognized by the token itself.
+  const rows = pool.accounts.filter((a) => a.providerID === providerID)
+  // Explicit token/account identity always outranks the TUI hint. If the user
+  // signs into a different account than the clicked row, a stable identity
+  // match can never graft those credentials onto the hinted row. The hint in
+  // turn outranks organization pairing, the one guess in this chain.
+  const target =
+    rows.find((a) => holdsCredential(a, tokens)) ??
+    (hintedId === undefined
+      ? undefined
+      : rows.find((a) => a.id === hintedId)) ??
+    orgPartner(rows, tokens)
+  if (target)
+    return tokens.inferenceOnly
+      ? attachToken(target, tokens)
+      : applyTokens(target, tokens)
+  // Pool-WIDE label set (not per-provider): `auth_lb_rename` enforces
+  // pool-wide label uniqueness (rename-by-label picks the first match), and
+  // renames can move a `${providerID}-${n}` style label across providers —
+  // e.g. an OpenAI account renamed to `anthropic-1`. A per-provider set then
+  // let the next Anthropic login mint a duplicate `anthropic-1`, creating
+  // exactly the ambiguity the rename tool refuses to create. The generated
+  // names are provider-prefixed, so same-provider numbering is unchanged.
+  const used = new Set(pool.accounts.map((a) => a.label))
+  let n = 1
+  while (used.has(`${providerID}-${n}`)) n++
+  const account = makeAccount(providerID, label ?? `${providerID}-${n}`, tokens)
+  pool.accounts.push(account)
+  return account
 }
 
 /**

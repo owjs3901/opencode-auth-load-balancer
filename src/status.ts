@@ -1,3 +1,4 @@
+import { credentialTag, loginWarnings, lostLoginNotes } from './login-health'
 import type { PendingTurn } from './pending/types'
 import { readPool } from './pool/store'
 import {
@@ -54,6 +55,12 @@ interface AccountStatus {
   /** tier name → epoch ms until that model tier's cap resets (empty = none). */
   modelCooldownsUntil: Record<string, number>
   disabledReason: string | null
+  /** A setup-token row's credentials: `token`, `token+oauth`, or '' for any other row. */
+  login: string
+  /** `oauth re-login` / `token re-login` / `oauth expires Nd` on a row still in service. */
+  warnings: string[]
+  /** Why each lost login stopped working, printed under the table. */
+  lostNotes: string[]
   /** The account that most recently served a request for this provider. */
   current: boolean
   /** 1 = next candidate the scheduler would pick. */
@@ -101,6 +108,9 @@ function toStatus(
     cooldownUntil: account.cooldownUntil,
     modelCooldownsUntil: account.modelCooldownsUntil ?? {},
     disabledReason: account.disabledReason,
+    login: credentialTag(account),
+    warnings: loginWarnings(account, now),
+    lostNotes: lostLoginNotes(account, now),
     current,
     rank,
   }
@@ -313,10 +323,16 @@ export function renderStatus(
     )
     for (const a of p.accounts) {
       const mark = a.current ? '▶' : ' '
+      const notes = [a.login, ...a.warnings]
+        .filter(Boolean)
+        .map((note) => ` · ${note}`)
+        .join('')
       lines.push(
-        `  ${String(a.rank).padEnd(2)} ${mark} ${padDisplayEnd(a.label, width)} ${pct(a.weeklyUtil).padStart(5)} ${pct(a.hourlyUtil).padStart(5)} ${relTime(a.weeklyResetAt, now).padStart(7)}  ${stateOf(a, now)}`,
+        `  ${String(a.rank).padEnd(2)} ${mark} ${padDisplayEnd(a.label, width)} ${pct(a.weeklyUtil).padStart(5)} ${pct(a.hourlyUtil).padStart(5)} ${relTime(a.weeklyResetAt, now).padStart(7)}  ${stateOf(a, now)}${notes}`,
       )
     }
+    for (const a of p.accounts)
+      for (const note of a.lostNotes) lines.push(`  ! ${a.label}: ${note}`)
     lines.push('')
   }
   return lines.join('\n').trimEnd()

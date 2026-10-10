@@ -79,6 +79,30 @@ export function isPlainObject(
 }
 
 /**
+ * A one-line summary of a rejected HTTP response for the dashboards: the
+ * status plus what the common JSON error envelopes name — RFC 6749's
+ * `{error, error_description}`, Anthropic's and OpenAI's `{error: {type,
+ * message}}` — or else the start of the raw body.
+ */
+export function errorSummary(status: number, body: string): string {
+  let detail = body
+  try {
+    const json: unknown = JSON.parse(body)
+    if (isPlainObject(json)) {
+      const err = json.error
+      const parts = isPlainObject(err)
+        ? [err.type, err.message]
+        : [err, json.error_description ?? json.message]
+      detail = parts.filter((part) => typeof part === 'string').join(': ')
+    }
+  } catch {
+    // Not JSON: the raw text is the detail.
+  }
+  const line = `${status} ${detail}`.replace(/\s+/g, ' ').trim()
+  return line.length > 160 ? `${line.slice(0, 159)}…` : line
+}
+
+/**
  * Collect the `text` of every content block into one string. A message's
  * `content` arrives as either a plain string (passed through) or an array of
  * blocks (anything else → ''); each block contributes its `text` when it is a

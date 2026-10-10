@@ -1,7 +1,0 @@
-{
-  "changes": {
-    "package.json": "Minor"
-  },
-  "note": "Mint each Claude OAuth login its long-lived inference token without Claude Code: a refresh grant asking for `claude setup-token`'s scope and one-year lifetime runs when the login lands, for rows already in the pool at startup, and for a row whose token was dropped; a minted token is renewed in its last 30 days, and `OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN=0` turns minting off",
-  "date": "2026-10-10T03:30:00.0000000Z"
-}

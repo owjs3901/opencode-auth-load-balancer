@@ -1,7 +1,0 @@
-{
-  "changes": {
-    "package.json": "Minor"
-  },
-  "note": "Pair a long-lived `claude setup-token` token with a Claude account's OAuth login on one row: the token serves inference so an OAuth logout no longer stops requests, the OAuth login keeps measuring usage, either half keeps the row running when the other dies, and the dashboards say which login needs a re-login, why it stopped, and when an OAuth login is about to expire",
-  "date": "2026-10-09T07:06:56.2323598Z"
-}

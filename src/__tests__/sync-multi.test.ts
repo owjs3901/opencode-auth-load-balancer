@@ -338,6 +338,56 @@ describe('writers that overlap', () => {
   })
 })
 
+describe('a cycle that fails after it applied the gist', () => {
+  test.each([
+    ['a server error', () => new Response('{}', { status: 500 })],
+    [
+      'a rate limit',
+      () =>
+        new Response('{}', { status: 429, headers: { 'retry-after': '120' } }),
+    ],
+    [
+      'a network error',
+      (): Response => {
+        throw new TypeError('network down')
+      },
+    ],
+  ])(
+    'keeps what it imported on record when the upload fails with %s, so a removal still reaches it',
+    async (_name, fail) => {
+      await seed('pcA', oauthRow('a-oauth', T1))
+      await seed('pcB', tokenOnly('b-local', T3))
+      await run('pcA', (e) => e.upload(false))
+      const link = await linkOf('pcA')
+      let failed = false
+      github.hooks.before = (method) => {
+        if (method !== 'PATCH' || failed) return undefined
+        failed = true
+        return fail()
+      }
+      const out = await run('pcB', (e) => e.subscribe(link))
+      expect(out.ok).toBe(false)
+      expect(await tokensOf('pcB')).toEqual([T3, T1])
+      const kept = await state('pcB')
+      expect(Object.keys(kept?.imported ?? {})).toHaveLength(1)
+      expect(kept?.etag).toBeUndefined()
+      expect(kept?.appliedAt).toBeDefined()
+
+      expect((await sync('pcB')).ok).toBe(true)
+      const listed = await inGist()
+      const aOrigin = listed.find((e) => e.id === 'a-oauth')?.origin
+      expect(
+        listed.filter((e) => e.secret === T1).map((e) => e.origin),
+      ).toEqual([aOrigin])
+      expect(listed.some((e) => e.secret === T3)).toBe(true)
+
+      await dropToken('pcA', 'a-oauth')
+      for (const pc of ['pcA', 'pcB', 'pcB']) await sync(pc)
+      expect(await tokensOf('pcB')).not.toContain(T1)
+      expect(await secretsInGist()).not.toContain(T1)
+    },
+  )
+})
 describe('what a machine may do depends on its GitHub account', () => {
   test('a link-only machine downloads, never writes, never sends a credential, and does not nag', async () => {
     const link = await twoWriters()

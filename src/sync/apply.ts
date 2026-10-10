@@ -217,6 +217,16 @@ export async function applyPlan(
 /** Passes of plan-and-apply per snapshot: a removal can free an account for an entry that was skipped behind it. */
 const MAX_PASSES = 3
 
+/** What `applySnapshot` takes besides the snapshot and the memory. */
+export interface SnapshotOptions {
+  adapters?: readonly ProviderAdapter[]
+  /**
+   * Called with the running result after every pass, before the next one: the
+   * pool has changed by then, so the record of what was imported has to be
+   * saved by then too, or a later failure would leave rows nobody tracks.
+   */
+  afterPass?: (soFar: ApplyResult) => Promise<unknown>
+}
 /**
  * Bring the pool in line with `snapshot`. After a pass that removed something
  * the plan is made again, so an entry that was kept out by the credential just
@@ -225,8 +235,9 @@ const MAX_PASSES = 3
 export async function applySnapshot(
   snapshot: Pick<ParsedPayload, 'entries' | 'listed'>,
   memory: MergeMemory,
-  adapters: readonly ProviderAdapter[] = ADAPTERS,
+  options: SnapshotOptions = {},
 ): Promise<ApplyResult> {
+  const { adapters = ADAPTERS, afterPass } = options
   const total: ApplyResult = {
     imported: newRefs(memory.imported),
     skipped: newMap(memory.skipped),
@@ -248,6 +259,7 @@ export async function applySnapshot(
     total.updated += done.updated
     total.removed += done.removed
     total.deferred = done.deferred
+    await afterPass?.(total)
     if (done.removed === 0) break
   }
   return total

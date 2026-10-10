@@ -7,7 +7,7 @@
  */
 import { readPool } from '../pool/store'
 import type { ProviderAdapter } from '../providers/types'
-import { applySnapshot } from './apply'
+import { type ApplyResult, applySnapshot } from './apply'
 import { decodeKey, open, seal } from './crypto'
 import { SyncError } from './errors'
 import { readGist, updateGist } from './gist'
@@ -45,6 +45,26 @@ function count(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
 }
 
+/** Save what applying a snapshot did to the pool: the import records, and the newest snapshot applied. */
+function recordApplied(
+  gistId: string,
+  at: number,
+  applied: ApplyResult,
+  syncedAt: number,
+): Promise<unknown> {
+  return updateSyncState((cur) =>
+    cur?.gistId === gistId
+      ? {
+          ...cur,
+          imported: applied.imported,
+          skipped: applied.skipped,
+          appliedAt: Math.max(at, cur.appliedAt ?? 0),
+          syncedAt,
+          etag: undefined,
+        }
+      : cur,
+  )
+}
 /**
  * Run one cycle. `force` is "Upload now": it needs a GitHub token (and says so
  * if there is none), reads the gist afresh, and tries to write even inside the
@@ -90,12 +110,20 @@ export async function runCycle(
   const snapshot = parsePayload(open(read.content, key))
   const stale = state.appliedAt !== undefined && snapshot.at < state.appliedAt
   if (stale && !mayWrite) throw new SyncError('rolled-back')
+  // What was applied is on record before anything can fail (the upload, a
+  // later pass): the pool has the rows, so the state must know they came from
+  // the gist. No etag is kept until the whole cycle, write included, is done,
+  // so a failed cycle is read again instead of answered 304.
   const applied = stale
     ? null
     : await applySnapshot(
         snapshot,
         { origin, imported: state.imported, skipped: state.skipped },
-        deps.adapters,
+        {
+          ...(deps.adapters ? { adapters: deps.adapters } : {}),
+          afterPass: (soFar) =>
+            recordApplied(state.gistId, snapshot.at, soFar, now()),
+        },
       )
   const own = ownEntries(
     await readPool(),
@@ -141,12 +169,8 @@ export async function runCycle(
     cur?.gistId === state.gistId
       ? {
           ...cur,
-          imported: applied?.imported ?? cur.imported,
-          skipped: applied?.skipped ?? cur.skipped,
-          appliedAt: applied
-            ? Math.max(snapshot.at, cur.appliedAt ?? 0)
-            : cur.appliedAt,
           syncedAt: now(),
+
           etag:
             wrote || stale || deferred > 0 || denied ? undefined : read.etag,
           write,

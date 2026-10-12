@@ -1,0 +1,7 @@
+{
+  "changes": {
+    "package.json": "Minor"
+  },
+  "note": "Add OpenCode 2 compatibility with a default setup entry, integration OAuth methods, pooled HTTP AI SDK drivers, server RPC account management and a V2 CLI footer/sidebar. Reuse existing account pools, quota rotation, refresh and durable pending recovery. OpenCode 1 users must switch their server entry to dist/v1.js and keep the legacy TUI entry; V2 uses the plugins configuration key and package directory. Gist sync continues on the server, but its V2 settings UI is not yet available. Verified with 938 tests and OpenCode 2.0.27 host and installed-package smoke checks.",
+  "date": "2026-10-12T11:16:29.806750400Z"
+}

@@ -20,16 +20,25 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./v1": {
+      "types": "./dist/v1.d.ts",
+      "default": "./dist/v1.js"
+    },
+    "./server": "./dist/index.js",
+    "./tui": "./tui.ts",
+    "./tui-v1": "./tui/auth-load-balancer-tui.ts"
   },
   "files": [
+    "index.js",
+    "tui.ts",
     "dist",
     "tui"
   ],
   "scripts": {
-    "sync:tui": "bun -e \"await Bun.write('tui/auth-load-balancer-scoring.ts', Bun.file('src/scheduler/score-core.ts'))\"",
-    "build": "bun run sync:tui && bun build ./src/index.ts --outdir dist --target node --format esm && tsc -p tsconfig.build.json",
-    "dev": "bun build ./src/index.ts --outdir dist --target node --format esm --watch",
+    "sync:tui": "bun -e \"await Bun.write('tui/auth-load-balancer-scoring.ts', Bun.file('src/scheduler/score-core.ts')); await Bun.write('tui/auth-load-balancer-rpc.ts', Bun.file('src/v2-rpc.ts'))\"",
+    "build": "bun run sync:tui && bun build ./src/index.ts ./src/v1.ts --outdir dist --target node --format esm --external @opencode/plugin --external effect --external 'effect/*' && tsc -p tsconfig.build.json",
+    "dev": "bun build ./src/index.ts ./src/v1.ts --outdir dist --target node --format esm --external @opencode/plugin --external effect --external 'effect/*' --watch",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tui.json --noEmit",
     "typecheck:tui": "tsc -p tsconfig.tui.json --noEmit",
     "lint": "oxlint",
@@ -41,12 +50,35 @@
     "prepare": "husky"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.18.26"
+    "@opencode-ai/plugin": ">=1.18.26 <2",
+    "@opencode/plugin": "^2.0.27",
+    "@opentui/core": ">=0.5.17",
+    "@opentui/solid": ">=0.5.17",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    },
+    "@opencode/plugin": {
+      "optional": true
+    },
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.18.26",
-    "@opentui/core": "0.5.10",
-    "@opentui/solid": "0.5.10",
+    "@opencode/plugin": "2.0.27",
+    "@opencode/theme": "2.0.27",
+    "@opentui/core": "0.5.17",
+    "@opentui/solid": "0.5.17",
     "@types/bun": "^1.4.0",
     "@types/node": "^26.4.1",
     "eslint-plugin-devup": "^2.1.0",
@@ -73,5 +105,11 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "3.0.129",
+    "@ai-sdk/openai": "3.0.125",
+    "@ai-sdk/openai-compatible": "2.0.81",
+    "zod": "^4.3"
   }
 }

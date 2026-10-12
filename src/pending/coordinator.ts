@@ -81,6 +81,11 @@ export interface PendingRestoreClient {
   }
 }
 
+/** Hosts with durable inboxes resume the original prompt by its stable ID. */
+export interface PendingResumeClient {
+  resumePending(turn: PendingTurn): Promise<'resumed' | 'obsolete'>
+}
+
 export interface PendingCoordinatorDependencies {
   now(): number
   sleep(ms: number, signal?: AbortSignal): Promise<void>
@@ -300,8 +305,13 @@ export class PendingCoordinator {
 
   private async restoreOnce(
     turn: PendingTurn,
-    client: PendingRestoreClient,
+    client: PendingRestoreClient | PendingResumeClient,
   ): Promise<void> {
+    if ('resumePending' in client) {
+      if ((await client.resumePending(turn)) === 'obsolete')
+        await this.clear(turn)
+      return
+    }
     const message = await client.session.message({
       path: { id: turn.sessionID, messageID: turn.messageID },
       query: { directory: this.workspace },
@@ -369,7 +379,7 @@ export class PendingCoordinator {
 
   private async restoreWithRetry(
     original: PendingTurn,
-    client: PendingRestoreClient,
+    client: PendingRestoreClient | PendingResumeClient,
   ): Promise<void> {
     const controller = new AbortController()
     this.active.set(controller, original)
@@ -409,7 +419,9 @@ export class PendingCoordinator {
   }
 
   /** Restore this workspace/provider's durable references independently. */
-  async restore(client: PendingRestoreClient): Promise<void> {
+  async restore(
+    client: PendingRestoreClient | PendingResumeClient,
+  ): Promise<void> {
     if (this.disposing) return
     const turns = (
       await this.dependencies.list(this.workspace, this.providerID)

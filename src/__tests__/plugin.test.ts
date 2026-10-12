@@ -2332,7 +2332,7 @@ describe('toast on switch + status tool', () => {
     // /config/providers. So EVERY export must be a function that, given the plugin
     // input, resolves to a hooks OBJECT. (This is exactly the bug a stray `export`ed
     // helper like primeInUse caused — locked here so it can't recur.)
-    const mod = await import('../index')
+    const mod = await import('../v1')
     const exports = Object.values(mod)
     expect(exports.length).toBeGreaterThan(0)
     for (const value of exports) {

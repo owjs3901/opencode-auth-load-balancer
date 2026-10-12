@@ -230,7 +230,7 @@ test('V2 entry registers integrations, tools, transport and cleanup', async () =
   expect(
     fake.providers.find((provider) => provider.id === 'openai'),
   ).toMatchObject({
-    package: 'aisdk:@ai-sdk/openai',
+    package: expect.stringMatching(/^aisdk:file:.*\/sdk\/openai\.js$/),
     activation: 'enabled',
     settings: { transport: 'http' },
   })

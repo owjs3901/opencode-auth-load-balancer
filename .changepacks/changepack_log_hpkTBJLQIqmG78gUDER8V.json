@@ -1,0 +1,7 @@
+{
+  "changes": {
+    "package.json": "Patch"
+  },
+  "note": "Fix pooled providers being silently rewritten to OpenCode 2 native drivers, which bypassed load balancing and exposed revoked Anthropic OAuth token errors. Use packaged local AI SDK factories to preserve pooled HTTP requests. Extend host smoke verification to exercise Anthropic inference and rotate from a revoked token to a healthy account.",
+  "date": "2026-10-12T13:11:01.441848100Z"
+}

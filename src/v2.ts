@@ -21,10 +21,12 @@ import { ignore, setBounded } from './util'
 import { loadBalancerRpc } from './v2-rpc'
 
 const packages: Record<string, string> = {
-  anthropic: 'aisdk:@ai-sdk/anthropic',
-  openai: 'aisdk:@ai-sdk/openai',
-  'kimi-code-plan-cn': 'aisdk:@ai-sdk/openai-compatible',
-  'kimi-code-plan-global': 'aisdk:@ai-sdk/openai-compatible',
+  // V2 rewrites known @ai-sdk names to native drivers. Local factory entries
+  // retain the AISDK route and also satisfy the host's earlier dynamic hook.
+  anthropic: `aisdk:${new URL('./sdk/anthropic.js', import.meta.url).href}`,
+  openai: `aisdk:${new URL('./sdk/openai.js', import.meta.url).href}`,
+  'kimi-code-plan-cn': `aisdk:${new URL('./sdk/kimi.js', import.meta.url).href}`,
+  'kimi-code-plan-global': `aisdk:${new URL('./sdk/kimi.js', import.meta.url).href}`,
 }
 
 // The shared status tools use the pool and workspace captured at registration;

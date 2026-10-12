@@ -1,7 +1,0 @@
-{
-  "changes": {
-    "package.json": "Patch"
-  },
-  "note": "Prevent an expired or revoked OpenCode single-slot OAuth credential from blocking healthy pooled accounts during model resolution. Route pooled providers through an isolated integration reference so account selection and token refresh remain owned by the pool. Reproduce the stale-host-credential failure and verify actual GPT-6.1 Sol and Claude Sonnet 5.5 inference using existing accounts.",
-  "date": "2026-10-12T14:46:10.088163700Z"
-}

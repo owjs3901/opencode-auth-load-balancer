@@ -9,13 +9,15 @@ import { testAccount } from '../src/__tests__/fixtures/account'
 import { poolFilePath } from '../src/pool/paths'
 import { loadBalancerRpc } from '../src/v2-rpc'
 
-// Use a separate home/database/config/pool: no personal credentials are touched.
+// Default modes isolate home/database/config/pool. Explicit --live modes reuse
+// the existing pool for a real request; host credentials remain isolated.
 const scratch = await mkdtemp(join(tmpdir(), 'auth-lb-v2-host-'))
 const project = join(scratch, 'project')
 await mkdir(project)
 const packagePath = resolve(process.argv[2] ?? '.')
 const inference = process.argv.includes('--inference')
-const live = process.argv.includes('--live')
+const liveCodex = process.argv.includes('--live-codex')
+const live = process.argv.includes('--live') || liveCodex
 const requests: string[] = []
 const upstream = inference
   ? Bun.serve({
@@ -234,23 +236,41 @@ try {
     )
   }
   if (live) {
+    const providerID = liveCodex ? 'openai' : 'anthropic'
+    // An obsolete single-slot credential must never gate a healthy pool.
+    // This credential is synthetic and exists only in the isolated database.
+    await client.credential.create({
+      integrationID: providerID,
+      value: {
+        type: 'oauth',
+        methodID: 'auth-lb-0',
+        access: 'obsolete-host-access',
+        refresh: 'obsolete-host-refresh',
+        expires: 0,
+        metadata: { accountID: 'missing-host-account' },
+      },
+    })
     const models = await client.model.list({ location: { directory: project } })
     const model = models.data.find(
-      (value) => value.providerID === 'anthropic' && /sonnet/.test(value.id),
+      (value) =>
+        value.providerID === providerID &&
+        (liveCodex ? value.id === 'gpt-6.1-sol' : /sonnet/.test(value.id)),
     )
     if (
       !model ||
-      !/^aisdk:file:.*\/sdk\/anthropic\.js$/.test(model.package ?? '')
+      !/^aisdk:file:.*\/sdk\/(anthropic|openai)\.js$/.test(model.package ?? '')
     )
-      throw new Error(`Anthropic pooled driver unavailable: ${model?.package}`)
+      throw new Error(
+        `${providerID} pooled driver unavailable: ${model?.package}`,
+      )
     const result = await client.generate.text({
       prompt: 'Reply with exactly OK.',
-      model: { providerID: 'anthropic', id: model.id },
+      model: { providerID, id: model.id },
     })
     if (!result.text.trim())
-      throw new Error('Live Anthropic returned an empty response')
+      throw new Error('Live provider returned an empty response')
     console.info(
-      `Live Anthropic inference passed (${model.id}): ${result.text.trim()}`,
+      `Live ${providerID} inference passed with obsolete host credential (${model.id}): ${result.text.trim()}`,
     )
   }
   console.info(

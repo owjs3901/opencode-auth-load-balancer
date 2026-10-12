@@ -213,6 +213,11 @@ export async function setupV2(ctx: Plugin.Context): Promise<Plugin.Cleanup> {
         if (!record) return
         editor.update(adapter.id, (provider) => {
           provider.package = packages[adapter.id]!
+          // ModelResolver refreshes the provider's integration before loading
+          // its SDK. Pooled requests must not depend on a stale single slot;
+          // our fetch owns credential selection and singleflight refresh.
+          provider.integrationID =
+            `auth-load-balancer-${adapter.id}` as import('@opencode/plugin').Integration.ID
           if (active) provider.activation = 'enabled'
           provider.settings = { ...provider.settings, transport: 'http' }
         })

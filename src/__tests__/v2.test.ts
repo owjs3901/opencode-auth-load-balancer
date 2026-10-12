@@ -232,6 +232,7 @@ test('V2 entry registers integrations, tools, transport and cleanup', async () =
   ).toMatchObject({
     package: expect.stringMatching(/^aisdk:file:.*\/sdk\/openai\.js$/),
     activation: 'enabled',
+    integrationID: 'auth-load-balancer-openai',
     settings: { transport: 'http' },
   })
   expect(

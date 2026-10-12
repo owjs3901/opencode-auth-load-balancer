@@ -76,6 +76,7 @@ bun run build
 bun run scripts/smoke-v2.ts  # isolated home/config/database/pool, requires opencode 2
 bun run scripts/smoke-v2.ts . --inference  # real host, local mock Anthropic, revoked-token rotation
 bun run scripts/smoke-v2.ts . --live  # real Anthropic request using the existing pool
+bun run scripts/smoke-v2.ts . --live-codex  # real GPT-6.1 Sol request; obsolete host auth must not gate the pool
 ```
 
 ---

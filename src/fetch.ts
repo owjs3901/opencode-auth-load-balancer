@@ -634,6 +634,7 @@ export function createLoadBalancedFetch(
     // retried on their OAuth login even if dropping the token from the pool
     // (best-effort) did not land, so a dead token is tried once, never looped.
     let rejectedTokens: Set<string> | null = null
+    const refreshedAfter401 = new Set<string>()
 
     // Cold-start / staleness seeding fires once per request, inside the loop —
     // reusing the loop's own pool read instead of paying a second serialized
@@ -957,6 +958,25 @@ export function createLoadBalancedFetch(
             )
             // prettier-ignore
             if (DEBUG) log(`!! ${account.label} setup-token 401 -> retrying on its OAuth login`)
+            continue
+          }
+
+          // Expiry metadata can outlive a rejected access token. Refresh once
+          // per account under the existing generation guard and refresh lock.
+          // A token already rotated by another process is adopted, not spent.
+          if (
+            res.status === 401 &&
+            account.refresh &&
+            !refreshedAfter401.has(account.id)
+          ) {
+            refreshedAfter401.add(account.id)
+            await ensureAccessToken(
+              adapter,
+              account,
+              Date.now(),
+              account.access,
+            )
+            tried.delete(account.id)
             continue
           }
 

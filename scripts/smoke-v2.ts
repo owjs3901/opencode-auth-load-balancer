@@ -125,7 +125,7 @@ if (inference) {
 await writeFile(
   join(project, 'opencode.json'),
   JSON.stringify({
-    plugins: [packagePath],
+    plugins: [join(packagePath, 'v2.js')],
     ...(upstream
       ? {
           providers: {

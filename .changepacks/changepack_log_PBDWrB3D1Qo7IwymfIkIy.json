@@ -1,7 +1,0 @@
-{
-  "changes": {
-    "package.json": "Patch"
-  },
-  "note": "Allow OpenCode 1 OpenTUI 0.5.10 hosts to install the default V1 plugin without npm peer dependency conflicts.",
-  "date": "2026-10-13T03:20:39.621920600Z"
-}

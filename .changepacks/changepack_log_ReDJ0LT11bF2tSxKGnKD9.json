@@ -1,7 +1,0 @@
-{
-  "changes": {
-    "package.json": "Minor"
-  },
-  "note": "Restore OpenCode 1 default server and TUI entries; recover unexpired OAuth access tokens rejected with HTTP 401 using a bounded, lock-safe refresh and account rotation.",
-  "date": "2026-10-13T03:10:37.117870100Z"
-}

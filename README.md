@@ -27,45 +27,31 @@ Selection is **not** round-robin. It is weighted primarily by **weekly** usage, 
 - [Bun](https://bun.com) ≥ 1.3
 - opencode (TUI), with the Anthropic, OpenAI, and/or Kimi For Coding providers available
 
-### OpenCode 2 compatibility
+### OpenCode 1 compatibility
 
-The main entry targets **OpenCode 2.x**, verified against **2.0.27**. OpenCode 2
-uses a default `setup` entry, integration authentication methods, and domain
-transforms instead of the V1 `auth.loader` and `chat.headers` hooks.
-The existing account pool, scheduling, token refresh, fallback and durable
-pending files are reused; accounts do not need to be registered again.
-
-Configure the **package directory** in `opencode.json` after building:
+The default server and TUI entries target **OpenCode 1.x** (verified with **1.19.0**).
+The existing account pool is reused; accounts do not need to be registered again.
+Configure the npm package in `opencode.json`:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["C:/path/to/opencode-auth-load-balancer"]
+  "plugin": ["opencode-auth-load-balancer"]
 }
 ```
 
-For a published npm release, use `"plugins": ["opencode-auth-load-balancer"]`.
-The package's `./tui` entry loads the V2 footer and sidebar automatically.
-A remote terminal can also load it through `cli.json`'s `plugins` list. Status,
-notifications and account management use server RPC, so the terminal never
-needs access to the server's credential files.
+For a local build, use the package directory or `dist/index.js`. Register the
+existing `tui/auth-load-balancer-tui.ts` entry in `tui.json` as described below.
+On OAuth inference HTTP 401, the plugin refreshes the rejected access token once
+and retries, even if its advertised expiry is still in the future. Refreshes
+share the account lock and adopt a concurrently rotated token; a second 401
+rotates to another account. A revoked refresh token requires re-login.
 
-Remove the previous V1 server entry and separately registered V1 TUI entry when
-switching to V2. Its configuration key is `plugins` (plural); V1's `plugin`
-entry and `tui.json` extension use different host APIs. Explicit local V2 entries
-must point to a directory, not a copied `dist/index.js` file.
-
-V2 keeps HTTP transport for pooled providers, including Codex's Responses API,
-so requests pass through account rotation and usage tracking. Providers without
-a pooled account keep their normal native driver. V2 can resume an unfinished
-pending turn by its original durable prompt ID after a restart.
-
-For **OpenCode 1.x**, use `dist/v1.js` as the local server plugin and the existing
-`tui/auth-load-balancer-tui.ts` entry in `tui.json`. The instructions below about
-copying a standalone bundle and registering TUI files describe this V1 setup.
-The V2 sidebar supports rename, enable/disable, delete, and re-login/pairing;
-the existing Gist sync engine runs on the server, but its V1 sidebar controls
-have not yet been ported to the V2 UI.
+OpenCode 2 remains an explicit opt-in through `v2.js` (or the npm `./v2`
+export), with the separate `./tui-v2` entry. Its configuration uses `plugins`
+(plural), and it uses different host APIs. Do not load a V2 entry into V1.
+V2 status and account management use server RPC; its Gist sidebar controls
+have not yet been ported from V1.
 
 Verification:
 
@@ -73,10 +59,8 @@ Verification:
 bun run typecheck
 bun test
 bun run build
-bun run scripts/smoke-v2.ts  # isolated home/config/database/pool, requires opencode 2
-bun run scripts/smoke-v2.ts . --inference  # real host, local mock Anthropic, revoked-token rotation
-bun run scripts/smoke-v2.ts . --live  # real Anthropic request using the existing pool
-bun run scripts/smoke-v2.ts . --live-codex  # real GPT-6.1 Sol request; obsolete host auth must not gate the pool
+bun run scripts/smoke-v1.ts . --live  # OpenCode 1, real Opus call using the existing pool
+bun run scripts/smoke-v2.ts . --inference  # OpenCode 2, local mock Anthropic rotation
 ```
 
 ---
@@ -85,11 +69,11 @@ bun run scripts/smoke-v2.ts . --live-codex  # real GPT-6.1 Sol request; obsolete
 
 ```bash
 bun install
-bun run build      # V2: dist/index.js; V1: dist/v1.js
+bun run build      # V1: dist/index.js; V2: dist/v2-entry.js
 ```
 
 The V1 bundle imports only Node built-ins and can be installed as one file.
-OpenCode 2 should load the package directory, which also includes its TUI entry.
+OpenCode 1 loads the default package entry. OpenCode 2 must explicitly load `v2.js`.
 
 ### Load it into OpenCode 1 (local / dev)
 
@@ -120,7 +104,7 @@ Restart opencode to load it. (opencode does **not** hot-reload plugins — see t
 // opencode.json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-auth-load-balancer"]
+  "plugin": ["opencode-auth-load-balancer"]
 }
 ```
 
@@ -413,7 +397,7 @@ The unit/integration suite runs with coverage **gated at 100%** (lines and funct
 opencode loads plugins once at startup, so the loop is:
 
 1. `bun run dev` — keeps both server entry points rebuilt on every edit.
-2. For V2, register the package directory in `opencode.json` using `plugins`. For V1, symlink `dist/v1.js` into `.opencode/plugins/` (see install above).
+2. For V1, register the package in `opencode.json` using `plugin`, or symlink `dist/index.js` into `.opencode/plugins/` (see install above).
 3. Edit code → the watcher rebuilds → **restart opencode** to reload the plugin.
 4. Use it; watch the toasts, run `bun run status`, and set `OPENCODE_AUTH_LB_DEBUG=1` to log selections.
 

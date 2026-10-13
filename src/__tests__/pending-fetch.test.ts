@@ -212,7 +212,9 @@ describe('durable pending fetch integration', () => {
 
   test('auth-only exhaustion fails normally and never enters quota pending', async () => {
     await mutatePool((pool) => {
-      pool.accounts.push(account())
+      pool.accounts.push(
+        account({ refresh: '', expires: Number.MAX_SAFE_INTEGER }),
+      )
     })
     respond = () => new Response('unauthorized', { status: 401 })
     const pending = new FakePendingCoordinator()

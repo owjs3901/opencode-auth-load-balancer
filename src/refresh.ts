@@ -195,6 +195,7 @@ async function runRefresh(
   adapter: ProviderAdapter,
   account: PoolAccount,
   now: number,
+  rejectedAccess?: string,
 ): Promise<TokenSet> {
   return withFileLock(
     refreshLockDir(adapter.id, account.id),
@@ -208,7 +209,10 @@ async function runRefresh(
       // wait must NOT be adopted as fresh (it would ship an expired Bearer and
       // 401-cool a healthy account). Math.max keeps the STRICTER of the two
       // clocks so a deliberately future `now` still forces a refresh.
-      if (!needsRefresh(latest, Math.max(now, Date.now())))
+      if (
+        latest.access !== rejectedAccess &&
+        !needsRefresh(latest, Math.max(now, Date.now()))
+      )
         return tokensOf(latest)
       const attempt: RefreshAttempt = {
         refresh: latest.refresh,
@@ -265,18 +269,22 @@ async function settleRefresh(
  *
  * Mutates the passed `account` in place so the caller sees the new token. Concurrent
  * callers that reuse the in-flight refresh have their OWN local objects updated too.
+ * Pass rejectedAccess after HTTP 401 to refresh that token regardless of expiry;
+ * a different fresh token found on disk is adopted without another OAuth POST.
  */
 export async function ensureAccessToken(
   adapter: ProviderAdapter,
   account: PoolAccount,
   now: number,
+  rejectedAccess?: string,
 ): Promise<string> {
-  if (!needsRefresh(account, now)) return account.access
+  if (account.access !== rejectedAccess && !needsRefresh(account, now))
+    return account.access
 
   const existing = inflight.get(account.id)
   if (existing) return settleRefresh(adapter, account, existing)
 
-  const job = runRefresh(adapter, account, now)
+  const job = runRefresh(adapter, account, now, rejectedAccess)
   inflight.set(account.id, job)
   try {
     return await settleRefresh(adapter, account, job)

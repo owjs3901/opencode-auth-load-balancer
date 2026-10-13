@@ -1,2 +1,2 @@
-// OpenCode V2 resolves local plugin directories through their root index file.
-export { default } from './dist/index.js'
+// The default package and local directory entry both target OpenCode 1.
+export * from './dist/index.js'

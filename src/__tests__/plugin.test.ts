@@ -378,6 +378,117 @@ describe('plugin factory', () => {
 })
 
 describe('load-balanced fetch — edge paths', () => {
+  test('401 refreshes a still-unexpired OAuth token and retries the same account', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account())
+    })
+    const sent: string[] = []
+    respond = (_url, init) => {
+      const access = new Headers(init?.headers).get('authorization') ?? ''
+      sent.push(access)
+      return new Response(access === 'Bearer tokA' ? 'revoked' : 'ok', {
+        status: access === 'Bearer tokA' ? 401 : 200,
+      })
+    }
+    let refreshed = 0
+    const adapter = fakeAdapter({
+      ...anthropicAdapter,
+      refresh: async () => {
+        refreshed += 1
+        return {
+          access: 'rotated',
+          refresh: 'next-ref',
+          expires: Date.now() + 3_600_000,
+        }
+      },
+    })
+    const result = await createLoadBalancedFetch(adapter)(
+      'https://api.anthropic.com/v1/messages',
+      { method: 'POST', body: '{}' },
+    )
+    expect(result.status).toBe(200)
+    expect(sent).toEqual(['Bearer tokA', 'Bearer rotated'])
+    expect(refreshed).toBe(1)
+    const row = (await readPool()).accounts[0]
+    expect(row?.refresh).toBe('next-ref')
+    expect(row?.disabledReason).toBeNull()
+    expect(row?.cooldownKind).toBeUndefined()
+  })
+
+  test('a second 401 after refresh rotates instead of refreshing forever', async () => {
+    await seedAB(Date.now())
+    let refreshed = 0
+    const adapter = fakeAdapter({
+      ...anthropicAdapter,
+      refresh: async () => {
+        refreshed += 1
+        return {
+          access: 'still-rejected',
+          refresh: 'next-ref',
+          expires: Date.now() + 3_600_000,
+        }
+      },
+    })
+    const sent: string[] = []
+    respond = (_url, init) => {
+      const access = new Headers(init?.headers).get('authorization') ?? ''
+      sent.push(access)
+      return new Response('response', {
+        status: access === 'Bearer tokB' ? 200 : 401,
+      })
+    }
+    const result = await createLoadBalancedFetch(adapter)(
+      'https://api.anthropic.com/v1/messages',
+      { method: 'POST', body: '{}' },
+    )
+    expect(result.status).toBe(200)
+    expect(refreshed).toBe(1)
+    expect(sent).toEqual([
+      'Bearer tokA',
+      'Bearer still-rejected',
+      'Bearer tokB',
+    ])
+    expect(
+      (await readPool()).accounts.find((row) => row.id === 'A')?.cooldownKind,
+    ).toBe('auth')
+  })
+
+  test('a 401 adopts a concurrently rotated on-disk token without spending the refresh token', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(account())
+    })
+    let refreshed = 0
+    const adapter = fakeAdapter({
+      ...anthropicAdapter,
+      refresh: async () => {
+        refreshed += 1
+        throw new Error('must not spend the token again')
+      },
+    })
+    respond = async (_url, init) => {
+      if (
+        new Headers(init?.headers).get('authorization') ===
+        'Bearer concurrently-rotated'
+      )
+        return new Response('ok')
+      await mutatePool((pool) => {
+        const row = pool.accounts[0]!
+        row.access = 'concurrently-rotated'
+        row.refresh = 'concurrently-rotated-ref'
+        row.tokenGen = (row.tokenGen ?? 0) + 1
+      })
+      return new Response('revoked', { status: 401 })
+    }
+    const result = await createLoadBalancedFetch(adapter)(
+      'https://api.anthropic.com/v1/messages',
+      { method: 'POST', body: '{}' },
+    )
+    expect(result.status).toBe(200)
+    expect(refreshed).toBe(0)
+    expect((await readPool()).accounts[0]?.refresh).toBe(
+      'concurrently-rotated-ref',
+    )
+  })
   test('returns a synthetic 401 (never leaks the empty x-api-key) when the pool has no accounts', async () => {
     // Pre-fix this path fell through to the global fetch, sending opencode's default
     // `x-api-key: ''` upstream and yielding a misleading "x-api-key header is required".
@@ -695,7 +806,14 @@ describe('load-balanced fetch — edge paths', () => {
     process.env.OPENCODE_AUTH_LB_MAX_WAIT_MS = '5000'
     try {
       await mutatePool((pool) => {
-        pool.accounts.push(account({ id: 'A', access: 'tokA' }))
+        pool.accounts.push(
+          account({
+            id: 'A',
+            access: 'tokA',
+            refresh: '',
+            expires: Number.MAX_SAFE_INTEGER,
+          }),
+        )
       })
       let n = 0
       respond = () => {
@@ -982,6 +1100,9 @@ describe('load-balanced fetch — edge paths', () => {
     // still pass every existing test.
     const now = Date.now()
     await seedAB(now)
+    await mutatePool((pool) => {
+      for (const row of pool.accounts) row.refresh = ''
+    })
     let n = 0
     respond = () => {
       n += 1
@@ -2332,7 +2453,7 @@ describe('toast on switch + status tool', () => {
     // /config/providers. So EVERY export must be a function that, given the plugin
     // input, resolves to a hooks OBJECT. (This is exactly the bug a stray `export`ed
     // helper like primeInUse caused — locked here so it can't recur.)
-    const mod = await import('../v1')
+    const mod = await import('../index')
     const exports = Object.values(mod)
     expect(exports.length).toBeGreaterThan(0)
     for (const value of exports) {
@@ -2814,7 +2935,7 @@ describe('kimi code plugins', () => {
       'credential rejected (401): re-login required (kimi-code-plan-cn:A)',
     )
 
-    // An OAuth row keeps the cooldown: its refresh token can still recover it.
+    // A rejected OAuth refresh requires re-login rather than repeated cooldowns.
     await mutatePool((pool) => {
       pool.accounts = [
         {
@@ -2826,8 +2947,9 @@ describe('kimi code plugins', () => {
     })
     await sendKimi()
     const oauthRow = (await readPool()).accounts[0]
-    expect(oauthRow?.disabledReason).toBeNull()
-    expect(oauthRow?.cooldownKind).toBe('auth')
+    expect(oauthRow?.disabledReason).toContain(
+      'invalid_grant: re-login required',
+    )
   })
 
   test("a key replaced by a re-login mid-request survives the old key's 401", async () => {

@@ -876,6 +876,36 @@ describe('pool store', () => {
 })
 
 describe('refresh', () => {
+  test('concurrent 401 recovery refreshes an unexpired token only once', async () => {
+    const row = account({ access: 'rejected-but-unexpired' })
+    await mutatePool((pool) => {
+      pool.accounts.push(row)
+    })
+    let calls = 0
+    const adapter = fakeAdapter({
+      refresh: async () => {
+        calls += 1
+        await sleep(20)
+        return {
+          access: 'recovered',
+          refresh: 'rotated-ref',
+          expires: Date.now() + 3_600_000,
+        }
+      },
+    })
+    const first = { ...row }
+    const second = { ...row }
+    expect(
+      await Promise.all([
+        ensureAccessToken(adapter, first, Date.now(), row.access),
+        ensureAccessToken(adapter, second, Date.now(), row.access),
+      ]),
+    ).toEqual(['recovered', 'recovered'])
+    expect(calls).toBe(1)
+    expect(first.refresh).toBe('rotated-ref')
+    expect(second.refresh).toBe('rotated-ref')
+    expect((await readPool()).accounts[0]?.refresh).toBe('rotated-ref')
+  })
   test('needsRefresh reflects expiry and missing token', () => {
     expect(
       needsRefresh(

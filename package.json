@@ -27,18 +27,24 @@
     },
     "./server": "./dist/index.js",
     "./tui": "./tui.ts",
-    "./tui-v1": "./tui/auth-load-balancer-tui.ts"
+    "./tui-v1": "./tui/auth-load-balancer-tui.ts",
+    "./v2": {
+      "types": "./dist/v2-entry.d.ts",
+      "default": "./dist/v2-entry.js"
+    },
+    "./tui-v2": "./tui/auth-load-balancer-v2.ts"
   },
   "files": [
     "index.js",
+    "v2.js",
     "tui.ts",
     "dist",
     "tui"
   ],
   "scripts": {
     "sync:tui": "bun -e \"await Bun.write('tui/auth-load-balancer-scoring.ts', Bun.file('src/scheduler/score-core.ts')); await Bun.write('tui/auth-load-balancer-rpc.ts', Bun.file('src/v2-rpc.ts'))\"",
-    "build": "bun run sync:tui && bun build ./src/index.ts ./src/v1.ts ./src/sdk/anthropic.ts ./src/sdk/openai.ts ./src/sdk/kimi.ts --outdir dist --target node --format esm --external @opencode/plugin --external effect --external 'effect/*' && tsc -p tsconfig.build.json",
-    "dev": "bun build ./src/index.ts ./src/v1.ts ./src/sdk/anthropic.ts ./src/sdk/openai.ts ./src/sdk/kimi.ts --outdir dist --target node --format esm --external @opencode/plugin --external effect --external 'effect/*' --watch",
+    "build": "bun run sync:tui && bun build ./src/index.ts ./src/v1.ts ./src/v2-entry.ts ./src/sdk/anthropic.ts ./src/sdk/openai.ts ./src/sdk/kimi.ts --outdir dist --target node --format esm --external @opencode/plugin --external effect --external 'effect/*' && tsc -p tsconfig.build.json",
+    "dev": "bun build ./src/index.ts ./src/v1.ts ./src/v2-entry.ts ./src/sdk/anthropic.ts ./src/sdk/openai.ts ./src/sdk/kimi.ts --outdir dist --target node --format esm --external @opencode/plugin --external effect --external 'effect/*' --watch",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tui.json --noEmit",
     "typecheck:tui": "tsc -p tsconfig.tui.json --noEmit",
     "lint": "oxlint",

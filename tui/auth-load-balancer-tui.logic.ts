@@ -835,7 +835,7 @@ export function syncMenu(view: SyncView): SyncMenuItem[] {
       { id: 'subscribe', title: 'Follow a gist link' },
       {
         id: 'upload-new',
-        title: "Create a new secret gist from this pool's static credentials",
+        title: "Create a new secret gist from this pool's credentials",
       },
     ]
   const canWrite = view.write === undefined || view.write === 'ok'

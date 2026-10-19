@@ -73,7 +73,11 @@ export function createPcs(label: string) {
   async function snapshot(
     name: string,
     blob: string,
-  ): Promise<{ at: number; entries: Record<string, string>[] }> {
+  ): Promise<{
+    at: number
+    entries: Record<string, string>[]
+    logins: Record<string, unknown>[]
+  }> {
     const key = decodeKey((await state(name))?.key ?? '') ?? Buffer.alloc(0)
     return JSON.parse(open(blob, key))
   }

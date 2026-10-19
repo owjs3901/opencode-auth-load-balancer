@@ -1,18 +1,28 @@
 /**
- * What a sync gist carries: the static credentials of the pool, and nothing
- * else. OAuth access and refresh tokens never go in (a refresh token is
- * single-use, so two machines sharing one would kill it for both), and a
- * payload read back is untrusted: every field is allow-listed and bounded.
+ * What a sync gist carries: the static credentials of the pool (entries) and
+ * the OAuth logins that machines share (logins, see `login-payload.ts`).
+ * A payload read back is untrusted: every field is allow-listed and bounded.
  * Every entry names the machine (origin) that listed it, and only that machine
- * ever adds, changes or removes it.
+ * ever adds, changes or removes it; a login belongs to nobody in particular
+ * and the newest version of it wins.
+ *
+ * Version 2 (entries only) is still read; everything written is version 3.
  */
 import { isFiniteNumber, isPlainObject } from '../util'
 import { fingerprint } from './crypto'
 import { SyncError } from './errors'
+import {
+  type LoginRecord,
+  MAX_LOGINS,
+  parseLoginList,
+  sortLogins,
+} from './login-payload'
+import { boundedString, MAX_LABEL, printable } from './text'
 
-export const PAYLOAD_VERSION = 2
+export { MAX_LABEL, printable }
+export const PAYLOAD_VERSION = 3
+const ENTRIES_ONLY_VERSION = 2
 export const MAX_ENTRIES = 64
-export const MAX_LABEL = 80
 const MAX_SECRET = 512
 const MAX_FIELD = 128
 const ID_RE = /^[\w-]{1,64}$/
@@ -46,38 +56,6 @@ export interface SyncEntry {
 /** The identity of an entry across machines. */
 export function entryKey(entry: Pick<SyncEntry, 'origin' | 'id'>): string {
   return `${entry.origin}/${entry.id}`
-}
-
-/**
- * Whether a character is invisible or steers the display (a label lands in the
- * TUI): C0 and C1 controls, DEL, and the bidi, zero-width and line/paragraph
- * format characters that can reorder or hide text.
- */
-function isControl(code: number): boolean {
-  return (
-    code < 0x20 ||
-    (code >= 0x7f && code <= 0x9f) ||
-    code === 0x61c ||
-    (code >= 0x200b && code <= 0x200f) ||
-    (code >= 0x2028 && code <= 0x202e) ||
-    (code >= 0x2060 && code <= 0x2069) ||
-    code === 0xfeff
-  )
-}
-
-/** `text` with those characters turned into spaces, trimmed. */
-export function printable(text: string): string {
-  return Array.from(text, (ch) =>
-    isControl(ch.codePointAt(0) ?? 0) ? ' ' : ch,
-  )
-    .join('')
-    .trim()
-}
-
-function boundedString(value: unknown, max: number): string | undefined {
-  return typeof value === 'string' && value.length > 0 && value.length <= max
-    ? value
-    : undefined
 }
 
 /** The key of a raw entry, when its origin and id are well formed (even if the rest is not). */
@@ -132,19 +110,21 @@ export function entriesDigest(entries: readonly SyncEntry[]): string {
   return fingerprint(JSON.stringify(sortEntries(entries)))
 }
 
-/** The plaintext to encrypt. */
+/** The plaintext to encrypt: always the current version, entries and logins each in a stable order. */
 export function buildPayload(
   entries: readonly SyncEntry[],
   at: number,
+  logins: readonly LoginRecord[] = [],
 ): string {
   return JSON.stringify({
     v: PAYLOAD_VERSION,
     at,
     entries: sortEntries(entries),
+    logins: sortLogins(logins),
   })
 }
 
-/** A snapshot read back: when it was written, its valid entries, and every key it still lists. */
+/** A snapshot read back: when it was written, its valid entries and logins, and every key it still lists. */
 export interface ParsedPayload {
   at: number
   entries: SyncEntry[]
@@ -155,6 +135,12 @@ export interface ParsedPayload {
   listed: ReadonlySet<string>
   /** How many entries could not be read at all: a writer must not rewrite what it cannot parse. */
   unreadable: number
+  /** The valid logins (none in a version 2 snapshot). */
+  logins: LoginRecord[]
+  /** Keys of every listed login, valid or not. */
+  loginsListed: ReadonlySet<string>
+  /** How many logins could not be read at all: as for entries, a writer must not rewrite them. */
+  loginsUnreadable: number
 }
 
 /**
@@ -171,9 +157,14 @@ export function parsePayload(text: string): ParsedPayload {
   }
   if (!isPlainObject(json) || !Array.isArray(json.entries))
     throw new SyncError('bad-blob')
-  if (json.v !== PAYLOAD_VERSION) throw new SyncError('bad-version')
-  if (!isFiniteNumber(json.at)) throw new SyncError('bad-blob')
-  if (json.entries.length > MAX_ENTRIES) throw new SyncError('too-large')
+  if (json.v !== PAYLOAD_VERSION && json.v !== ENTRIES_ONLY_VERSION)
+    throw new SyncError('bad-version')
+  const rawLogins: unknown =
+    json.v === PAYLOAD_VERSION ? (json.logins ?? []) : []
+  if (!isFiniteNumber(json.at) || !Array.isArray(rawLogins))
+    throw new SyncError('bad-blob')
+  if (json.entries.length > MAX_ENTRIES || rawLogins.length > MAX_LOGINS)
+    throw new SyncError('too-large')
   const listed = new Set<string>()
   const entries: SyncEntry[] = []
   let unreadable = 0
@@ -188,5 +179,11 @@ export function parsePayload(text: string): ParsedPayload {
     if (entry) entries.push(entry)
     else unreadable += 1
   }
-  return { at: json.at, entries, listed, unreadable }
+  return {
+    at: json.at,
+    entries,
+    listed,
+    unreadable,
+    ...parseLoginList(rawLogins),
+  }
 }

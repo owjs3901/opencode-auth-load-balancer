@@ -35,7 +35,7 @@ import type { ProviderAdapter } from './providers/types'
 import { loadConfig } from './scheduler/config'
 import { MESSAGE_HEADER, SESSION_HEADER } from './session'
 import { readStatus, renderPendingStatus, renderStatus } from './status'
-import { startSync } from './sync/start'
+import { publishAfterLogin, startSync } from './sync/start'
 import { maintainTokens, mintAtLogin } from './token-mint'
 import { MANUAL_DISABLED_REASON, type TokenSet } from './types'
 import {
@@ -106,6 +106,7 @@ export function buildAuthHook(
     if (minted || (account.inferenceToken !== undefined && account.refresh))
       void notifyPaired(client, adapter.id, account)
     await refreshUsageInBackground(adapter, Date.now()).catch(ignore)
+    if (tokens.refresh && !tokens.inferenceOnly) await publishAfterLogin()
   }
   const oauthSuccess = (tokens: TokenSet) => ({
     type: 'success' as const,

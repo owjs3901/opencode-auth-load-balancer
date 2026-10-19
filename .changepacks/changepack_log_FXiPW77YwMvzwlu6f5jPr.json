@@ -1,0 +1,7 @@
+{
+  "changes": {
+    "package.json": "Minor"
+  },
+  "note": "Share OAuth logins (Claude, Codex, Kimi sign-in) through the encrypted gist: the newest login wins, a refresh is published right after it commits and looked up before the next one, and pasting a link or logging in again uploads at once. The gist payload becomes version 3, so update every machine that follows the gist. Stop minting Claude inference tokens by default: Anthropic answers that grant with an 8-hour token and narrows the login to user:inference.",
+  "date": "2026-10-19T08:04:20.637349600Z"
+}

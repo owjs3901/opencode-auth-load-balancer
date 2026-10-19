@@ -363,9 +363,10 @@ describe('payload: an untrusted read', () => {
   const parse = (entries: unknown[], v: unknown = PAYLOAD_VERSION) =>
     snapshot(entries, v).entries
 
-  test('the format is version 2, and a version 1 gist says it was written by another version', () => {
-    expect(PAYLOAD_VERSION).toBe(2)
+  test('the format is version 3 (version 2 is still read), and any other gist says it was written by another version', () => {
+    expect(PAYLOAD_VERSION).toBe(3)
     expect(codeOf(() => parse([], 1))).toBe('bad-version')
+    expect(snapshot([], 2).entries).toEqual([])
     expect(new SyncError('bad-version').message).toContain('newer version')
   })
 
@@ -400,7 +401,7 @@ describe('payload: an untrusted read', () => {
     expect(codeOf(() => parsePayload('{"v":2,"at":"x","entries":[]}'))).toBe(
       'bad-blob',
     )
-    expect(codeOf(() => parse([], 3))).toBe('bad-version')
+    expect(codeOf(() => parse([], 4))).toBe('bad-version')
     expect(codeOf(() => parse(Array.from({ length: 65 }, () => entry())))).toBe(
       'too-large',
     )

@@ -1,15 +1,17 @@
 import { recordLostLogin } from './accounts'
+import { bumpLoginRev } from './login-rev'
 import { type LockOptions, withLock as withFileLock } from './pool/lock'
 import { poolFilePath } from './pool/paths'
 import { findAccount, mutatePool, readPoolAccount } from './pool/store'
 import type { ProviderAdapter } from './providers/types'
+import { getRefreshHooks } from './refresh-hooks'
 import {
   MANUAL_DISABLED_REASON,
   type PoolAccount,
   STATIC_CREDENTIAL_EXPIRES,
   type TokenSet,
 } from './types'
-import { errorSummary } from './util'
+import { errorSummary, ignore } from './util'
 
 /** Refresh this many ms before the access token actually expires. */
 const REFRESH_SKEW_MS = 5 * 60 * 1000
@@ -142,6 +144,7 @@ async function commitRefresh(
     if (!stored) return next
     if (!sameGeneration(stored, attempt)) return tokensOf(stored)
     applyTokensTo(stored, next)
+    bumpLoginRev(stored)
     stored.tokenGen = attempt.gen + 1
     // A working rotation heals a re-login reason, never a MANUAL disable:
     // usage polling refreshes manually disabled accounts too.
@@ -187,6 +190,32 @@ async function resolveInvalidGrant(
 }
 
 /**
+ * Ask the pull hook for a newer shared login for `account` and, when it put one
+ * on the row, return the row as it is now. A hook that fails adopted nothing:
+ * pulling must never make a refresh fail.
+ */
+async function pullNewer(
+  account: PoolAccount,
+  recovery: boolean,
+): Promise<PoolAccount | undefined> {
+  try {
+    const adopted = await getRefreshHooks()?.pull?.(account, recovery)
+    return adopted ? await readPoolAccount(account.id) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Tell sync a refresh just committed; it must never reach the request path. */
+function announceRefresh(): void {
+  try {
+    getRefreshHooks()?.afterRefresh?.()
+  } catch {
+    ignore()
+  }
+}
+
+/**
  * The actual refresh, serialized across processes by the per-account lock: reload
  * the latest token, skip if another process already rotated it, otherwise refresh
  * and commit under the generation guard.
@@ -201,7 +230,7 @@ async function runRefresh(
     refreshLockDir(adapter.id, account.id),
     REFRESH_LOCK,
     async () => {
-      const latest = (await readPoolAccount(account.id)) ?? account
+      const read = (await readPoolAccount(account.id)) ?? account
       // Won the wait but another process already rotated: adopt, don't re-spend.
       // Fresh Date.now(), NOT only the caller's loop-start `now`: acquiring the
       // lock may block up to REFRESH_LOCK.timeoutMs (60 s) behind another
@@ -209,11 +238,15 @@ async function runRefresh(
       // wait must NOT be adopted as fresh (it would ship an expired Bearer and
       // 401-cool a healthy account). Math.max keeps the STRICTER of the two
       // clocks so a deliberately future `now` still forces a refresh.
-      if (
-        latest.access !== rejectedAccess &&
-        !needsRefresh(latest, Math.max(now, Date.now()))
-      )
-        return tokensOf(latest)
+      const usable = (row: PoolAccount): boolean =>
+        row.access !== rejectedAccess &&
+        !needsRefresh(row, Math.max(now, Date.now()))
+      if (usable(read)) return tokensOf(read)
+      // Before spending the single-use token, look at the shared login: another
+      // machine may have refreshed it already (its token is then the one to use).
+      const pulled = await pullNewer(read, false)
+      if (pulled && usable(pulled)) return tokensOf(pulled)
+      const latest = pulled ?? read
       const attempt: RefreshAttempt = {
         refresh: latest.refresh,
         gen: genOf(latest),
@@ -223,6 +256,10 @@ async function runRefresh(
         return await commitRefresh(account.id, attempt, next)
       } catch (error) {
         if (!(error instanceof Error) || !isInvalidGrant(error)) throw error
+        // The token may have been spent by another machine that has already
+        // published its successor: adopt that instead of marking the login lost.
+        const recovered = await pullNewer(latest, true)
+        if (recovered) return tokensOf(recovered)
         const adopted = await resolveInvalidGrant(
           adapter,
           account.id,
@@ -287,7 +324,9 @@ export async function ensureAccessToken(
   const job = runRefresh(adapter, account, now, rejectedAccess)
   inflight.set(account.id, job)
   try {
-    return await settleRefresh(adapter, account, job)
+    const access = await settleRefresh(adapter, account, job)
+    announceRefresh()
+    return access
   } finally {
     inflight.delete(account.id)
   }

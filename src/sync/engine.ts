@@ -2,14 +2,21 @@
 import { readPool } from '../pool/store'
 import type { ProviderAdapter } from '../providers/types'
 import { encodeKey, generateKey, seal } from './crypto'
-import { type CycleReport, runCycle } from './cycle'
+import { type CycleReport, runCycle, uploadedMessage } from './cycle'
 import { describeSyncError, SyncError } from './errors'
 import { createGist, parseGistLink } from './gist'
 import { discoverGithubToken, type GhRunner } from './github-auth'
+import {
+  heldMarks,
+  loginsSyncEnabled,
+  ownLogins,
+  publishDigest,
+} from './logins'
 import { machineOrigin } from './origin'
 import { ownEntries } from './own'
-import { buildPayload, entriesDigest } from './payload'
+import { buildPayload } from './payload'
 import {
+  marks,
   newMap,
   newRefs,
   readSyncState,
@@ -62,9 +69,8 @@ export interface SyncEngine {
   backgroundPublish(gistId: string, digest: string): Promise<Outcome | null>
 }
 
-function count(n: number, one: string, many: string): string {
-  return `${n} ${n === 1 ? one : many}`
-}
+const NOTHING_TO_SHARE =
+  'No static credential or shareable OAuth login on this machine.'
 
 export function createEngine(deps: EngineDeps): SyncEngine {
   const { now } = deps
@@ -119,14 +125,18 @@ export function createEngine(deps: EngineDeps): SyncEngine {
     const token = await discoverGithubToken(deps.runGh)
     if (!token) throw new SyncError('no-auth')
     const origin = await machineOrigin()
-    const own = ownEntries(await readPool(), origin, newRefs())
+    const pool = await readPool()
+    const own = ownEntries(pool, origin, newRefs())
+    const sharing = loginsSyncEnabled()
+    const shared = sharing ? ownLogins(pool) : []
     const key = generateKey()
     const at = now()
     const gist = await createGist(
       token,
-      seal(buildPayload(own, at), key),
+      seal(buildPayload(own, at, shared), key),
       now(),
     )
+    const loginKnown = sharing ? marks(heldMarks(pool.accounts)) : undefined
     await updateSyncState(() => ({
       v: 1,
       gistId: gist.id,
@@ -135,14 +145,18 @@ export function createEngine(deps: EngineDeps): SyncEngine {
       ...(gist.owner ? { owner: gist.owner } : {}),
       write: 'ok',
       syncedAt: now(),
-      uploadedDigest: entriesDigest(own),
+      uploadedDigest: publishDigest(own, shared),
       uploadedAt: at,
       appliedAt: at,
       pollAt: now() + POLL_MS,
       imported: newRefs(),
       skipped: newMap(),
+      ...(loginKnown ? { loginKnown } : {}),
     }))
-    return `Uploaded ${count(own.length, 'credential', 'credentials')}.`
+    const message = uploadedMessage(own.length, shared.length)
+    return own.length + shared.length === 0
+      ? `${message} ${NOTHING_TO_SHARE}`
+      : message
   }
 
   async function unpublishedDigest(): Promise<string | null> {
@@ -154,12 +168,11 @@ export function createEngine(deps: EngineDeps): SyncEngine {
       (state.write === 'denied' && now() < (state.writeCheckAt ?? 0))
     )
       return null
-    const own = ownEntries(
-      await readPool(),
-      await machineOrigin(),
-      state.imported,
+    const pool = await readPool()
+    const digest = publishDigest(
+      ownEntries(pool, await machineOrigin(), state.imported),
+      loginsSyncEnabled() ? ownLogins(pool) : [],
     )
-    const digest = entriesDigest(own)
     return digest === state.uploadedDigest ? null : digest
   }
 
@@ -189,6 +202,10 @@ export function createEngine(deps: EngineDeps): SyncEngine {
           ...(prior?.owner ? { owner: prior.owner } : {}),
           imported: prior?.imported ?? newRefs(),
           skipped: prior?.skipped ?? newMap(),
+          ...(prior?.loginKnown ? { loginKnown: prior.loginKnown } : {}),
+          ...(prior?.loginSuppressed
+            ? { loginSuppressed: prior.loginSuppressed }
+            : {}),
         }
       })
       return settle(cycle(false), reqAt, true)

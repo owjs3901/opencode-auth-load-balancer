@@ -25,7 +25,8 @@ const MINTED = 'sk-ant-oat01-minted'
 
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_LB_DIR = DIR
-  delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN
+  // Minting is opt-in; the tests below exercise it, so they opt in.
+  process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN = '1'
   await rm(POOL, { force: true })
 })
 afterEach(() => {
@@ -104,16 +105,17 @@ describe('which rows are due a minted token', () => {
     expect(due({ disabledReason: 'manually disabled' })).toBe(false)
   })
 
-  test('on by default; OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN=0/false/no/off turns it off', () => {
-    for (const off of ['0', 'false', ' OFF ', 'no'])
+  test('off by default; OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN=1/true/yes/on turns it on', () => {
+    for (const off of [undefined, '', '0', 'false', ' OFF ', 'no', 'maybe'])
       expect(
         autoTokenEnabled({ OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN: off }),
       ).toBe(false)
-    for (const on of [undefined, '', '1', 'true'])
+    for (const on of ['1', 'true', ' ON ', 'Yes'])
       expect(
         autoTokenEnabled({ OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN: on }),
       ).toBe(true)
-    expect(autoTokenEnabled()).toBe(true)
+    delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN
+    expect(autoTokenEnabled()).toBe(false)
   })
 })
 
@@ -278,6 +280,9 @@ describe('minting in the background', () => {
     await maintainTokens(adapter, Date.now())
     expect(await mintAtLogin(adapter, row)).toBe(false)
     delete process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN
+    await maintainTokens(adapter, Date.now())
+    expect(await mintAtLogin(adapter, row)).toBe(false)
+    process.env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN = '1'
     await maintainTokens(fakeAdapter(), Date.now())
     expect(await mintAtLogin(fakeAdapter(), row)).toBe(false)
 

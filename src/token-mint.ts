@@ -6,6 +6,7 @@
  * renewed before it lapses.
  */
 import { clearLostLogin } from './accounts'
+import { bumpLoginRev } from './login-rev'
 import {
   findAccount,
   mutatePool,
@@ -36,12 +37,21 @@ const RETRY_MS = 6 * 60 * 60 * 1000
 const LAST_ATTEMPT_MAX = 256
 const lastAttempt = new Map<string, number>()
 
-/** On unless `OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN` is `0` / `false` / `no` / `off`. */
+/**
+ * Off unless `OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN` is `1` / `true` / `yes` /
+ * `on`. Verified against Anthropic's token endpoint: a refresh grant for
+ * `scope=user:inference&expires_in=31536000` is answered with an 8-hour token
+ * (the lifetime is ignored), and the refresh token it rotates to is narrowed
+ * to `user:inference` for good, so the login can no longer read its usage
+ * (`403 … user:profile`) and a full-scope refresh is refused (`invalid_scope`).
+ * The token is then too short to pool, so the grant only does harm. A
+ * long-lived token comes from a pasted `claude setup-token`.
+ */
 export function autoTokenEnabled(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   const raw = env.OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN?.trim().toLowerCase()
-  return raw !== '0' && raw !== 'false' && raw !== 'no' && raw !== 'off'
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on'
 }
 
 /** A row whose OAuth login should mint it a token: it has none, or its minted one nears its end. */
@@ -82,6 +92,7 @@ export async function mintToken(
       if (minted.refresh !== row.refresh) {
         row.refresh = minted.refresh
         row.tokenGen = attempt.gen + 1
+        bumpLoginRev(row)
       }
       if (minted.refreshExpires) row.refreshExpires = minted.refreshExpires
       const now = Date.now()

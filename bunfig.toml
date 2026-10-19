@@ -1,4 +1,8 @@
 [test]
+# The suite swaps OPENCODE_AUTH_LB_DIR per test; a test that times out keeps running and can
+# leave it unset, which falls back to the real ~/.local/share/opencode. The preload points the
+# home at a throwaway directory first, so that fallback can never reach real credentials.
+preload = ["./src/__tests__/isolate-home.ts"]
 coverage = true
 coverageSkipTestFiles = true
 coverageReporter = ["text"]

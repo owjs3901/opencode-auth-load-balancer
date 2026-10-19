@@ -253,6 +253,15 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
     if (typeof row.orgId !== 'string' || row.orgId === '') delete row.orgId
     if (!isFiniteNumber(row.refreshExpires) || row.refreshExpires <= 0)
       delete row.refreshExpires
+    // The shared login version orders this row's login against other
+    // machines' copies: a garbage value would win (or lose) every comparison.
+    if (
+      typeof row.loginRev !== 'number' ||
+      !Number.isSafeInteger(row.loginRev) ||
+      row.loginRev < 1
+    )
+      delete row.loginRev
+    if (!isFiniteNumber(row.loginAt) || row.loginAt < 0) delete row.loginAt
     if (
       row.inferenceToken === undefined ||
       !isFiniteNumber(row.inferenceExpires) ||

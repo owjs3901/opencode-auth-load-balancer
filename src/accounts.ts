@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
+import { bumpLoginRev } from './login-rev'
 import { holdsCredential, orgPartner } from './pairing'
 import { findAccount, mutatePool, readPool } from './pool/store'
 import {
@@ -50,6 +51,10 @@ export function makeAccount(
   }
   if (tokens.orgId) account.orgId = tokens.orgId
   if (tokens.refreshExpires) account.refreshExpires = tokens.refreshExpires
+  if (tokens.refresh && !tokens.inferenceOnly) {
+    account.loginRev = 1
+    account.loginAt = Date.now()
+  }
   return account
 }
 
@@ -88,7 +93,10 @@ function mergeLoginUsage(
 function applyTokens(row: PoolAccount, tokens: TokenSet): PoolAccount {
   // Persist the newer refresh token when matched via accountId (a no-op when
   // matched by refresh — they are already equal); never clear it.
-  if (tokens.refresh) row.refresh = tokens.refresh
+  if (tokens.refresh) {
+    row.refresh = tokens.refresh
+    bumpLoginRev(row)
+  }
   row.access = tokens.access
   row.expires = tokens.expires
   row.disabledReason = null

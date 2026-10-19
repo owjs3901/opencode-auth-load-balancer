@@ -6,6 +6,7 @@
  * renewed before it lapses.
  */
 import { clearLostLogin } from './accounts'
+import { bumpLoginRev } from './login-rev'
 import {
   findAccount,
   mutatePool,
@@ -91,6 +92,7 @@ export async function mintToken(
       if (minted.refresh !== row.refresh) {
         row.refresh = minted.refresh
         row.tokenGen = attempt.gen + 1
+        bumpLoginRev(row)
       }
       if (minted.refreshExpires) row.refreshExpires = minted.refreshExpires
       const now = Date.now()

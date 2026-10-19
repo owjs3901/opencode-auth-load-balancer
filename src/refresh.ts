@@ -1,4 +1,5 @@
 import { recordLostLogin } from './accounts'
+import { bumpLoginRev } from './login-rev'
 import { type LockOptions, withLock as withFileLock } from './pool/lock'
 import { poolFilePath } from './pool/paths'
 import { findAccount, mutatePool, readPoolAccount } from './pool/store'
@@ -142,6 +143,7 @@ async function commitRefresh(
     if (!stored) return next
     if (!sameGeneration(stored, attempt)) return tokensOf(stored)
     applyTokensTo(stored, next)
+    bumpLoginRev(stored)
     stored.tokenGen = attempt.gen + 1
     // A working rotation heals a re-login reason, never a MANUAL disable:
     // usage polling refreshes manually disabled accounts too.

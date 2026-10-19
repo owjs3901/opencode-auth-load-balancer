@@ -136,6 +136,16 @@ export interface PoolAccount {
    */
   refreshExpires?: number
   /**
+   * The SHARED version of the row's OAuth login (gist sync orders machines'
+   * copies of one login by it): 1 when the login was created, plus one for
+   * every re-login, committed refresh rotation and minted rotation (see
+   * `src/login-rev.ts`). Absent on rows without an OAuth login and on legacy
+   * rows (read as 1).
+   */
+  loginRev?: number
+  /** epoch ms `loginRev` was last bumped (a tie-break between equal revisions). Absent reads as 0. */
+  loginAt?: number
+  /**
    * Organization the row's credentials act for (Anthropic), when known. A
    * setup-token carries no account identity — only the organization its
    * responses report — so this is the key that pairs it with its account's

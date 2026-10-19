@@ -604,7 +604,7 @@ describe('a gist that cannot be trusted leaves the pool untouched', () => {
   test('a payload of another version is refused after decrypting, a version 1 gist included', async () => {
     const { before } = await following()
     const key = decodeKey((await state('pc2'))?.key ?? '') ?? Buffer.alloc(0)
-    for (const v of [1, 3]) {
+    for (const v of [1, 4]) {
       setContent(seal(JSON.stringify({ v, at: 1, entries: [] }), key))
       const out = await run('pc2', (e) => e.sync())
       expect(out.message).toContain('newer version')

@@ -75,6 +75,10 @@ export interface SyncState {
   imported: Record<string, ImportedRef>
   /** Entry key to why it was not imported. */
   skipped: Record<string, SkippedRef>
+  /** Login keys this machine held a row for at the last pass: a key that has no row any more was deleted by the user. */
+  loginKnown?: Record<string, true>
+  /** Login keys the user deleted here: never imported again until a row for the key exists once more. */
+  loginSuppressed?: Record<string, true>
 }
 
 /**
@@ -120,6 +124,17 @@ function isSkip(value: unknown): value is SkippedRef {
   )
 }
 
+function isMark(value: unknown): value is true {
+  return value === true
+}
+
+/** A map of marks, or undefined when it holds none: a state without logins stays as compact as it was. */
+export function marks(
+  from: Readonly<Record<string, true>> | undefined,
+): Record<string, true> | undefined {
+  return from && Object.keys(from).length > 0 ? newMap(from) : undefined
+}
+
 function readMap<T>(
   raw: unknown,
   accept: (value: unknown) => value is T,
@@ -154,6 +169,8 @@ function parseState(text: string): SyncState | null {
     return null
   const { owner, etag, syncedAt, uploadedDigest, write } = json
   const { uploadedAt, appliedAt, retryAt, pollAt, writeCheckAt } = json
+  const loginKnown = marks(readMap(json.loginKnown, isMark))
+  const loginSuppressed = marks(readMap(json.loginSuppressed, isMark))
   return {
     v: 1,
     gistId: json.gistId,
@@ -161,6 +178,8 @@ function parseState(text: string): SyncState | null {
     creator: json.creator === true,
     imported: readMap(json.imported, isRef),
     skipped: readMap(json.skipped, isSkip),
+    ...(loginKnown ? { loginKnown } : {}),
+    ...(loginSuppressed ? { loginSuppressed } : {}),
     ...(typeof owner === 'string' ? { owner } : {}),
     ...(isWrite(write) ? { write } : {}),
     ...(typeof etag === 'string' ? { etag } : {}),

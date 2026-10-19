@@ -65,7 +65,7 @@ function release(pool: PoolFile, row: PoolAccount): void {
 }
 
 /** `label`, or `label (n)` when another row already carries it (labels are unique pool-wide). */
-function uniqueLabel(pool: PoolFile, label: string): string {
+export function uniqueLabel(pool: PoolFile, label: string): string {
   const used = new Set(pool.accounts.map((a) => a.label))
   let candidate = label
   for (let n = 2; used.has(candidate); n++) candidate = `${label} (${n})`

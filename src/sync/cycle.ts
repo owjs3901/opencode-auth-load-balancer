@@ -12,17 +12,20 @@ import { decodeKey, open, seal } from './crypto'
 import { SyncError } from './errors'
 import { readGist, updateGist } from './gist'
 import { discoverGithubToken, type GhRunner } from './github-auth'
+import { loginsDigest } from './login-payload'
+import {
+  applyLogins,
+  loginsSyncEnabled,
+  mergeLogins,
+  ownCopies,
+  ownLogins,
+  publishDigest,
+} from './logins'
 import { hasFreedSkips } from './merge'
 import { machineOrigin } from './origin'
 import { listable, ownEntries } from './own'
-import {
-  buildPayload,
-  entriesDigest,
-  parsePayload,
-  sortEntries,
-  type SyncEntry,
-} from './payload'
-import { readSyncState, type SyncWrite, updateSyncState } from './state'
+import { buildPayload, parsePayload, sortEntries } from './payload'
+import { marks, readSyncState, type SyncWrite, updateSyncState } from './state'
 import { POLL_MS, PUBLISH_RETRY_MS } from './timing'
 
 export interface CycleDeps {
@@ -43,6 +46,14 @@ const UNREADABLE_NOTE =
 
 function count(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`
+}
+
+/** "Uploaded 2 credentials and 3 logins." (the logins only when there are some). */
+export function uploadedMessage(entries: number, logins: number): string {
+  const credentials = count(entries, 'credential', 'credentials')
+  return logins === 0
+    ? `Uploaded ${credentials}.`
+    : `Uploaded ${credentials} and ${count(logins, 'login', 'logins')}.`
 }
 
 /** Save what applying a snapshot did to the pool: the import records, and the newest snapshot applied. */
@@ -86,7 +97,11 @@ export async function runCycle(
   const backedOff =
     state.write === 'denied' && !force && now() < (state.writeCheckAt ?? 0)
   const mayWrite = token !== null && !backedOff
-  const before = entriesDigest(ownEntries(pool, origin, state.imported))
+  const sharing = loginsSyncEnabled()
+  const before = publishDigest(
+    ownEntries(pool, origin, state.imported),
+    sharing ? ownLogins(pool) : [],
+  )
   const dirty = mayWrite && before !== state.uploadedDigest
   report.retryMs = dirty ? PUBLISH_RETRY_MS : POLL_MS
   const reread = force || dirty || hasFreedSkips(pool.accounts, state.skipped)
@@ -125,22 +140,42 @@ export async function runCycle(
             recordApplied(state.gistId, snapshot.at, soFar, now()),
         },
       )
-  const own = ownEntries(
-    await readPool(),
-    origin,
-    applied?.imported ?? state.imported,
-  )
-  const unreadable = snapshot.unreadable > 0
+  const adoptedLogins =
+    stale || !sharing
+      ? null
+      : await applyLogins(
+          snapshot.logins,
+          { known: state.loginKnown, suppressed: state.loginSuppressed },
+          now(),
+        )
+  if (adoptedLogins)
+    await updateSyncState((cur) =>
+      cur?.gistId === state.gistId
+        ? {
+            ...cur,
+            loginKnown: marks(adoptedLogins.known),
+            loginSuppressed: marks(adoptedLogins.suppressed),
+          }
+        : cur,
+    )
+  const settled = await readPool()
+  const own = ownEntries(settled, origin, applied?.imported ?? state.imported)
+  const ownShared = sharing ? ownLogins(settled) : []
+  const unreadable = snapshot.unreadable > 0 || snapshot.loginsUnreadable > 0
   let write: SyncWrite = standing
-  let wrote: SyncEntry[] | null = null
+  let wrote: { entries: number; logins: number } | null = null
   let stamped = 0
   let denied = false
   if (mayWrite && unreadable) write = 'unreadable'
   if (mayWrite && !unreadable) {
     const others = snapshot.entries.filter((e) => e.origin !== origin)
     const next = sortEntries([...others, ...listable(own, others, origin)])
+    const nextLogins = sharing
+      ? mergeLogins(snapshot.logins, ownShared)
+      : snapshot.logins
     const same =
-      JSON.stringify(next) === JSON.stringify(sortEntries(snapshot.entries))
+      JSON.stringify(next) === JSON.stringify(sortEntries(snapshot.entries)) &&
+      loginsDigest(nextLogins) === loginsDigest(snapshot.logins)
     if (!same || stale) {
       stamped = Math.max(
         now(),
@@ -152,10 +187,13 @@ export async function runCycle(
         await updateGist(
           token,
           state.gistId,
-          seal(buildPayload(next, stamped), key),
+          seal(buildPayload(next, stamped, nextLogins), key),
           now(),
         )
-        wrote = next.filter((e) => e.origin === origin)
+        wrote = {
+          entries: next.filter((e) => e.origin === origin).length,
+          logins: ownCopies(nextLogins, ownShared),
+        }
       } catch (error) {
         if (!(error instanceof SyncError) || error.code !== 'write-denied')
           throw error
@@ -181,7 +219,7 @@ export async function runCycle(
               : undefined,
           uploadedDigest:
             mayWrite && !unreadable && !denied
-              ? entriesDigest(own)
+              ? publishDigest(own, ownShared)
               : cur.uploadedDigest,
           ...(wrote ? { uploadedAt: stamped } : {}),
         }
@@ -191,17 +229,21 @@ export async function runCycle(
   const moved = applied
     ? applied.added + applied.updated + applied.removed + deferred
     : 0
+  const adopted = adoptedLogins?.adopted ?? 0
   if (applied && moved > 0) {
     const tail =
       deferred > 0
         ? `; ${count(deferred, 'entry', 'entries')} could not be verified yet`
         : ''
+    const login =
+      adopted > 0 ? `; ${count(adopted, 'login', 'logins')} adopted` : ''
     parts.push(
-      `Synced: ${applied.added} added, ${applied.updated} updated, ${applied.removed} removed${tail}.`,
+      `Synced: ${applied.added} added, ${applied.updated} updated, ${applied.removed} removed${tail}${login}.`,
     )
-  } else if (!wrote) parts.push('Up to date.')
-  if (wrote)
-    parts.push(`Uploaded ${count(wrote.length, 'credential', 'credentials')}.`)
+  } else if (adopted > 0)
+    parts.push(`Synced: ${count(adopted, 'login', 'logins')} adopted.`)
+  else if (!wrote) parts.push('Up to date.')
+  if (wrote) parts.push(uploadedMessage(wrote.entries, wrote.logins))
   if (denied) parts.push(new SyncError('write-denied').message)
   if (mayWrite && unreadable && state.write !== 'unreadable')
     parts.push(UNREADABLE_NOTE)

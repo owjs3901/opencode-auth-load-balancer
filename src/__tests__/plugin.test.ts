@@ -3,7 +3,14 @@ import { readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  setSystemTime,
+  test,
+} from 'bun:test'
 
 const DIR = mkdtempSync(join(tmpdir(), 'auth-lb-plugin-'))
 const POOL = join(DIR, 'auth-load-balancer.json')
@@ -2093,48 +2100,63 @@ describe('toast on switch + status tool', () => {
 
   test('a pending loader request resumes automatically when provider usage recovers', async () => {
     const now = Date.now()
-    await mutatePool((pool) => {
-      pool.accounts.push(
-        account({
-          id: 'recovering-acct',
-          label: 'recovering-acct',
-          usage: {
-            hourly: null,
-            weekly: { utilization: 1, resetAt: now + 75 },
-            capturedAt: now,
+    setSystemTime(new Date(now))
+    let hooks: PluginHooks | undefined
+    try {
+      await mutatePool((pool) => {
+        pool.accounts.push(
+          account({
+            id: 'recovering-acct',
+            label: 'recovering-acct',
+            usage: {
+              hourly: null,
+              weekly: { utilization: 1, resetAt: now + 75 },
+              capturedAt: now,
+            },
+          }),
+        )
+      })
+      const toasts: string[] = []
+      const client: ToastClient = {
+        tui: {
+          showToast: async (options) => {
+            toasts.push(options.body.message)
+            if (options.body.message.includes('usage exhausted'))
+              setSystemTime(new Date(now + 100))
           },
-        }),
-      )
-    })
-    const toasts: string[] = []
-    const client: ToastClient = {
-      tui: {
-        showToast: async (options) => {
-          toasts.push(options.body.message)
         },
-      },
+      }
+      const loaded = await loadHooks(AnthropicLoadBalancerPlugin, client)
+      hooks = loaded
+      const opts = await loaded.auth.loader(async () => ({ type: 'api' }), {
+        models: {},
+      })
+
+      const response = await opts.fetch(
+        'https://api.anthropic.com/v1/messages',
+        {
+          method: 'POST',
+          body: '{}',
+          headers: {
+            [SESSION_HEADER]: 'recovering-session',
+            [MESSAGE_HEADER]: 'recovering-message',
+          },
+        },
+      )
+
+      expect(response.status).toBe(200)
+      expect(
+        toasts.some((message) => message.includes('usage exhausted')),
+      ).toBe(true)
+      expect(toasts).toContain('Claude usage recovered — resuming request')
+      expect(await listPendingForWorkspace(DIR)).toHaveLength(0)
+    } finally {
+      try {
+        await hooks?.dispose()
+      } finally {
+        setSystemTime()
+      }
     }
-    const hooks = await loadHooks(AnthropicLoadBalancerPlugin, client)
-    const opts = await hooks.auth.loader(async () => ({ type: 'api' }), {
-      models: {},
-    })
-
-    const response = await opts.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      body: '{}',
-      headers: {
-        [SESSION_HEADER]: 'recovering-session',
-        [MESSAGE_HEADER]: 'recovering-message',
-      },
-    })
-
-    expect(response.status).toBe(200)
-    expect(toasts.some((message) => message.includes('usage exhausted'))).toBe(
-      true,
-    )
-    expect(toasts).toContain('Claude usage recovered — resuming request')
-    expect(await listPendingForWorkspace(DIR)).toHaveLength(0)
-    await hooks.dispose()
   })
 
   test('the loader announces a durable provider pending turn and Esc clears it', async () => {

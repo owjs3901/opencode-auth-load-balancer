@@ -38,6 +38,7 @@ import { readStatus, renderPendingStatus, renderStatus } from './status'
 import { publishAfterLogin, startSync } from './sync/start'
 import { maintainTokens, mintAtLogin } from './token-mint'
 import { MANUAL_DISABLED_REASON, type TokenSet } from './types'
+import { startUsagePoll } from './usage-poll'
 import {
   refreshAllUsageInBackground,
   refreshUsageInBackground,
@@ -327,8 +328,12 @@ export const AuthLoadBalancerStatusPlugin = async (
   // deliberately no tool for it, since the link embeds the encryption key and
   // a tool call would put it in the chat history.
   const sync = startSync()
+  const usage = startUsagePoll()
   return {
-    dispose: async () => sync?.dispose(),
+    dispose: async () => {
+      await usage.dispose()
+      await sync?.dispose()
+    },
     tool: {
       auth_lb_status: tool({
         description:

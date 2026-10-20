@@ -1,12 +1,14 @@
 import { findAccount, mutatePool, readPool } from './pool/store'
 import { adapterFor, ADAPTERS } from './providers/registry'
 import type { ProviderAdapter } from './providers/types'
+import { UsageAuthenticationError } from './providers/usage-http'
 import { ensureAccessToken } from './refresh'
 import { loadScoreConfig } from './scheduler/score-core'
 import {
   MANUAL_DISABLED_REASON,
   type PoolAccount,
   type PoolFile,
+  type UsageSnapshot,
 } from './types'
 import { preserveWeeklyAnchor, reconcileQuotaCooldown } from './usage-merge'
 
@@ -147,7 +149,16 @@ async function refreshUsage(
     stale.map(async ({ adapter, account }) => {
       try {
         await ensureAccessToken(adapter, account, now)
-        const snapshot = await adapter.fetchUsage(account, now)
+        const rejectedAccess = account.access
+        let snapshot: UsageSnapshot | null
+        try {
+          snapshot = await adapter.fetchUsage(account, now)
+        } catch (error) {
+          if (!(error instanceof UsageAuthenticationError) || !account.refresh)
+            throw error
+          await ensureAccessToken(adapter, account, now, rejectedAccess)
+          snapshot = await adapter.fetchUsage(account, now)
+        }
         if (snapshot) {
           await mutatePool((p) => {
             const stored = findAccount(p, account.id)

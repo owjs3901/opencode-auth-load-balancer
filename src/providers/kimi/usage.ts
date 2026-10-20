@@ -1,6 +1,6 @@
 import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
 import { clamp01, isImplausiblyFarFuture, isPlainObject } from '../../util'
-import { fetchJson } from '../usage-http'
+import { fetchUsageJson } from '../usage-http'
 import { USAGE_HTTP_TIMEOUT_MS } from './constants'
 
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000
@@ -84,9 +84,9 @@ export function parseUsages(json: unknown, now: number): UsageSnapshot | null {
   return hourly || weekly ? { hourly, weekly, capturedAt: now } : null
 }
 
-/** `GET {baseUrl}/usages` — free, spends no quota. Null on any failure. */
+/** `GET {baseUrl}/usages`: surface 401 for OAuth recovery; other failures return null. */
 export function getUsages(baseUrl: string, key: string): Promise<unknown> {
-  return fetchJson<unknown>(
+  return fetchUsageJson<unknown>(
     `${baseUrl}/usages`,
     { authorization: `Bearer ${key}`, accept: 'application/json' },
     USAGE_HTTP_TIMEOUT_MS,

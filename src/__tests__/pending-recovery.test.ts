@@ -298,4 +298,36 @@ describe('classifyProviderRecovery', () => {
       ),
     ).toEqual({ state: 'available' })
   })
+
+  test('credits keep an exhausted account serving: available, or blocked only until its cooldown ends', () => {
+    const exhaustedOnCredits = (cooldownUntil: number) =>
+      testAccount({
+        id: 'paid',
+        providerID: 'openai',
+        usage: {
+          hourly: null,
+          weekly: { utilization: 1, resetAt: NOW + 86_400_000 },
+          capturedAt: NOW,
+        },
+        credits: { hasCredits: true, unlimited: false, balance: 3 },
+        cooldownUntil,
+        cooldownKind: cooldownUntil ? 'quota' : undefined,
+      })
+    const classify = (cooldownUntil: number) =>
+      classifyProviderRecovery(
+        [exhaustedOnCredits(cooldownUntil)],
+        'openai',
+        DEFAULT_CONFIG,
+        NOW,
+        POLL_MS,
+      )
+
+    expect(classify(0)).toEqual({ state: 'available' })
+    const cooldownUntil = NOW + 30 * 60_000
+    expect(classify(cooldownUntil)).toEqual({
+      state: 'quota-blocked',
+      nextCheckAt: cooldownUntil,
+      resumeAt: cooldownUntil,
+    })
+  })
 })

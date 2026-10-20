@@ -48,6 +48,14 @@ export interface ScoreWindow {
   resetAt: number
 }
 
+/** Codex credits, which keep an account serving once its plan windows are exhausted. */
+export interface ScoreCredits {
+  hasCredits: boolean
+  unlimited: boolean
+  /** The credit spending cap is hit: the balance cannot be spent. */
+  limitReached?: boolean
+}
+
 /**
  * The slice of an account the scoring reads. The server's full `PoolAccount` and the
  * TUI's parsed-pool account both satisfy this (the TUI normalizes its looser JSON into
@@ -58,6 +66,7 @@ export interface ScoreAccount {
     hourly: ScoreWindow | null
     weekly: ScoreWindow | null
   }
+  credits?: ScoreCredits
   cooldownUntil: number
   disabledReason: string | null
 }
@@ -200,7 +209,30 @@ export function isExhausted(
   return maxUtil(account, now) >= cfg.exhaustedAt
 }
 
-/** Available = not disabled, not in cooldown, and not exhausted. */
+/**
+ * Whether credits keep the account serving past exhausted plan windows. Same test as
+ * Codex itself (`unlimited || has_credits`, the backend then bills the credits), unless
+ * the account's credit spending cap is hit.
+ */
+export function hasCreditHeadroom(account: ScoreAccount): boolean {
+  const credits = account.credits
+  return (
+    !!credits &&
+    !credits.limitReached &&
+    (credits.unlimited || credits.hasCredits)
+  )
+}
+
+/** Plan headroom, or credits to spend once the plan is exhausted. */
+export function hasHeadroom(
+  account: ScoreAccount,
+  cfg: ScoreConfig,
+  now: number,
+): boolean {
+  return !isExhausted(account, cfg, now) || hasCreditHeadroom(account)
+}
+
+/** Available = not disabled, not in cooldown, and with plan or credit headroom. */
 export function isAvailable(
   account: ScoreAccount,
   cfg: ScoreConfig,
@@ -208,8 +240,7 @@ export function isAvailable(
 ): boolean {
   if (account.disabledReason) return false
   if (account.cooldownUntil > now) return false
-  if (isExhausted(account, cfg, now)) return false
-  return true
+  return hasHeadroom(account, cfg, now)
 }
 
 /**
@@ -325,20 +356,28 @@ export function scoreAccount(
  * Sort comparator shared by `src/status.ts` and the TUI sidebar ranking pipeline, so the
  * dashboard's *ordering* rule can never silently drift from what the server displays —
  * the same single-source guarantee `scoreAccount` provides for the *formula*. Both
- * pipelines map each account into `{ available, score, weeklyUtil }` (the per-pipeline
- * `weeklyUtil` field is computed locally — `src/status.ts` uses the raw stored value to
- * keep tie-breaking deterministic for cooling-down accounts, the TUI uses `utilOf` to
- * discard a window that already reset) and pass that shape here:
+ * pipelines map each account into `{ available, onCredits, score, weeklyUtil }` (the
+ * per-pipeline `weeklyUtil` field is computed locally — `src/status.ts` uses the raw
+ * stored value to keep tie-breaking deterministic for cooling-down accounts, the TUI uses
+ * `utilOf` to discard a window that already reset) and pass that shape here:
  *
  *   - available accounts come first (they're the only ones the scheduler will pick);
- *   - among available accounts, higher `score` wins (matches `selectAccount`'s pick);
+ *   - among available accounts, plan headroom comes before serving on credits alone
+ *     (`onCredits`: credits cost money), then higher `score` wins (matches
+ *     `selectAccount`'s pick);
  *   - among unavailable accounts, lower `weeklyUtil` wins — the "least bad cooling-down
  *     account" surfaces first so a forced fall-through stays predictable.
  */
 export function compareRanked<
-  T extends { available: boolean; score: number; weeklyUtil: number },
+  T extends {
+    available: boolean
+    onCredits: boolean
+    score: number
+    weeklyUtil: number
+  },
 >(x: T, y: T): number {
   if (x.available !== y.available) return x.available ? -1 : 1
-  if (x.available) return y.score - x.score
-  return x.weeklyUtil - y.weeklyUtil
+  if (!x.available) return x.weeklyUtil - y.weeklyUtil
+  if (x.onCredits !== y.onCredits) return x.onCredits ? 1 : -1
+  return y.score - x.score
 }

@@ -20,6 +20,7 @@ import {
   MANUAL_DISABLED_REASON,
   type PoolAccount,
   type PoolFile,
+  type UsageCredits,
   type UsageWindow,
 } from '../types'
 import { testAccount } from './fixtures/account'
@@ -39,6 +40,7 @@ function acc(o: {
   hourly?: UsageWindow | null
   cooldownUntil?: number
   disabled?: string | null
+  credits?: UsageCredits
 }): PoolAccount {
   return testAccount({
     id: o.id,
@@ -49,6 +51,7 @@ function acc(o: {
       weekly: o.weekly ?? null,
       capturedAt: NOW,
     },
+    ...(o.credits ? { credits: o.credits } : {}),
     cooldownUntil: o.cooldownUntil ?? 0,
     disabledReason: o.disabled ?? null,
   })
@@ -133,6 +136,51 @@ describe('buildStatus', () => {
     )!
     expect(expired.weeklyUtil).toBe(0)
     expect(expired.weeklyResetAt).toBe(0)
+  })
+
+  test('an exhausted account on credits ranks after plan headroom and shows the credits it has left', () => {
+    const exhausted = (id: string, credits: UsageCredits) =>
+      acc({ id, providerID: 'openai', weekly: win(1.0, 30 * HOUR), credits })
+    const p = pool(
+      [
+        exhausted('paid', {
+          hasCredits: true,
+          unlimited: false,
+          balance: 1234.5678,
+        }),
+        acc({
+          id: 'plan',
+          providerID: 'openai',
+          weekly: win(0.985, 6 * 24 * HOUR),
+        }),
+        exhausted('broke', { hasCredits: false, unlimited: false, balance: 0 }),
+        exhausted('vip', { hasCredits: false, unlimited: true }),
+        exhausted('hidden', { hasCredits: true, unlimited: false }),
+        exhausted('capped', {
+          hasCredits: true,
+          unlimited: false,
+          balance: 9,
+          limitReached: true,
+        }),
+      ],
+      { openai: 'paid' },
+    )
+    const codex = buildStatus(p, NOW)
+    expect(codex[0]?.accounts.map((a) => a.id)).toEqual([
+      'plan',
+      'paid',
+      'vip',
+      'hidden',
+      'broke',
+      'capped',
+    ])
+    const out = renderStatus(codex, NOW)
+    expect(out).toContain('in use · credits 1234.57')
+    expect(out).toContain('ready · credits unlimited')
+    expect(out).toContain('ready · credits available')
+    expect(out).toContain('exhausted · no credits')
+    expect(out).toContain('exhausted · credit limit reached')
+    expect(out).toMatch(/plan .* ready$/m)
   })
 
   test('an unknown weekly reset (resetAt 0) is preserved, not expired', () => {

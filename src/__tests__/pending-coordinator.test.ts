@@ -188,6 +188,35 @@ describe('PendingCoordinator live waits', () => {
     expect(h.events.at(-1)).toBe(`release:${pendingKey(pendingRef)}`)
   })
 
+  test('rechecks every usage-refresh interval, so credits reported mid-wait resume the turn before the plan reset', async () => {
+    const week = 7 * 24 * 60 * 60_000
+    const onCredits = fullPool(START + week)
+    const exhausted = onCredits.accounts[0]
+    if (!exhausted) throw new Error('Missing fixture account')
+    exhausted.credits = { hasCredits: true, unlimited: false }
+    let reads = 0
+    const h = harness({
+      readPool: async () => {
+        reads += 1
+        return reads === 1 ? fullPool(START + week) : onCredits
+      },
+    })
+    const pendingRef = ref('credits')
+
+    expect(
+      await h.coordinator.waitForCapacity(
+        pendingRef,
+        quota(START + week, START + week),
+      ),
+    ).toBe('available')
+    expect(h.events.filter((event) => event.startsWith('sleep:'))).toEqual([
+      `sleep:${5 * 60_000}`,
+      `sleep:${5 * 60_000}`,
+    ])
+    expect(h.events).toContain(`resumed:${pendingRef.messageID}`)
+    await h.coordinator.complete(pendingRef)
+  })
+
   test('updates a still-blocked row without repeating an unchanged pending toast', async () => {
     let reads = 0
     const h = harness({

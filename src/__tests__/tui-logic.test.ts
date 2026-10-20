@@ -7,6 +7,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   clearReloginTargetInPool,
   credentialTag,
+  creditsText,
   deleteFromPool,
   type FsOps,
   hasLostLogin,
@@ -779,6 +780,79 @@ describe('toScore', () => {
     expect(sa.disabledReason).toBeNull()
     expect(sa.usage).toEqual({ hourly: null, weekly: null })
   })
+
+  test('carries credits only when both flags are booleans, as the server store requires', () => {
+    const withCredits = (credits: unknown): PoolAccount =>
+      JSON.parse(
+        JSON.stringify({
+          id: 'a',
+          providerID: 'openai',
+          label: 'A',
+          credits,
+        }),
+      )
+    expect(
+      toScore(
+        withCredits({
+          hasCredits: true,
+          unlimited: false,
+          balance: 'x',
+          limitReached: 'yes',
+        }),
+      ).credits,
+    ).toStrictEqual({ hasCredits: true, unlimited: false })
+    expect(
+      toScore(
+        withCredits({ hasCredits: true, unlimited: false, limitReached: true }),
+      ).credits,
+    ).toStrictEqual({ hasCredits: true, unlimited: false, limitReached: true })
+    expect('credits' in toScore(withCredits({ hasCredits: true }))).toBe(false)
+    expect('credits' in toScore(withCredits([true, false]))).toBe(false)
+  })
+})
+
+describe('creditsText', () => {
+  const withCredits = (credits: unknown): PoolAccount =>
+    JSON.parse(
+      JSON.stringify({
+        id: 'a',
+        providerID: 'openai',
+        label: 'A',
+        credits,
+      }),
+    )
+
+  test('says what credits an exhausted account has left, mirroring the dashboard', () => {
+    expect(
+      creditsText(
+        withCredits({ hasCredits: true, unlimited: false, balance: 1234.5678 }),
+      ),
+    ).toBe('credits 1234.57')
+    expect(
+      creditsText(withCredits({ hasCredits: true, unlimited: false })),
+    ).toBe('credits available')
+    expect(
+      creditsText(withCredits({ hasCredits: false, unlimited: true })),
+    ).toBe('credits unlimited')
+    expect(
+      creditsText(
+        withCredits({ hasCredits: false, unlimited: false, balance: 0 }),
+      ),
+    ).toBe('no credits')
+    expect(
+      creditsText(
+        withCredits({ hasCredits: true, unlimited: false, limitReached: true }),
+      ),
+    ).toBe('credit limit reached')
+  })
+
+  test('is empty without credits or for a hand-edited record', () => {
+    expect(creditsText(withCredits(null))).toBe('')
+    expect(
+      creditsText(withCredits({ hasCredits: 'yes', unlimited: false })),
+    ).toBe('')
+    expect(creditsText({ id: 'a', providerID: 'openai', label: 'A' })).toBe('')
+  })
 })
 
 describe('sessionAccountId (in-use marker is the VIEWER session, not global lastSelected)', () => {
@@ -1063,6 +1137,22 @@ describe('stateOf', () => {
         now,
       ),
     ).toBe('full')
+  })
+
+  test('an exhausted account shows its credits beside "full"', () => {
+    const onCredits = {
+      usage: {
+        hourly: { utilization: 1, resetAt: now + 1000 },
+        weekly: null,
+      },
+      credits: { hasCredits: true, unlimited: false },
+      cooldownUntil: 0,
+      disabledReason: null,
+    }
+    expect(stateOf(onCredits, [], now, 'credits 12.5')).toBe(
+      'full · credits 12.5',
+    )
+    expect(stateOf(onCredits, [], now)).toBe('full')
   })
 
   test('active tier cooldowns render as a joined annotation', () => {

@@ -389,4 +389,60 @@ describe('openai/codex end-to-end', () => {
     expect(O?.usage.hourly?.utilization).toBeCloseTo(0.125, 5)
     expect(O?.usage.weekly?.utilization).toBeCloseTo(0.4, 5)
   })
+
+  test('serves on credits once the plan is exhausted and records the balance the response reports', async () => {
+    const now = Date.now()
+    // `F` is the least-used exhausted account, so a degraded pick would be F.
+    const full = acct({
+      id: 'F',
+      providerID: 'openai',
+      access: 'tokF',
+      weeklyUtil: 0.999,
+    })
+    const paid = acct({
+      id: 'P',
+      providerID: 'openai',
+      access: 'tokP',
+      weeklyUtil: 1,
+    })
+    paid.credits = { hasCredits: true, unlimited: false, balance: 50 }
+    await seed([full, paid])
+
+    const calls = mockFetch(
+      () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: new Headers({
+            'x-codex-primary-used-percent': '100',
+            'x-codex-primary-window-minutes': '10080',
+            'x-codex-primary-reset-at': String(
+              Math.floor((now + 30 * HOUR) / 1000),
+            ),
+            'x-codex-credits-has-credits': 'true',
+            'x-codex-credits-unlimited': 'false',
+            'x-codex-credits-balance': '42.5',
+          }),
+        }),
+    )
+    const res = await createLoadBalancedFetch(openaiAdapter)(
+      'https://api.openai.com/v1/responses',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          input: [{ type: 'message', role: 'user', content: 'hi' }],
+        }),
+      },
+    )
+    expect(res.status).toBe(200)
+    const sent = calls.filter((c) => c.url.includes('/responses'))
+    expect(sent.map((c) => c.headers.get('authorization'))).toEqual([
+      'Bearer tokP',
+    ])
+    const P = (await readPool()).accounts.find((a) => a.id === 'P')
+    expect(P?.credits).toEqual({
+      hasCredits: true,
+      unlimited: false,
+      balance: 42.5,
+    })
+  })
 })

@@ -22,7 +22,7 @@ import type {
 } from './providers/types'
 import { ensureAccessToken } from './refresh'
 import { loadConfig, type SchedulerConfig } from './scheduler/config'
-import { isExhausted } from './scheduler/score-core'
+import { hasHeadroom } from './scheduler/score-core'
 import { selectForSession } from './scheduler/select'
 import { deriveSessionKey, MESSAGE_HEADER, SESSION_HEADER } from './session'
 import { maintainTokens } from './token-mint'
@@ -100,6 +100,7 @@ function applyUsagePartial(
   now: number,
 ): void {
   if (partial.hourly !== undefined) account.usage.hourly = partial.hourly
+  if (partial.credits !== undefined) account.credits = partial.credits
   if (partial.weekly !== undefined) {
     // Weekly resets are FIXED per-account anchors: when the incoming window
     // carries no reset time (post-reset headers/endpoint), keep the previously
@@ -320,14 +321,14 @@ async function recordSuccess(
         // selection despite having headroom). A 2xx WITH fresh usage headers is
         // proof the account can serve, so drop a long (quota-class, >
         // ACCOUNT_COOLDOWN_MS — never a live 5min/2min transient backoff)
-        // cooldown once that fresh usage shows it is not exhausted. Same
+        // cooldown once that fresh usage shows headroom (plan or credits). Same
         // predicate as usage-refresh; kept OUT of applyUsagePartial (shared with
         // recordModelCooldown, where a tier-429 must NOT clear the account-wide
         // cooldown).
         if (
           partial &&
           account.cooldownUntil > now + ACCOUNT_COOLDOWN_MS &&
-          !isExhausted(account, cfg, now)
+          hasHeadroom(account, cfg, now)
         ) {
           account.cooldownUntil = 0
           delete account.cooldownKind

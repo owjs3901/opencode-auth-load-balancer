@@ -82,6 +82,7 @@ function mergeLoginUsage(
   usage: UsageSnapshot | undefined,
 ): void {
   if (!usage) return
+  if (usage.credits) row.credits = usage.credits
   row.usage = {
     hourly: usage.hourly ?? row.usage.hourly,
     weekly: usage.weekly

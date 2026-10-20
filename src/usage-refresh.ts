@@ -110,11 +110,10 @@ async function refreshUsage(
     // Check staleness FIRST: in the steady state it is false, and both the
     // adapter lookup and the `lastPoll` Map lookup would be dead weight on the
     // per-request hot path.
-    if (
+    const fresh =
       account.usage.capturedAt !== 0 &&
       now - account.usage.capturedAt < USAGE_REFRESH_TTL_MS
-    )
-      continue
+    if (fresh && account.credits) continue
     // Resolve the adapter that OWNS this row, rather than assuming the caller's
     // own provider: a single-provider caller passes a one-entry list, so a row
     // belonging to another provider finds no match and is skipped exactly as
@@ -123,6 +122,9 @@ async function refreshUsage(
     // burns its `lastPoll` slot on a poll that can't happen.
     const adapter = adapterFor(adapters, account.providerID)
     if (!adapter) continue
+    // Fresh windows written by a version that does not know credits must not
+    // keep this row's credits unknown forever.
+    if (fresh && !adapter.reportsCredits) continue
     if ((lastPoll.get(account.id) ?? 0) > now - USAGE_REFRESH_TTL_MS) continue
     lastPoll.set(account.id, now)
     stale ??= []
@@ -177,6 +179,7 @@ async function refreshUsage(
             // weekly refresh must not stamp freshness, or the re-poll that
             // would heal it is suppressed for USAGE_REFRESH_TTL_MS.
             if (stored) {
+              if (snapshot.credits) stored.credits = snapshot.credits
               stored.usage = {
                 hourly: snapshot.hourly ?? stored.usage.hourly,
                 weekly:

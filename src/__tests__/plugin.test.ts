@@ -1457,6 +1457,7 @@ describe('load-balanced fetch — edge paths', () => {
             },
             capturedAt: now,
           },
+          credits: { hasCredits: false, unlimited: false },
         }),
       )
     })

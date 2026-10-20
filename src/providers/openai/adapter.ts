@@ -33,6 +33,7 @@ export const openaiAdapter: ProviderAdapter = {
 
   parseUsageHeaders,
   fetchUsage,
+  reportsCredits: true,
 
   classifyError: classifyHttpStatus,
 }

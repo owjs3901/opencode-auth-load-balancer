@@ -18,6 +18,7 @@ import {
   isExhausted,
   loadScoreConfig,
   type ScoreAccount,
+  type ScoreCredits,
   type ScoreWindow,
 } from './auth-load-balancer-scoring'
 
@@ -51,11 +52,18 @@ export interface UsageWindow {
   utilization?: number
   resetAt?: number
 }
+export interface UsageCredits {
+  hasCredits?: boolean
+  unlimited?: boolean
+  balance?: number
+  limitReached?: boolean
+}
 export interface PoolAccount {
   id: string
   providerID: string
   label: string
   usage?: { weekly?: UsageWindow | null; hourly?: UsageWindow | null } | null
+  credits?: UsageCredits | null
   cooldownUntil?: number
   /** tier name → epoch ms until that model tier's cap resets (tier requests steer around the account until then). */
   modelCooldownsUntil?: Record<string, number> | null
@@ -445,15 +453,54 @@ export function toScoreWindow(
       }
     : null
 }
+/** The raw credits when both flags are booleans (as the server's store requires), else undefined. */
+function creditsOf(
+  a: PoolAccount,
+): (ScoreCredits & { balance?: number }) | undefined {
+  const c = a.credits
+  if (
+    !isPlainRecordValue(c) ||
+    typeof c?.hasCredits !== 'boolean' ||
+    typeof c.unlimited !== 'boolean'
+  )
+    return undefined
+  return {
+    hasCredits: c.hasCredits,
+    unlimited: c.unlimited,
+    ...(isFiniteNumber(c.balance) ? { balance: c.balance } : {}),
+    ...(c.limitReached === true ? { limitReached: true } : {}),
+  }
+}
+
 export function toScore(a: PoolAccount): ScoreAccount {
+  const credits = creditsOf(a)
   return {
     usage: {
       hourly: toScoreWindow(a.usage?.hourly),
       weekly: toScoreWindow(a.usage?.weekly),
     },
+    ...(credits ? { credits } : {}),
     cooldownUntil: isFiniteNumber(a.cooldownUntil) ? a.cooldownUntil : 0,
     disabledReason: a.disabledReason ?? null,
   }
+}
+
+/**
+ * The credits an exhausted account has left: `credits 12.5`, `credits
+ * unlimited`, `credits available` (no amount reported), `no credits`,
+ * `credit limit reached` (a spending cap stops them); '' when the provider
+ * never reported credits. NOTE: copy of `src/status.ts`'s `creditsText` (the
+ * TUI runtime cannot import `src/`).
+ */
+export function creditsText(a: PoolAccount): string {
+  const credits = creditsOf(a)
+  if (!credits) return ''
+  if (credits.limitReached) return 'credit limit reached'
+  if (credits.unlimited) return 'credits unlimited'
+  if (!credits.hasCredits) return 'no credits'
+  return credits.balance === undefined
+    ? 'credits available'
+    : `credits ${Math.round(credits.balance * 100) / 100}`
 }
 
 /**
@@ -565,13 +612,14 @@ export function stateOf(
   sa: ScoreAccount,
   tiers: [string, number][],
   now: number,
+  credits = '',
 ): string {
   if (sa.disabledReason)
     return sa.disabledReason === MANUAL_DISABLED_REASON
       ? 'disabled'
       : 're-login'
   if (sa.cooldownUntil > now) return `cooldown ${until(sa.cooldownUntil, now)}`
-  if (isExhausted(sa, cfg, now)) return 'full'
+  if (isExhausted(sa, cfg, now)) return credits ? `full · ${credits}` : 'full'
   // A model-tier limit keeps the account usable (other models + downgrade),
   // so it annotates rather than sidelines — mirrors src/status.ts.
   if (tiers.length > 0)

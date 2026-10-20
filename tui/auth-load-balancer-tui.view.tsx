@@ -27,6 +27,7 @@ import {
   compareRanked,
   displayUtil,
   isAvailable,
+  isExhausted,
   scoreAccount,
   utilOf,
 } from './auth-load-balancer-scoring'
@@ -37,6 +38,7 @@ import {
   clearReloginTargetInPool,
   compareAscii,
   credentialTag,
+  creditsText,
   deleteFromPool,
   discardSyncIntent,
   hasLostLogin,
@@ -279,6 +281,7 @@ function SidebarPanel(props: {
             a,
             sa,
             available,
+            onCredits: available && isExhausted(sa, cfg, now),
             score: available
               ? scoreAccount(sa, cfg, now)
               : Number.NEGATIVE_INFINITY,
@@ -308,7 +311,10 @@ function SidebarPanel(props: {
           // Raw reads are finiteness-guarded inside tierResets: a hand-edited
           // `1e999` entry (Infinity via JSON.parse) would otherwise render its
           // tier annotation forever until the server heals the file.
-          state: [stateOf(sa, tierResets(a, now), now), ...rowWarnings(a, now)]
+          state: [
+            stateOf(sa, tierResets(a, now), now, creditsText(a)),
+            ...rowWarnings(a, now),
+          ]
             .filter(Boolean)
             .join(' · '),
           manuallyDisabled: a.disabledReason === MANUAL_DISABLED_REASON,

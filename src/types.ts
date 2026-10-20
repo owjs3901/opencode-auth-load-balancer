@@ -11,6 +11,19 @@ export interface UsageWindow {
   resetAt: number
 }
 
+/**
+ * Codex credits: what a ChatGPT account spends once its plan's usage windows
+ * are exhausted. `balance` is the amount left, when the backend reports it;
+ * `limitReached` (`overage_limit_reached`) means the account's credit
+ * spending cap is hit, so the balance cannot be spent.
+ */
+export interface UsageCredits {
+  hasCredits: boolean
+  unlimited: boolean
+  balance?: number
+  limitReached?: boolean
+}
+
 /** Normalized usage snapshot for one account. */
 export interface UsageSnapshot {
   /** Short rolling window (~5h for both Anthropic and Codex). */
@@ -25,6 +38,11 @@ export interface UsageSnapshot {
    * snapshot fresh, or an out-of-band weekly reset is never picked up.
    */
   capturedAt: number
+  /**
+   * Codex credits as just measured. Stored on the row (`PoolAccount.credits`),
+   * not here: versions before credits rebuild `usage` and would drop them.
+   */
+  credits?: UsageCredits
 }
 
 export function emptyUsage(): UsageSnapshot {
@@ -153,6 +171,8 @@ export interface PoolAccount {
    */
   orgId?: string
   usage: UsageSnapshot
+  /** Codex credits, absent until the provider reports them. */
+  credits?: UsageCredits
   /** epoch ms; the account is skipped until this time. 0 = no cooldown. */
   cooldownUntil: number
   /** Why the active account-wide cooldown was written. Absent on legacy rows. */

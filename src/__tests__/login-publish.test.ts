@@ -114,6 +114,9 @@ describe('publishing a login right after it landed', () => {
   })
 
   test('a slow upload does not hold the login back beyond the bound, and is left to finish', async () => {
+    // The bound also limits the real wait for the cycle lock, so it must
+    // leave a loaded machine time to take it; the test fires the deadline.
+    const BOUND_MS = 4_000
     await followingEmpty()
     let finish: () => void = () => undefined
     const uploading = new Promise<void>((resolve) => {
@@ -146,7 +149,7 @@ describe('publishing a login right after it landed', () => {
     ): ReturnType<typeof setTimeout>
     function controlledTimeout(...input: unknown[]): unknown {
       const [callback, delay, ...args] = input
-      if (delay === 40) {
+      if (delay === BOUND_MS) {
         if (typeof callback !== 'function')
           throw new Error('Expected a deadline callback')
         deadline = () => Reflect.apply(callback, undefined, args)
@@ -160,7 +163,7 @@ describe('publishing a login right after it landed', () => {
     const timer = spyOn(globalThis, 'setTimeout').mockImplementation(intercept)
     let returned = false
     const publishing = on('pcA', () =>
-      publishAfterLogin({ engine, timeoutMs: 40 }),
+      publishAfterLogin({ engine, timeoutMs: BOUND_MS }),
     ).then(() => {
       returned = true
     })

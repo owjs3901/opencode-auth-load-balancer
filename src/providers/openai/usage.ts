@@ -5,7 +5,7 @@ import {
   parseWindowPairHeaders,
   type WindowPairHeaderSpec,
 } from '../usage-headers'
-import { fetchJson } from '../usage-http'
+import { fetchUsageJson } from '../usage-http'
 import { USAGE_HTTP_TIMEOUT_MS, USAGE_URL, USAGE_USER_AGENT } from './constants'
 import { resolveAccountId } from './jwt'
 
@@ -127,7 +127,8 @@ function endpointWindow(
 /**
  * Poll GET /wham/usage for authoritative 5h + weekly utilization without
  * consuming inference quota, assigning each returned window to its role BY
- * DURATION (see `isWeeklyMinutes`) rather than by position. Null on failure.
+ * DURATION (see `isWeeklyMinutes`) rather than by position. A 401 is surfaced
+ * for bounded OAuth recovery; other failures return null.
  * Sends the Codex CLI's `codex-cli` UA and the `chatgpt-account-id` (from the
  * stored id or, as a fallback, decoded from the access-token JWT) — required
  * for team/workspace accounts.
@@ -144,7 +145,7 @@ export async function fetchUsage(
   const accountId = resolveAccountId(account)
   if (accountId) headers['chatgpt-account-id'] = accountId
 
-  const json = await fetchJson<UsageEndpointResponse>(
+  const json = await fetchUsageJson<UsageEndpointResponse>(
     USAGE_URL,
     headers,
     USAGE_HTTP_TIMEOUT_MS,

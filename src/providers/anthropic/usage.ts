@@ -5,7 +5,7 @@ import {
   parseWindowPairHeaders,
   type WindowPairHeaderSpec,
 } from '../usage-headers'
-import { fetchJson } from '../usage-http'
+import { fetchUsageJson } from '../usage-http'
 import {
   ANTHROPIC_VERSION,
   MESSAGES_URL,
@@ -189,8 +189,8 @@ async function probeUsage(
 
 /**
  * Poll the dedicated usage endpoint for authoritative 5h + 7d utilization without
- * consuming inference quota. Returns null on any failure — including a 200 whose
- * body is not the usage shape — so the caller keeps the last-known snapshot.
+ * consuming inference quota. A 401 is surfaced for bounded OAuth recovery;
+ * other failures, including an invalid 200 body, keep the last-known snapshot.
  *
  * A row without a refresh token is a `claude setup-token` bearer, scoped to
  * `user:inference` alone; the endpoint demands `user:profile` and answers it
@@ -201,7 +201,7 @@ export async function fetchUsage(
   now: number,
 ): Promise<UsageSnapshot | null> {
   if (!account.refresh) return probeUsage(account.access, now)
-  const json = await fetchJson<UsageEndpointResponse>(
+  const json = await fetchUsageJson<UsageEndpointResponse>(
     USAGE_URL,
     {
       authorization: `Bearer ${account.access}`,

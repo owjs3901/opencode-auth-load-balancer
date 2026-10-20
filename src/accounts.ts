@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { bumpLoginRev } from './login-rev'
 import { holdsCredential, orgPartner } from './pairing'
 import { findAccount, mutatePool, readPool } from './pool/store'
+import { loadScoreConfig } from './scheduler/score-core'
 import {
   emptyUsage,
   type LostLogins,
@@ -11,7 +12,7 @@ import {
   type TokenSet,
   type UsageSnapshot,
 } from './types'
-import { preserveWeeklyAnchor } from './usage-merge'
+import { preserveWeeklyAnchor, reconcileQuotaCooldown } from './usage-merge'
 
 /** A credential from opencode's auth store (`oauth` token pair or `api` key). */
 interface OpencodeAuth {
@@ -88,6 +89,8 @@ function mergeLoginUsage(
       : row.usage.weekly,
     capturedAt: usage.weekly ? usage.capturedAt : row.usage.capturedAt,
   }
+  if (usage.weekly)
+    reconcileQuotaCooldown(row, loadScoreConfig(), usage.capturedAt)
 }
 
 function applyTokens(row: PoolAccount, tokens: TokenSet): PoolAccount {

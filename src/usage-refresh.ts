@@ -1,29 +1,20 @@
 import { findAccount, mutatePool, readPool } from './pool/store'
 import { adapterFor, ADAPTERS } from './providers/registry'
 import type { ProviderAdapter } from './providers/types'
+import { UsageAuthenticationError } from './providers/usage-http'
 import { ensureAccessToken } from './refresh'
-import { isExhausted, loadScoreConfig } from './scheduler/score-core'
+import { loadScoreConfig } from './scheduler/score-core'
 import {
   MANUAL_DISABLED_REASON,
   type PoolAccount,
   type PoolFile,
+  type UsageSnapshot,
 } from './types'
-import { preserveWeeklyAnchor } from './usage-merge'
+import { preserveWeeklyAnchor, reconcileQuotaCooldown } from './usage-merge'
 
 export const USAGE_REFRESH_TTL_MS = 5 * 60 * 1000
 
-/**
- * Max lifetime of a TRANSIENT (non-quota) cooldown. fetch.ts cools a thrown
- * network error or a header-less 429/402 for at most `ACCOUNT_COOLDOWN_MS`
- * (5min) and an auth 401/403 for `AUTH_COOLDOWN_MS` (2min); ONLY a quota 429's
- * `Retry-After` writes a cooldown beyond this. So a cooldown whose remainder
- * still exceeds this bound is necessarily quota-derived — the one class that can
- * outlive its own usage window after an out-of-band reset (see the stale-cooldown
- * reconciliation below). Kept `=== ACCOUNT_COOLDOWN_MS` by a drift-guard test;
- * defined locally because importing it from fetch.ts (which imports THIS module)
- * would form a cycle.
- */
-export const MAX_TRANSIENT_COOLDOWN_MS = 5 * 60 * 1000
+export { MAX_TRANSIENT_COOLDOWN_MS } from './usage-merge'
 
 /** Per-account last poll time, to throttle usage-endpoint calls (which are themselves rate-limited). */
 const lastPoll = new Map<string, number>()
@@ -121,7 +112,7 @@ async function refreshUsage(
     // per-request hot path.
     if (
       account.usage.capturedAt !== 0 &&
-      now - account.usage.capturedAt <= USAGE_REFRESH_TTL_MS
+      now - account.usage.capturedAt < USAGE_REFRESH_TTL_MS
     )
       continue
     // Resolve the adapter that OWNS this row, rather than assuming the caller's
@@ -158,7 +149,16 @@ async function refreshUsage(
     stale.map(async ({ adapter, account }) => {
       try {
         await ensureAccessToken(adapter, account, now)
-        const snapshot = await adapter.fetchUsage(account, now)
+        const rejectedAccess = account.access
+        let snapshot: UsageSnapshot | null
+        try {
+          snapshot = await adapter.fetchUsage(account, now)
+        } catch (error) {
+          if (!(error instanceof UsageAuthenticationError) || !account.refresh)
+            throw error
+          await ensureAccessToken(adapter, account, now, rejectedAccess)
+          snapshot = await adapter.fetchUsage(account, now)
+        }
         if (snapshot) {
           await mutatePool((p) => {
             const stored = findAccount(p, account.id)
@@ -190,28 +190,13 @@ async function refreshUsage(
                 capturedAt:
                   snapshot.weekly === null ? stored.usage.capturedAt : now,
               }
-              // Self-heal a STALE long cooldown. A weekly-limit 429's
-              // `Retry-After` latches `cooldownUntil` at the weekly reset
-              // (`recordRotation` in fetch.ts), but Anthropic's out-of-band
-              // resets zero the usage window early while NOTHING lowers
-              // `cooldownUntil` except wall-clock — stranding a full-headroom
-              // account as "cooldown" for days (both dashboards AND the
-              // scheduler gate on this single field). This authoritative poll
-              // just proved headroom, so drop the latch — but only when a REAL
-              // fresh weekly reading arrived (not the retained-stale malformed
-              // branch), the remainder still exceeds any transient backoff (so
-              // it is necessarily quota-derived, not a live 5min/2min error
-              // cooldown), and the merged usage is not exhausted. A genuinely
-              // still-limited account re-cools on its next real 429 — the same
-              // "re-poll, don't latch" contract `utilOf`/`isWindowExpired` keep.
+              // Do not erase a new rejection recorded while this poll was in flight.
               if (
                 snapshot.weekly !== null &&
-                stored.cooldownUntil > now + MAX_TRANSIENT_COOLDOWN_MS &&
-                !isExhausted(stored, scoreCfg, now)
-              ) {
-                stored.cooldownUntil = 0
-                delete stored.cooldownKind
-              }
+                stored.cooldownUntil === account.cooldownUntil &&
+                stored.cooldownKind === account.cooldownKind
+              )
+                reconcileQuotaCooldown(stored, scoreCfg, now)
             }
           })
         }

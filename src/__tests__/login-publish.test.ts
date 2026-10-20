@@ -1,13 +1,12 @@
 import { rm } from 'node:fs/promises'
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 
 import { buildAuthHook } from '../legacy'
 import type { ToastClient } from '../notify'
 import type { PendingCoordinator } from '../pending/coordinator'
 import { withCycleLock } from '../sync/loop'
 import { publishAfterLogin } from '../sync/start'
-import { sleep } from '../util'
 import { testAccount } from './fixtures/account'
 import { fakeAdapter } from './fixtures/adapter'
 import { responderFetch } from './fixtures/fetch-mock'
@@ -116,15 +115,72 @@ describe('publishing a login right after it landed', () => {
 
   test('a slow upload does not hold the login back beyond the bound, and is left to finish', async () => {
     await followingEmpty()
+    let finish: () => void = () => undefined
+    const uploading = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    let entered: () => void = () => undefined
+    const started = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    let finished = false
     const { engine, calls } = spyEngine(async () => {
-      await sleep(400)
+      entered()
+      await uploading
+      finished = true
       return { ok: true, message: 'late' }
     })
-    const started = Date.now()
-    await on('pcA', () => publishAfterLogin({ engine, timeoutMs: 40 }))
-    expect(Date.now() - started).toBeLessThan(300)
-    expect(calls.count).toBe(1)
-    await sleep(500)
+    const setTimeout = globalThis.setTimeout
+    let deadline: () => void = () => {
+      throw new Error('No publication deadline registered')
+    }
+    function controlledTimeout(
+      callback: TimerHandler,
+      delay?: number,
+      ...args: unknown[]
+    ): number
+    function controlledTimeout<TArgs extends unknown[]>(
+      callback: (...args: TArgs) => void,
+      delay?: number,
+      ...args: [void] extends TArgs ? Partial<TArgs> : TArgs
+    ): ReturnType<typeof setTimeout>
+    function controlledTimeout(...input: unknown[]): unknown {
+      const [callback, delay, ...args] = input
+      if (delay === 40) {
+        if (typeof callback !== 'function')
+          throw new Error('Expected a deadline callback')
+        deadline = () => Reflect.apply(callback, undefined, args)
+        return setTimeout(() => undefined, 0)
+      }
+      return Reflect.apply(setTimeout, undefined, input)
+    }
+    const intercept = Object.assign(controlledTimeout, {
+      __promisify__: setTimeout.__promisify__,
+    })
+    const timer = spyOn(globalThis, 'setTimeout').mockImplementation(intercept)
+    let returned = false
+    const publishing = on('pcA', () =>
+      publishAfterLogin({ engine, timeoutMs: 40 }),
+    ).then(() => {
+      returned = true
+    })
+    try {
+      await started
+      expect(returned).toBe(false)
+      deadline()
+      await publishing
+      expect(returned).toBe(true)
+      expect(finished).toBe(false)
+      expect(calls.count).toBe(1)
+    } finally {
+      try {
+        finish()
+        await publishing
+        await on('pcA', () => withCycleLock(fine, 1_000))
+      } finally {
+        timer.mockRestore()
+      }
+    }
   })
 
   test('a busy machine-wide lock gives up within the bound without syncing', async () => {

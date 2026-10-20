@@ -1,5 +1,24 @@
-import { WEEK_MS } from './scheduler/score-core'
-import type { UsageWindow } from './types'
+import { isExhausted, type ScoreConfig, WEEK_MS } from './scheduler/score-core'
+import type { PoolAccount, UsageWindow } from './types'
+
+export const MAX_TRANSIENT_COOLDOWN_MS = 5 * 60 * 1000
+
+/** Call only after fresh usage was measured; cached headroom cannot disprove a later 429. */
+export function reconcileQuotaCooldown(
+  account: PoolAccount,
+  cfg: ScoreConfig,
+  now: number,
+): void {
+  if (account.cooldownKind === 'auth' || account.cooldownKind === 'transient')
+    return
+  if (
+    account.cooldownUntil > now + MAX_TRANSIENT_COOLDOWN_MS &&
+    !isExhausted(account, cfg, now)
+  ) {
+    account.cooldownUntil = 0
+    delete account.cooldownKind
+  }
+}
 
 /**
  * Roll a FIXED weekly reset anchor forward to its next occurrence strictly after

@@ -287,6 +287,14 @@ Pending turns
 
 `▶` marks the in-use account; `#` is the rank the scheduler would pick next.
 
+While OpenCode is running, stale usage is checked every five minutes even without inference traffic or a status-tool call. Periodic checks share a machine-wide lock and a next-attempt timestamp in `auth-load-balancer.json.usage-poll.json`, so multiple windows do not multiply periodic requests, including failed attempts. The file contains scheduling metadata only, never credentials.
+
+A fresh usage measurement during re-login or a periodic check clears an obsolete, long quota cooldown when both usage windows have headroom. A successful re-login alone is not enough: exhausted or malformed usage, authentication/transient backoffs, and a newer rejection received during a usage check retain their cooldowns. Provider-side resets are picked up on the next successful check; a failed endpoint request never assumes recovery.
+
+If a usage endpoint rejects an OAuth access token with HTTP 401, the poll uses the same refresh lock and rejected-token recovery as inference, then retries the usage lookup once, even when the advertised access expiry is still in the future. A concurrently refreshed credential is adopted instead of spending its predecessor again. Static API keys are never sent to OAuth refresh, and 403/429 failures do not trigger authentication retries.
+
+A 403 caused by a missing `user:profile` scope requires a fresh OAuth login with browser approval. Restarting OpenCode or refreshing the same grant cannot restore that missing permission; an authoritative usage result is still required before clearing the old quota cooldown.
+
 ### Persistent bottom status bar (TUI)
 
 A SolidJS TUI plugin renders a persistent bottom status bar (opencode's always-visible `app_bottom` slot) showing both the in-use account(s) per provider (polled from the pool, e.g. `Claude anthropic-1 58% · 5h 12%`) **and** the current session usage — tokens, % of the model context window, and `$` cost — computed the same way opencode's own footer does. It is **four files**:

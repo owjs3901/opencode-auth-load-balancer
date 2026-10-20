@@ -1,7 +1,0 @@
-{
-  "changes": {
-    "package.json": "Patch"
-  },
-  "note": "Recover stale quota cooldowns after a measured quota reset or re-login, and keep idle accounts refreshed with a shared five-minute polling schedule. Retry usage HTTP 401 once through the existing OAuth refresh lock for Claude, Codex and Kimi, without retrying 403/429 or refreshing static API keys. Missing user:profile permission still requires a fresh OAuth login.",
-  "date": "2026-10-20T02:26:50.419Z"
-}

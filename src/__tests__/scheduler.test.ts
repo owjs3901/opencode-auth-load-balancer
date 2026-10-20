@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG } from '../scheduler/config'
 import {
   isAvailable,
   isExhausted,
+  scoreAccount,
   weeklyUrgency,
 } from '../scheduler/score-core'
 import { selectAccount, selectForSession } from '../scheduler/select'
@@ -11,6 +12,7 @@ import type {
   PoolAccount,
   PoolFile,
   SessionAssignment,
+  UsageCredits,
   UsageWindow,
 } from '../types'
 import { testAccount } from './fixtures/account'
@@ -31,6 +33,7 @@ function account(
     cooldownUntil?: number
     disabled?: string | null
     providerID?: string
+    credits?: UsageCredits
   } = {},
 ): PoolAccount {
   return testAccount({
@@ -42,6 +45,7 @@ function account(
       weekly: opts.weekly ?? null,
       capturedAt: NOW,
     },
+    ...(opts.credits ? { credits: opts.credits } : {}),
     cooldownUntil: opts.cooldownUntil ?? 0,
     disabledReason: opts.disabled ?? null,
   })
@@ -337,6 +341,119 @@ describe('stale (already-reset) windows count as fresh headroom, not exhaustion'
     })
     expect(isExhausted(unknown, DEFAULT_CONFIG, NOW)).toBe(true)
     expect(isAvailable(unknown, DEFAULT_CONFIG, NOW)).toBe(false)
+  })
+})
+
+describe('credits: an exhausted Codex account that still serves', () => {
+  const PAID: UsageCredits = { hasCredits: true, unlimited: false, balance: 40 }
+
+  test('credits keep an exhausted account available; none, or a cooldown, do not', () => {
+    const weekly = win(1.0, 30 * HOUR)
+    const available = (credits?: UsageCredits, cooldownUntil = 0) =>
+      isAvailable(
+        account('a', { weekly, credits, cooldownUntil }),
+        DEFAULT_CONFIG,
+        NOW,
+      )
+    expect(available(PAID)).toBe(true)
+    expect(available({ hasCredits: false, unlimited: true })).toBe(true)
+    expect(available({ hasCredits: false, unlimited: false, balance: 0 })).toBe(
+      false,
+    )
+    expect(available({ ...PAID, limitReached: true })).toBe(false)
+    expect(available()).toBe(false)
+    expect(available(PAID, NOW + HOUR)).toBe(false)
+  })
+
+  test('plan headroom is spent before credits, whatever the scores say', () => {
+    // Its 5h window is spent but its weekly quota is nearly unused and resets
+    // soon, so it outscores `plan`; only credits keep it serving, though.
+    const paid = account('paid', {
+      hourly: win(1.0, 4 * HOUR),
+      weekly: win(0.1, DAY),
+      credits: PAID,
+    })
+    const plan = account('plan', { weekly: win(0.97, 6 * DAY) })
+    expect(scoreAccount(paid, DEFAULT_CONFIG, NOW)).toBeGreaterThan(
+      scoreAccount(plan, DEFAULT_CONFIG, NOW),
+    )
+    expect(pick([paid, plan])).toBe('plan')
+    expect(pick([plan, paid])).toBe('plan')
+  })
+
+  test('with no plan headroom left, the account on credits serves (not a degraded pick)', () => {
+    const full = account('full', { weekly: win(0.999, 5 * HOUR) })
+    const paid = account('paid', { weekly: win(1.0, 30 * HOUR), credits: PAID })
+    const sel = selectAccount([full, paid], 'anthropic', NOW)
+    expect(sel?.account.id).toBe('paid')
+    expect(sel?.degraded).toBe(false)
+  })
+
+  test('an incumbent on credits never holds off plan headroom; among credit accounts it is kept', () => {
+    const paidA = account('paidA', {
+      weekly: win(1.0, 30 * HOUR),
+      credits: PAID,
+    })
+    const paidB = account('paidB', {
+      weekly: win(1.0, 30 * HOUR),
+      credits: PAID,
+    })
+    // Past the drain target, so its score is 0 as well: only the group differs.
+    const plan = account('plan', { weekly: win(0.985, 6 * DAY) })
+    expect(pickInc([paidA, plan], 'paidA')).toBe('plan')
+    expect(pickInc([paidA, paidB], 'paidB')).toBe('paidB')
+  })
+
+  test('a session on credits moves to plan headroom as soon as it appears, even with a large context', () => {
+    const paid = account('paid', { weekly: win(1.0, 30 * HOUR), credits: PAID })
+    const plan = account('plan', { weekly: win(0.5, 6 * DAY) })
+    const pool = poolOf([paid, plan], {
+      's:1': { accountId: 'paid', updatedAt: NOW },
+    })
+    const sel = selectForSession(
+      pool,
+      'anthropic',
+      's:1',
+      NOW,
+      DEFAULT_CONFIG,
+      new Set(),
+      10_000_000,
+    )
+    expect(sel?.account.id).toBe('plan')
+    expect(sel?.sticky).toBe(false)
+  })
+
+  test('a session on credits stays put when every alternative is on credits too', () => {
+    const paid = account('paid', { weekly: win(1.0, 30 * HOUR), credits: PAID })
+    const other = account('other', {
+      weekly: win(0.9995, 30 * HOUR),
+      credits: PAID,
+    })
+    const pool = poolOf([paid, other], {
+      's:1': { accountId: 'paid', updatedAt: NOW },
+    })
+    const sel = selectForSession(pool, 'anthropic', 's:1', NOW)
+    expect(sel?.account.id).toBe('paid')
+    expect(sel?.sticky).toBe(true)
+  })
+
+  test('drain migration never moves a session onto credits', () => {
+    const pinned = account('pinned', { weekly: win(0.5, 6 * DAY) })
+    // Its weekly quota is about to reset unused, but its 5h window is spent.
+    const paid = account('paid', {
+      hourly: win(1.0, 4 * HOUR),
+      weekly: win(0.1, 2 * HOUR),
+      credits: PAID,
+    })
+    const pool = poolOf([pinned, paid], {
+      's:1': { accountId: 'pinned', updatedAt: NOW },
+    })
+    const sel = selectForSession(pool, 'anthropic', 's:1', NOW, {
+      ...DEFAULT_CONFIG,
+      drainMigrate: true,
+    })
+    expect(sel?.account.id).toBe('pinned')
+    expect(sel?.sticky).toBe(true)
   })
 })
 

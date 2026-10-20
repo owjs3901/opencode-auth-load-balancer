@@ -1,4 +1,9 @@
-import type { PoolAccount, UsageSnapshot, UsageWindow } from '../../types'
+import type {
+  PoolAccount,
+  UsageCredits,
+  UsageSnapshot,
+  UsageWindow,
+} from '../../types'
 import { isPlainObject, secondsToMs } from '../../util'
 import {
   endpointWindowFrom,
@@ -54,6 +59,39 @@ const WEEKLY_PRIMARY_HEADER_SPEC: WindowPairHeaderSpec = {
 }
 
 /**
+ * Credits as Codex reports them (`has_credits` + `unlimited` + an optional
+ * decimal-string `balance`): both flags are required, as in the Codex CLI's
+ * `parse_credits_snapshot`, and an unparsable balance is simply unknown. Only
+ * the usage endpoint reports `overage_limit_reached`.
+ */
+function creditsFrom(
+  hasCredits: unknown,
+  unlimited: unknown,
+  balance: unknown,
+  limitReached?: unknown,
+): UsageCredits | undefined {
+  if (typeof hasCredits !== 'boolean' || typeof unlimited !== 'boolean')
+    return undefined
+  const amount =
+    typeof balance === 'string' && balance.trim() !== ''
+      ? Number(balance)
+      : Number.NaN
+  return {
+    hasCredits,
+    unlimited,
+    ...(Number.isFinite(amount) ? { balance: amount } : {}),
+    ...(limitReached === true ? { limitReached } : {}),
+  }
+}
+
+function headerBool(raw: string | null): boolean | undefined {
+  const value = raw?.toLowerCase()
+  if (value === 'true' || value === '1') return true
+  if (value === 'false' || value === '0') return false
+  return undefined
+}
+
+/**
  * Parse usage from Codex response headers (x-codex-{primary,secondary}-*).
  * The historical default is primary = ~5h and secondary = weekly; when the
  * primary-window-minutes header identifies a seven-day primary, swap the pair
@@ -62,7 +100,8 @@ const WEEKLY_PRIMARY_HEADER_SPEC: WindowPairHeaderSpec = {
  * NaN, and every comparison against NaN is false. The parse itself (null-short-circuit,
  * "no capturedAt", "`{}` collapses to null") lives in the shared
  * `parseWindowPairHeaders` — only the header names, the percent scale, and
- * this role detection are Codex-specific.
+ * this role detection are Codex-specific. The credits headers
+ * (x-codex-credits-*) ride along, even on a response without windows.
  */
 export function parseUsageHeaders(
   headers: Headers,
@@ -73,7 +112,13 @@ export function parseUsageHeaders(
   const spec = isWeeklyMinutes(primaryWindowMinutes)
     ? WEEKLY_PRIMARY_HEADER_SPEC
     : HEADER_SPEC
-  return parseWindowPairHeaders(headers, spec)
+  const windows = parseWindowPairHeaders(headers, spec)
+  const credits = creditsFrom(
+    headerBool(headers.get('x-codex-credits-has-credits')),
+    headerBool(headers.get('x-codex-credits-unlimited')),
+    headers.get('x-codex-credits-balance'),
+  )
+  return credits ? { ...windows, credits } : windows
 }
 
 /**
@@ -99,6 +144,7 @@ interface UsageEndpointResponse {
     primary_window?: UsageEndpointWindow | null
     secondary_window?: UsageEndpointWindow | null
   } | null
+  credits?: unknown
 }
 
 /**
@@ -125,7 +171,8 @@ function endpointWindow(
 }
 
 /**
- * Poll GET /wham/usage for authoritative 5h + weekly utilization without
+ * Poll GET /wham/usage for authoritative 5h + weekly utilization (and the
+ * credits spent past them) without
  * consuming inference quota, assigning each returned window to its role BY
  * DURATION (see `isWeeklyMinutes`) rather than by position. A 401 is surfaced
  * for bounded OAuth recovery; other failures return null.
@@ -165,10 +212,20 @@ export async function fetchUsage(
   const primaryIsWeekly = isWeeklyMinutes(
     Math.ceil(Number(primary?.limit_window_seconds) / 60),
   )
+  const reported = json?.credits
+  const credits = isPlainObject(reported)
+    ? creditsFrom(
+        reported.has_credits,
+        reported.unlimited,
+        reported.balance,
+        reported.overage_limit_reached,
+      )
+    : undefined
 
   return {
     hourly: endpointWindow(primaryIsWeekly ? secondary : primary),
     weekly: endpointWindow(primaryIsWeekly ? primary : secondary),
     capturedAt: now,
+    ...(credits ? { credits } : {}),
   }
 }

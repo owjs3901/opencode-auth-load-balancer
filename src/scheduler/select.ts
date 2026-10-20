@@ -2,6 +2,7 @@ import type { PoolAccount, PoolFile } from '../types'
 import { DEFAULT_CONFIG, type SchedulerConfig } from './config'
 import {
   isAvailable,
+  isExhausted,
   maxUtil,
   scoreAccount,
   utilOf,
@@ -72,10 +73,13 @@ const NO_EXCLUSIONS: ReadonlySet<string> = new Set()
  * 1. Restrict to the provider's non-disabled accounts, minus `exclude` (already
  *    tried this request).
  * 2. Prefer the subset that is currently available (not exhausted / cooling down).
- * 3. Among those, pick the highest urgency score — but KEEP the incumbent
- *    (`incumbentId`, the provider's current in-use account) when its score is
- *    within `INCUMBENT_HYSTERESIS` of the best, so near-equal scores don't churn
- *    the account and waste prompt cache.
+ * 3. Among those, prefer plan headroom over serving on credits alone (an
+ *    exhausted Codex account whose credits keep it usable — credits cost money,
+ *    plan quota is already paid for), then pick the highest urgency score — but
+ *    KEEP the incumbent (`incumbentId`, the provider's current in-use account)
+ *    when it is in that same group and its score is within
+ *    `INCUMBENT_HYSTERESIS` of the best, so near-equal scores don't churn the
+ *    account and waste prompt cache.
  * 4. If none are available, fall back to the least-bad account (lowest weekly
  *    utilization) and flag the selection as `degraded`.
  *
@@ -100,6 +104,10 @@ export function selectAccount(
   // the old `-weeklyUtil` maximization written directly.
   let bestAvail: PoolAccount | null = null
   let bestAvailScore = Number.NEGATIVE_INFINITY
+  // Seeded `true` so the first available account always takes the lead: an
+  // account with plan headroom outranks one on credits, and within a group
+  // the score decides.
+  let bestAvailOnCredits = true
   let bestFallback: PoolAccount | null = null
   let lowestWeeklyUtil = Number.POSITIVE_INFINITY
   // The incumbent's account + score, recorded only if it survives the SAME
@@ -108,6 +116,7 @@ export function selectAccount(
   // selection falls through to the argmax below.
   let incumbentAccount: PoolAccount | null = null
   let incumbentScore = Number.NEGATIVE_INFINITY
+  let incumbentOnCredits = false
   for (const account of accounts) {
     if (
       account.providerID !== providerID ||
@@ -117,13 +126,21 @@ export function selectAccount(
       continue
     if (isAvailable(account, cfg, now)) {
       const score = scoreAccount(account, cfg, now)
-      if (score > bestAvailScore) {
+      // Available yet exhausted: only its credits keep it serving.
+      const onCredits = isExhausted(account, cfg, now)
+      if (
+        onCredits === bestAvailOnCredits
+          ? score > bestAvailScore
+          : bestAvailOnCredits
+      ) {
         bestAvailScore = score
         bestAvail = account
+        bestAvailOnCredits = onCredits
       }
       if (account.id === incumbentId) {
         incumbentAccount = account
         incumbentScore = score
+        incumbentOnCredits = onCredits
       }
     } else {
       const util = weeklyUtil(account)
@@ -147,9 +164,11 @@ export function selectAccount(
     // when the best score is 0 (every available account past weeklyDrainTarget):
     // the band collapses to `incumbentScore >= 0`, which keeps the incumbent —
     // exactly right when the urgency signal has gone flat. Only a MEANINGFULLY
-    // better challenger (beyond the band) displaces it.
+    // better challenger (beyond the band) displaces it — and an incumbent on
+    // credits never holds off an account with plan headroom.
     if (
       incumbentAccount &&
+      incumbentOnCredits === bestAvailOnCredits &&
       incumbentScore >= bestAvailScore * (1 - INCUMBENT_HYSTERESIS)
     )
       return { account: incumbentAccount, degraded: false, sticky: false }
@@ -328,7 +347,9 @@ export function selectForSession(
       // Non-forced migrations require a genuinely available alternative; the
       // forced-switch path above already handles the "pin itself is unavailable"
       // case (which is the only legitimate way to return a degraded selection).
-      if (alt && !alt.degraded) {
+      // Nor is an alternative on credits alone worth a switch: the pin either
+      // still has plan quota or is on credits itself.
+      if (alt && !alt.degraded && !isExhausted(alt.account, cfg, now)) {
         if (pinnedOverSoft) {
           // Imminent: any genuinely-more-headroom account is worth it (the forced
           // switch is coming regardless). Otherwise: require a real headroom margin

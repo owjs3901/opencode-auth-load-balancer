@@ -35,6 +35,7 @@ import {
   MANUAL_DISABLED_REASON,
   type PoolAccount,
   type TokenSet,
+  type UsageCredits,
   type UsageSnapshot,
 } from '../types'
 import {
@@ -329,6 +330,96 @@ describe('pool store', () => {
     const rendered = renderStatus(buildStatus(pool, Date.now()))
     expect(rendered).not.toContain('NaN')
     expect(rendered).toContain('50%') // the healed weekly window still renders
+  })
+
+  test('readPool keeps well-formed credits and heals hand-edited ones', async () => {
+    const rows = [
+      { hasCredits: true, unlimited: false, balance: 12.5, limitReached: true },
+      { hasCredits: true, unlimited: false, balance: '12', limitReached: 'no' },
+      { hasCredits: 'yes', unlimited: false },
+      [true, false],
+    ].map((credits) => {
+      const row = JSON.parse(JSON.stringify(account())) as {
+        usage: Record<string, unknown>
+        credits?: unknown
+      }
+      row.credits = credits
+      // Where an unreleased build kept them: dropped.
+      row.usage.credits = credits
+      return row
+    })
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: rows,
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const pool = await readPool()
+    expect(pool.accounts.map((a) => a.credits)).toStrictEqual([
+      { hasCredits: true, unlimited: false, balance: 12.5, limitReached: true },
+      { hasCredits: true, unlimited: false },
+      undefined,
+      undefined,
+    ])
+    expect(pool.accounts.map((a) => 'credits' in a)).toEqual([
+      true,
+      true,
+      false,
+      false,
+    ])
+    expect(pool.accounts.some((a) => 'credits' in a.usage)).toBe(false)
+  })
+
+  test('credits survive a usage write by a version that does not know them', async () => {
+    const credits = { hasCredits: true, unlimited: false, balance: 7 }
+    const a = account({ providerID: 'openai', credits })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...a })
+    })
+    // 0.9.1's usage poll replaces the whole `usage` object.
+    await mutatePool((pool) => {
+      const stored = findAccount(pool, a.id)
+      if (stored)
+        stored.usage = {
+          hourly: null,
+          weekly: { utilization: 1, resetAt: 0 },
+          capturedAt: Date.now(),
+        }
+    })
+    expect(findAccount(await readPool(), a.id)?.credits).toEqual(credits)
+  })
+
+  test('a fresh Codex row with unknown credits is polled; one with known credits, or another provider, is not', async () => {
+    const now = Date.now()
+    const fresh = { hourly: null, weekly: null, capturedAt: now }
+    const unknown = account({ providerID: 'openai', usage: { ...fresh } })
+    const known = account({
+      providerID: 'openai',
+      usage: { ...fresh },
+      credits: { hasCredits: false, unlimited: false },
+    })
+    const claude = account({ usage: { ...fresh } })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...unknown }, { ...known }, { ...claude })
+    })
+    const polled: string[] = []
+    const poll = async (acc: PoolAccount): Promise<UsageSnapshot> => {
+      polled.push(acc.id)
+      return {
+        ...fresh,
+        credits: { hasCredits: true, unlimited: false, balance: 3 },
+      }
+    }
+    await refreshUsageInBackground(
+      fakeAdapter({ id: 'openai', fetchUsage: poll, reportsCredits: true }),
+      now,
+    )
+    await refreshUsageInBackground(fakeAdapter({ fetchUsage: poll }), now)
+    expect(polled).toEqual([unknown.id])
+    expect(findAccount(await readPool(), unknown.id)?.credits?.balance).toBe(3)
   })
 
   test("readPool heals a negative resetAt to 0 (must not desync weeklyUrgency's elapsed-anchor branch)", async () => {
@@ -2746,6 +2837,62 @@ describe('usage-refresh', () => {
     const retained = findAccount(await readPool(), a.id)
     expect(retained?.cooldownUntil).toBe(cd)
     expect(retained?.cooldownKind).toBe('quota')
+  })
+
+  test('credits measured by the poll keep an exhausted account serving; a poll without credits keeps the stored ones', async () => {
+    const now = Date.now()
+    const cd = now + 3 * 24 * 60 * 60 * 1000
+    const exhausted = (credits?: UsageCredits) =>
+      account({
+        providerID: 'openai',
+        cooldownUntil: cd,
+        cooldownKind: 'quota',
+        usage: {
+          hourly: null,
+          weekly: { utilization: 1, resetAt: cd },
+          capturedAt: 0,
+        },
+        ...(credits ? { credits } : {}),
+      })
+    const paid = exhausted()
+    const broke = exhausted()
+    const known = exhausted({ hasCredits: false, unlimited: true })
+    await mutatePool((pool) => {
+      pool.accounts.push({ ...paid }, { ...broke }, { ...known })
+    })
+    const snapshot = (credits?: UsageCredits): UsageSnapshot => ({
+      hourly: { utilization: 0, resetAt: 0 },
+      weekly: { utilization: 1, resetAt: cd },
+      capturedAt: now,
+      ...(credits ? { credits } : {}),
+    })
+    const polled: Record<string, UsageSnapshot> = {
+      [paid.id]: snapshot({ hasCredits: true, unlimited: false, balance: 25 }),
+      [broke.id]: snapshot({ hasCredits: false, unlimited: false, balance: 0 }),
+      [known.id]: snapshot(),
+    }
+    await refreshUsageInBackground(
+      fakeAdapter({
+        id: 'openai',
+        fetchUsage: async (acc) => polled[acc.id] ?? null,
+      }),
+      now,
+    )
+    const pool = await readPool()
+    expect(findAccount(pool, paid.id)?.cooldownUntil).toBe(0)
+    expect(findAccount(pool, paid.id)?.credits).toEqual({
+      hasCredits: true,
+      unlimited: false,
+      balance: 25,
+    })
+    expect(findAccount(pool, broke.id)?.cooldownUntil).toBe(cd)
+    expect(findAccount(pool, known.id)?.credits).toEqual({
+      hasCredits: false,
+      unlimited: true,
+    })
+    expect(findAccount(pool, known.id)?.cooldownUntil).toBe(0)
+    const picked = selectAccount(pool.accounts, 'openai', now)
+    expect(picked?.degraded).toBe(false)
   })
 
   test('keeps SHORT auth/transient cooldown kinds when the poll shows headroom', async () => {

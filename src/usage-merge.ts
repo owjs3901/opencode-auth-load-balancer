@@ -1,4 +1,4 @@
-import { isExhausted, type ScoreConfig, WEEK_MS } from './scheduler/score-core'
+import { hasHeadroom, type ScoreConfig, WEEK_MS } from './scheduler/score-core'
 import type { PoolAccount, UsageWindow } from './types'
 
 export const MAX_TRANSIENT_COOLDOWN_MS = 5 * 60 * 1000
@@ -13,7 +13,7 @@ export function reconcileQuotaCooldown(
     return
   if (
     account.cooldownUntil > now + MAX_TRANSIENT_COOLDOWN_MS &&
-    !isExhausted(account, cfg, now)
+    hasHeadroom(account, cfg, now)
   ) {
     account.cooldownUntil = 0
     delete account.cooldownKind

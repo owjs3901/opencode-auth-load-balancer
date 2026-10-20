@@ -116,6 +116,22 @@ test.each(['auth', 'transient'] satisfies CooldownKind[])(
   },
 )
 
+test('re-login measuring an exhausted plan with credits rejoins selection on those credits', async () => {
+  const now = Date.now()
+  const usage: UsageSnapshot = {
+    hourly: { utilization: 0, resetAt: 0 },
+    weekly: { utilization: 1, resetAt: now + DAY },
+    capturedAt: now,
+    credits: { hasCredits: true, unlimited: false, balance: 7 },
+  }
+  const { pool } = await relogin(usage)
+  expect(pool.accounts[0]?.cooldownUntil).toBe(0)
+  expect(pool.accounts[0]?.credits).toEqual(usage.credits)
+  const picked = selectAccount(pool.accounts, 'anthropic', now)
+  expect(picked?.account.label).toBe('contact')
+  expect(picked?.degraded).toBe(false)
+})
+
 test('pairing a measured setup-token also clears a stale quota cooldown', async () => {
   const now = Date.now()
   const { row } = await relogin(resetUsage(now))

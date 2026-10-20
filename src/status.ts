@@ -10,12 +10,14 @@ import {
   compareRanked,
   displayUtil,
   isAvailable,
+  isExhausted,
   scoreAccount,
 } from './scheduler/score-core'
 import {
   MANUAL_DISABLED_REASON,
   type PoolAccount,
   type PoolFile,
+  type UsageCredits,
 } from './types'
 
 const PROVIDER_NAMES: Record<string, string> = {
@@ -61,6 +63,8 @@ interface AccountStatus {
   warnings: string[]
   /** Why each lost login stopped working, printed under the table. */
   lostNotes: string[]
+  /** What credits leave once the plan is exhausted (`creditsText`); '' otherwise. */
+  credits: string
   /** The account that most recently served a request for this provider. */
   current: boolean
   /** 1 = next candidate the scheduler would pick. */
@@ -86,11 +90,28 @@ function isExpired(
   return !!window && window.resetAt > 0 && window.resetAt <= now
 }
 
+/**
+ * The credits an exhausted account has left, as Codex reports them: an
+ * amount, `unlimited`, `available` (no amount reported), none at all, or a
+ * spending cap that stops them; '' when the provider never reported credits.
+ * The TUI keeps a copy.
+ */
+function creditsText(credits: UsageCredits | undefined): string {
+  if (!credits) return ''
+  if (credits.limitReached) return 'credit limit reached'
+  if (credits.unlimited) return 'credits unlimited'
+  if (!credits.hasCredits) return 'no credits'
+  return credits.balance === undefined
+    ? 'credits available'
+    : `credits ${Math.round(credits.balance * 100) / 100}`
+}
+
 function toStatus(
   account: PoolAccount,
   now: number,
   current: boolean,
   available: boolean,
+  exhausted: boolean,
   rank: number,
 ): AccountStatus {
   const weekly = account.usage.weekly
@@ -111,6 +132,7 @@ function toStatus(
     login: credentialTag(account),
     warnings: loginWarnings(account, now),
     lostNotes: lostLoginNotes(account, now),
+    credits: exhausted ? creditsText(account.credits) : '',
     current,
     rank,
   }
@@ -138,9 +160,12 @@ export function buildStatus(
     const ranked = providerAccounts
       .map((a) => {
         const available = isAvailable(a, cfg, now)
+        const exhausted = isExhausted(a, cfg, now)
         return {
           a,
           available,
+          exhausted,
+          onCredits: available && exhausted,
           score: available
             ? scoreAccount(a, cfg, now)
             : Number.NEGATIVE_INFINITY,
@@ -159,8 +184,8 @@ export function buildStatus(
         }
       })
       .sort(compareRanked)
-    const accounts = ranked.map(({ a, available }, i) =>
-      toStatus(a, now, a.id === currentAccountId, available, i + 1),
+    const accounts = ranked.map(({ a, available, exhausted }, i) =>
+      toStatus(a, now, a.id === currentAccountId, available, exhausted, i + 1),
     )
     return { providerID, accounts }
   })
@@ -235,7 +260,7 @@ function stateOf(a: AccountStatus, now: number): string {
   if (a.disabledReason)
     return a.disabledReason === MANUAL_DISABLED_REASON ? 'disabled' : 're-login'
   if (a.cooldownUntil > now) return `cooldown ${relTime(a.cooldownUntil, now)}`
-  if (!a.available) return 'exhausted'
+  if (!a.available) return a.credits ? `exhausted · ${a.credits}` : 'exhausted'
   const base = a.current ? 'in use' : 'ready'
   // A model-tier limit does NOT sideline the account (it still serves every
   // other model; tier requests steer to accounts with headroom or downgrade)
@@ -246,8 +271,7 @@ function stateOf(a: AccountStatus, now: number): string {
     .filter(([, until]) => until > now)
     .sort(([x], [y]) => compareAscii(x, y))
     .map(([tier, until]) => `${tier} ${relTime(until, now)}`)
-  if (tiers.length > 0) return `${base} · ${tiers.join(' · ')}`
-  return base
+  return [base, a.credits, ...tiers].filter(Boolean).join(' · ')
 }
 
 export function providerName(providerID: string): string {

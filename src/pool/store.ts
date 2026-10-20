@@ -7,6 +7,7 @@ import {
   type PoolFile,
   type ReloginIntent,
   type SessionAssignment,
+  type UsageCredits,
   type UsageWindow,
 } from '../types'
 import { clamp01, ignore, isFiniteNumber, isPlainObject, sleep } from '../util'
@@ -108,6 +109,24 @@ function normalizeWindow(w: unknown): UsageWindow | null {
 }
 
 /**
+ * Heal hand-edited credits: without both flags the record is dropped, since
+ * credits are what keep an exhausted account selectable; an unusable balance
+ * is dropped alone (the amount is then unknown).
+ */
+function normalizeCredits(c: unknown): UsageCredits | undefined {
+  if (!isPlainObject(c)) return undefined
+  const credits = c as Partial<UsageCredits>
+  if (
+    typeof credits.hasCredits !== 'boolean' ||
+    typeof credits.unlimited !== 'boolean'
+  )
+    return undefined
+  if (!isFiniteNumber(credits.balance)) delete credits.balance
+  if (credits.limitReached !== true) delete credits.limitReached
+  return credits as UsageCredits
+}
+
+/**
  * Row-level trust boundary for the user-editable pool file. `Array.isArray`
  * alone trusts each row wholesale, but the README invites hand-editing — and a
  * `null` element or a row missing `usage` throws a TypeError inside
@@ -165,7 +184,11 @@ function normalizeAccounts(rows: PoolAccount[]): PoolAccount[] {
       if (!Number.isFinite(row.usage.capturedAt)) row.usage.capturedAt = 0
       row.usage.hourly = normalizeWindow(row.usage.hourly)
       row.usage.weekly = normalizeWindow(row.usage.weekly)
+      delete row.usage.credits
     }
+    const credits = normalizeCredits(row.credits)
+    if (credits) row.credits = credits
+    else delete row.credits
     if (!Number.isFinite(row.cooldownUntil)) row.cooldownUntil = 0
     if (
       row.cooldownKind !== undefined &&

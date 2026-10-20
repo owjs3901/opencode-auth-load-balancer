@@ -1002,6 +1002,145 @@ describe('openai usage', () => {
     expect(Number.isFinite(u?.weekly?.resetAt ?? Infinity)).toBe(true)
   })
 
+  test('parseUsageHeaders reads the credits Codex spends past exhausted plan windows', () => {
+    const u = oParse(
+      new Headers({
+        'x-codex-primary-used-percent': '100',
+        'x-codex-secondary-used-percent': '100',
+        'x-codex-credits-has-credits': 'True',
+        'x-codex-credits-unlimited': '0',
+        'x-codex-credits-balance': '42.5',
+      }),
+    )
+    expect(u?.weekly?.utilization).toBe(1)
+    expect(u?.credits).toEqual({
+      hasCredits: true,
+      unlimited: false,
+      balance: 42.5,
+    })
+  })
+
+  test('parseUsageHeaders reports credits on a response without usage windows', () => {
+    expect(
+      oParse(
+        new Headers({
+          'x-codex-credits-has-credits': 'false',
+          'x-codex-credits-unlimited': '1',
+          'x-codex-credits-balance': '',
+        }),
+      ),
+    ).toEqual({ credits: { hasCredits: false, unlimited: true } })
+  })
+
+  test('parseUsageHeaders ignores credits unless both flags parse', () => {
+    expect(
+      oParse(
+        new Headers({
+          'x-codex-credits-has-credits': 'true',
+          'x-codex-credits-balance': '5',
+        }),
+      ),
+    ).toBeNull()
+    expect(
+      oParse(
+        new Headers({
+          'x-codex-credits-has-credits': 'yes',
+          'x-codex-credits-unlimited': 'false',
+        }),
+      ),
+    ).toBeNull()
+    const u = oParse(
+      new Headers({
+        'x-codex-secondary-used-percent': '5',
+        'x-codex-credits-has-credits': 'true',
+        'x-codex-credits-unlimited': 'maybe',
+      }),
+    )
+    expect(u?.weekly?.utilization).toBeCloseTo(0.05, 5)
+    expect(u?.credits).toBeUndefined()
+  })
+
+  test('fetchUsage reads the credits object beside rate_limit', async () => {
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          rate_limit: {
+            primary_window: {
+              used_percent: 100,
+              limit_window_seconds: 604800,
+              reset_at: 1900000000,
+            },
+            secondary_window: null,
+          },
+          credits: {
+            has_credits: true,
+            unlimited: false,
+            overage_limit_reached: false,
+            balance: '46110.7699780000',
+            approx_local_messages: [11528, 59944],
+          },
+        }),
+        { status: 200 },
+      )
+    const u = await oFetchUsage(acct('openai', 'a'), 0)
+    expect(u?.weekly?.utilization).toBe(1)
+    expect(u?.credits).toStrictEqual({
+      hasCredits: true,
+      unlimited: false,
+      balance: 46110.769978,
+    })
+  })
+
+  test('fetchUsage marks credits stopped by their spending cap', async () => {
+    respond = () =>
+      new Response(
+        JSON.stringify({
+          rate_limit: { primary_window: null, secondary_window: null },
+          credits: {
+            has_credits: true,
+            unlimited: false,
+            overage_limit_reached: true,
+            balance: '12',
+          },
+        }),
+        { status: 200 },
+      )
+    expect((await oFetchUsage(acct('openai', 'a'), 0))?.credits).toEqual({
+      hasCredits: true,
+      unlimited: false,
+      balance: 12,
+      limitReached: true,
+    })
+  })
+
+  test('fetchUsage leaves credits out when none or a malformed record is reported', async () => {
+    const body = (credits: unknown) =>
+      JSON.stringify({
+        rate_limit: { primary_window: null, secondary_window: null },
+        credits,
+      })
+    for (const credits of [
+      null,
+      'x',
+      { has_credits: true },
+      { has_credits: 'true', unlimited: false },
+    ]) {
+      respond = () => new Response(body(credits), { status: 200 })
+      const u = await oFetchUsage(acct('openai', 'a'), 0)
+      expect(u?.hourly).toEqual({ utilization: 0, resetAt: 0 })
+      expect(u && 'credits' in u).toBe(false)
+    }
+    respond = () =>
+      new Response(
+        body({ has_credits: false, unlimited: false, balance: null }),
+        { status: 200 },
+      )
+    expect((await oFetchUsage(acct('openai', 'a'), 0))?.credits).toEqual({
+      hasCredits: false,
+      unlimited: false,
+    })
+  })
+
   test('fetchUsage maps primary/secondary and sends the account header', async () => {
     let seen: RequestInit | undefined
     respond = (_u, init) => {

@@ -184,6 +184,11 @@ export interface ProviderAdapter {
   parseUsageHeaders(headers: Headers): Partial<UsageSnapshot> | null
   /** Poll a dedicated usage endpoint for authoritative quota, if one exists. */
   fetchUsage(account: PoolAccount, now: number): Promise<UsageSnapshot | null>
+  /**
+   * The usage endpoint reports credits (Codex): a row whose credits are still
+   * unknown is polled even when its windows are fresh.
+   */
+  reportsCredits?: boolean
 
   /** Classify an HTTP status for rotation decisions. */
   classifyError(status: number): ErrorClass

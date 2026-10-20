@@ -1,5 +1,5 @@
 import type { ScoreConfig } from '../scheduler/score-core'
-import { utilOf } from '../scheduler/score-core'
+import { hasCreditHeadroom, utilOf } from '../scheduler/score-core'
 import type { PoolAccount, UsageWindow } from '../types'
 
 export type ProviderRecovery =
@@ -40,8 +40,10 @@ export function classifyProviderRecovery(
 
     const windows = exhaustedWindows(account, cfg, now)
     const cooldownActive = account.cooldownUntil > now
+    // Credits keep serving past exhausted plan windows: only a cooldown blocks.
+    const blocking = hasCreditHeadroom(account) ? [] : windows
 
-    if (!cooldownActive && windows.length === 0) return { state: 'available' }
+    if (!cooldownActive && blocking.length === 0) return { state: 'available' }
 
     // Auth and transport cooldowns are not quota work. They do not prevent a
     // different quota-blocked account from making the provider waitable, but
@@ -60,7 +62,7 @@ export function classifyProviderRecovery(
     hasQuotaCandidate = true
     const constraints: number[] = []
     let accountHasUnknownReset = false
-    for (const window of windows) {
+    for (const window of blocking) {
       if (window.resetAt > now) constraints.push(window.resetAt)
       else accountHasUnknownReset = true
     }

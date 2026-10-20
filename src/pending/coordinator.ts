@@ -229,8 +229,18 @@ export class PendingCoordinator {
     await this.notifyPending(ref, recovery)
     try {
       for (;;) {
+        // Capacity can return before the expected recovery: credits are
+        // bought, or reported for the first time, at any moment. Recheck at
+        // least once per usage-refresh interval instead of sleeping until a
+        // plan reset days away.
         await this.dependencies.sleep(
-          Math.max(0, recovery.nextCheckAt - this.dependencies.now()),
+          Math.max(
+            0,
+            Math.min(
+              recovery.nextCheckAt - this.dependencies.now(),
+              USAGE_REFRESH_TTL_MS,
+            ),
+          ),
           controller.signal,
         )
         const now = this.dependencies.now()

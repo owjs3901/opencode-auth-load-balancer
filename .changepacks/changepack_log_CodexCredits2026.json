@@ -1,7 +1,0 @@
-{
-  "changes": {
-    "package.json": "Minor"
-  },
-  "note": "Codex accounts whose plan usage is exhausted keep serving on their ChatGPT credits, as the Codex CLI and desktop app do. Plan quota on any account is still spent first, a session on credits moves back as soon as plan headroom returns, and credits stopped by their spending cap are not used. The dashboards and TUI show the remaining balance beside the exhausted state (`full · credits 42.5`). Credits are stored where earlier plugin versions running at the same time cannot erase them, and turns waiting for quota recheck at least every five minutes.",
-  "date": "2026-10-20T12:12:00.000Z"
-}

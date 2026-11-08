@@ -263,6 +263,32 @@ describe('durable pending fetch integration', () => {
     expect(pending.completed).toHaveLength(1)
   })
 
+  test('a provider with no usable account completes the turn without an upstream request', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({ disabledReason: 'invalid_grant: re-login required' }),
+      )
+    })
+    let upstreamCalls = 0
+    respond = () => {
+      upstreamCalls += 1
+      return new Response('unexpected')
+    }
+    const pending = new FakePendingCoordinator()
+
+    const response = await createLoadBalancedFetch(
+      anthropicAdapter,
+      {},
+      [],
+      pending,
+    )('https://api.anthropic.com/v1/messages', identifiedInit())
+
+    expect(response.status).toBe(401)
+    expect(upstreamCalls).toBe(0)
+    expect(pending.waits).toHaveLength(0)
+    expect(pending.completed).toHaveLength(1)
+  })
+
   test('client abort clears an owned pending turn instead of rotating', async () => {
     await mutatePool((pool) => {
       pool.accounts.push(account())

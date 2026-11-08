@@ -517,6 +517,41 @@ describe('what a machine may do depends on its GitHub account', () => {
     expect(second.message).toBe('Up to date.')
     expect(patches()).toBe(writes)
   })
+
+  test('an unreadable gist stays reported as unreadable while it is unchanged', async () => {
+    await twoWriters()
+    const s = await state('pcA')
+    const snap = await pcs.snapshot('pcA', gistContent())
+    const key = Buffer.from(s?.key ?? '', 'base64url')
+    const forged = seal(
+      JSON.stringify({
+        v: 2,
+        at: snap.at + 10,
+        entries: [
+          ...snap.entries,
+          {
+            origin: 'e'.repeat(32),
+            id: 'x1',
+            providerID: 'future-provider',
+            label: 'x',
+            secret: 'some-future-secret',
+          },
+        ],
+      }),
+      key,
+    )
+    for (const gist of github.gists.values()) {
+      gist.content = forged
+      gist.etag += 1
+    }
+    const writes = patches()
+    expect((await sync('pcB')).message).toBe(
+      'Up to date. The gist has entries this version cannot read; update this plugin to upload.',
+    )
+    expect((await sync('pcB')).message).toBe('Up to date.')
+    expect((await state('pcB'))?.write).toBe('unreadable')
+    expect(patches()).toBe(writes)
+  })
 })
 
 describe('leaving and coming back, and awkward ids', () => {

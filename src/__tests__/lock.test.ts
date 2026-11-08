@@ -3,7 +3,7 @@ import { mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import { acquireLock, LockTimeoutError, withLock } from '../pool/lock'
 import { sleep } from '../util'
@@ -159,6 +159,30 @@ describe('file lock', () => {
     })
     await handle.release()
     expect(await dirExists(dir)).toBe(false)
+  })
+
+  test('a claim whose owner metadata cannot be written is removed, so it never blocks the next acquirer', async () => {
+    const fsp = await import('node:fs/promises')
+    const dir = lockPath('meta-write-fails')
+    const meta = join(dir, 'owner.json')
+    const realWriteFile = fsp.writeFile
+    const spy = spyOn(fsp, 'writeFile').mockImplementation(
+      async (file, data, options) => {
+        if (file === meta)
+          throw Object.assign(new Error('ENOSPC: no space left on device'), {
+            code: 'ENOSPC',
+          })
+        return realWriteFile(file, data, options)
+      },
+    )
+    try {
+      await expect(acquireLock(dir, FAST)).rejects.toThrow('ENOSPC')
+    } finally {
+      spy.mockRestore()
+    }
+    expect(await dirExists(dir)).toBe(false)
+    const handle = await acquireLock(dir, { ...FAST, timeoutMs: 0 })
+    await handle.release()
   })
 
   test('times out against a lock dir with no owner metadata', async () => {

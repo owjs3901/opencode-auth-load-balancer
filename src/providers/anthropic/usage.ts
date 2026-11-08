@@ -5,7 +5,7 @@ import {
   parseWindowPairHeaders,
   type WindowPairHeaderSpec,
 } from '../usage-headers'
-import { fetchUsageJson } from '../usage-http'
+import { fetchUsageJson, UsageForbiddenError } from '../usage-http'
 import {
   ANTHROPIC_VERSION,
   MESSAGES_URL,
@@ -194,23 +194,34 @@ async function probeUsage(
  *
  * A row without a refresh token is a `claude setup-token` bearer, scoped to
  * `user:inference` alone; the endpoint demands `user:profile` and answers it
- * 403, so such a row is measured with the one-token probe above instead.
+ * 403, so such a row is measured with the one-token probe above instead. So
+ * is an OAuth login the endpoint answers 403: a refresh grant narrowed it to
+ * `user:inference` for good (the default-on auto-mint of 0.6–0.8 did), and only
+ * a fresh login restores `user:profile`. Without the probe its usage would
+ * freeze at the last reading while it sits idle.
  */
 export async function fetchUsage(
   account: PoolAccount,
   now: number,
 ): Promise<UsageSnapshot | null> {
   if (!account.refresh) return probeUsage(account.access, now)
-  const json = await fetchUsageJson<UsageEndpointResponse>(
-    USAGE_URL,
-    {
-      authorization: `Bearer ${account.access}`,
-      'anthropic-beta': 'oauth-2025-04-20',
-      'user-agent': usageUserAgent(),
-      'content-type': 'application/json',
-    },
-    USAGE_HTTP_TIMEOUT_MS,
-  )
+  let json: UsageEndpointResponse | null
+  try {
+    json = await fetchUsageJson<UsageEndpointResponse>(
+      USAGE_URL,
+      {
+        authorization: `Bearer ${account.access}`,
+        'anthropic-beta': 'oauth-2025-04-20',
+        'user-agent': usageUserAgent(),
+        'content-type': 'application/json',
+      },
+      USAGE_HTTP_TIMEOUT_MS,
+    )
+  } catch (error) {
+    if (error instanceof UsageForbiddenError)
+      return probeUsage(account.access, now)
+    throw error
+  }
   if (!json) return null
   // Shape guard: a 200 whose body carries NEITHER window key is NOT the usage
   // endpoint's shape (schema drift, an error payload, a proxy page that

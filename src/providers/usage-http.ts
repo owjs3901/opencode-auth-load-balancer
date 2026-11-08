@@ -50,15 +50,27 @@ export class UsageAuthenticationError extends Error {
   }
 }
 
+/** The endpoint refuses this token (403): a refresh cannot help, unlike a 401. */
+export class UsageForbiddenError extends Error {
+  readonly status = 403
+
+  constructor() {
+    super('Usage endpoint refused the access token (403)')
+    this.name = 'UsageForbiddenError'
+  }
+}
+
 export async function fetchUsageJson<T>(
   url: string,
   headers: Record<string, string>,
   timeoutMs: number,
 ): Promise<T | null> {
   const response = await request(url, headers, timeoutMs)
-  if (response?.status === 401) {
+  if (response?.status === 401 || response?.status === 403) {
     await response.body?.cancel().catch(ignore)
-    throw new UsageAuthenticationError()
+    throw response.status === 401
+      ? new UsageAuthenticationError()
+      : new UsageForbiddenError()
   }
   return readJson<T>(response)
 }

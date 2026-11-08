@@ -153,13 +153,71 @@ test.each([401, 403, 429])(
       now,
     )
 
-    expect(requests).toBe(status === 401 ? 2 : 1)
+    // 401: one refresh and a retry. 403: the quota probe, refused as well.
+    expect(requests).toBe(status === 429 ? 1 : 2)
     expect(refreshes).toBe(status === 401 ? 1 : 0)
     const row = (await readPool()).accounts[0]
     expect(row?.cooldownUntil).toBe(now + 2 * DAY)
     expect(row?.usage.capturedAt).toBe(0)
   },
 )
+
+test('a Claude login narrowed to user:inference is measured by the quota probe after its 401 recovery', async () => {
+  const now = Date.now()
+  const weeklyReset = Math.floor(now / 1000) + 3 * 86_400
+  await mutatePool((pool) => {
+    pool.accounts = [
+      testAccount({
+        id: randomUUID(),
+        access: 'revoked-access',
+        refresh: 'narrowed-refresh',
+        expires: now + DAY,
+      }),
+    ]
+  })
+  const calls: string[] = []
+  globalThis.fetch = responderFetch(() => (url, init) => {
+    const bearer = new Headers(init?.headers).get('authorization')
+    calls.push(`${init?.method ?? 'GET'} ${new URL(url).pathname} ${bearer}`)
+    if (bearer === 'Bearer revoked-access')
+      return new Response(null, { status: 401 })
+    if (url.includes('/api/oauth/usage'))
+      return Response.json(
+        { error: { type: 'permission_error' } },
+        { status: 403 },
+      )
+    return new Response('{}', {
+      headers: {
+        'anthropic-ratelimit-unified-5h-utilization': '0.01',
+        'anthropic-ratelimit-unified-7d-utilization': '0.02',
+        'anthropic-ratelimit-unified-7d-reset': String(weeklyReset),
+      },
+    })
+  })
+  await refreshUsageInBackground(
+    {
+      ...anthropicAdapter,
+      refresh: async () => ({
+        access: 'inference-only-access',
+        refresh: 'narrowed-successor',
+        expires: now + DAY,
+      }),
+    },
+    now,
+  )
+
+  expect(calls).toEqual([
+    'GET /api/oauth/usage Bearer revoked-access',
+    'GET /api/oauth/usage Bearer inference-only-access',
+    'POST /v1/messages Bearer inference-only-access',
+  ])
+  const row = (await readPool()).accounts[0]
+  expect(row?.usage.weekly).toEqual({
+    utilization: 0.02,
+    resetAt: weeklyReset * 1000,
+  })
+  expect(row?.usage.capturedAt).toBe(now)
+})
 
 test('generic JSON reads keep their null-on-401 contract for non-usage lookups', async () => {
   globalThis.fetch = responderFetch(

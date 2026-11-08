@@ -170,7 +170,7 @@ An OAuth login lives on a refresh token that rotates on every refresh, and once 
 
 - The server ignores `expires_in` and answers with an 8-hour token, which is too short to pool (a token must live 60 days or more), so no row ever received one.
 - The grant still rotates the refresh token, and the one it returns is narrowed to `user:inference` for good. The usage endpoint then answers that login `403 … user:profile`, and asking for the full scope again is refused with `400 invalid_scope`.
-- Only a fresh OAuth login restores a narrowed row. Until then it keeps serving inference but loses usage polling.
+- Only a fresh OAuth login restores a narrowed row. Until then it keeps serving inference, and its usage is measured like a setup-token's: from response headers and, while it sits idle, the one-token quota check (at most once per 5 minutes per account).
 
 `OPENCODE_AUTH_LB_ANTHROPIC_AUTO_TOKEN=1` turns the old behaviour back on; do not, unless you are testing the endpoint. The year-long token comes from a pasted `claude setup-token`, which is its own approval and independent of any OAuth login.
 
@@ -296,7 +296,7 @@ A fresh usage measurement during re-login or a periodic check clears an obsolete
 
 If a usage endpoint rejects an OAuth access token with HTTP 401, the poll uses the same refresh lock and rejected-token recovery as inference, then retries the usage lookup once, even when the advertised access expiry is still in the future. A concurrently refreshed credential is adopted instead of spending its predecessor again. Static API keys are never sent to OAuth refresh, and 403/429 failures do not trigger authentication retries.
 
-A 403 caused by a missing `user:profile` scope requires a fresh OAuth login with browser approval. Restarting OpenCode or refreshing the same grant cannot restore that missing permission; an authoritative usage result is still required before clearing the old quota cooldown.
+A 403 caused by a missing `user:profile` scope requires a fresh OAuth login with browser approval to restore the usage endpoint. Restarting OpenCode or refreshing the same grant cannot restore that missing permission. Until then a Claude row is measured with the same one-token quota check as a setup-token, so its windows and reset times stay current while it sits idle; that measured usage can clear an old quota cooldown.
 
 ### Persistent bottom status bar (TUI)
 

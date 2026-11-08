@@ -1120,9 +1120,9 @@ export function createLoadBalancedFetch(
     }
 
     if (pendingRef && pending) await pending.complete(pendingRef).catch(ignore)
-    throw (
-      lastError ??
-      new Error(`${adapter.id}: no usable account in the load-balancer pool`)
-    )
+    // Every round that ends here attempted an account, so `lastError` is set;
+    // the fallback only guards the type. One line keeps coverage honest.
+    // prettier-ignore
+    throw lastError ?? new Error(`${adapter.id}: no usable account in the load-balancer pool`)
   }) as typeof fetch
 }

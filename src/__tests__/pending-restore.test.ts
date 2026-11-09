@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   PendingCoordinator,
+  type PendingCoordinatorDependencies,
   type PendingRestoreClient,
+  type PendingResumeClient,
 } from '../pending/coordinator'
 import { pendingKey } from '../pending/store'
 import type { PendingTurn } from '../pending/types'
@@ -56,6 +58,7 @@ interface RestoreHarness {
 function harness(
   initial: PendingTurn[],
   overrides: Partial<PendingRestoreClient['session']> = {},
+  dependencies: Partial<PendingCoordinatorDependencies> = {},
 ): RestoreHarness {
   const turns = new Map(initial.map((pending) => [pending.key, pending]))
   const prompts: unknown[] = []
@@ -146,6 +149,7 @@ function harness(
       onRestoreError: async (pendingRef) => {
         events.push(`restore-error:${pendingRef.messageID}`)
       },
+      ...dependencies,
     },
   })
   return { coordinator, client, turns, prompts, events }
@@ -302,5 +306,182 @@ describe('PendingCoordinator startup restoration', () => {
 
     expect(await h.coordinator.removeSession('shared-session')).toBe(2)
     expect([...h.turns.values()]).toEqual([other])
+  })
+
+  test('a host that resumes by message id keeps resumed rows and deletes obsolete ones', async () => {
+    const resumed = turn('resumed')
+    const obsolete = turn('obsolete')
+    const h = harness([resumed, obsolete])
+    const asked: string[] = []
+    const host: PendingResumeClient = {
+      resumePending: async (pending) => {
+        asked.push(pending.messageID)
+        return pending.key === obsolete.key ? 'obsolete' : 'resumed'
+      },
+    }
+
+    await h.coordinator.restore(host)
+
+    expect(asked).toHaveLength(2)
+    expect(asked).toContain(resumed.messageID)
+    expect(h.turns.has(resumed.key)).toBe(true)
+    expect(h.turns.has(obsolete.key)).toBe(false)
+    expect(h.events).toContain(`release:${resumed.key}`)
+    expect(h.events).toContain(`release:${obsolete.key}`)
+  })
+
+  test('a failed message read is reported and retried after backoff', async () => {
+    const pending = turn('message-error')
+    const reported: string[] = []
+    let reads = 0
+    const h = harness(
+      [pending],
+      {
+        message: async () =>
+          reads++ === 0
+            ? { error: { name: 'UnknownError' } }
+            : { data: { info: user(pending), parts: [] } },
+      },
+      {
+        onRestoreError: (_pendingRef, error) => {
+          reported.push(String(error))
+        },
+      },
+    )
+
+    await h.coordinator.restore(h.client)
+
+    expect(reported).toEqual([
+      `Error: Failed to read pending message ${pending.messageID}`,
+    ])
+    expect(h.events.filter((event) => event.startsWith('sleep:'))).toEqual([
+      'sleep:1000',
+    ])
+    expect(h.prompts).toHaveLength(1)
+    expect(h.turns.has(pending.key)).toBe(true)
+  })
+
+  test('a session whose history is gone removes the row without replay', async () => {
+    const pending = turn('history-gone')
+    const h = harness([pending], {
+      messages: async () => ({
+        error: { name: 'NotFoundError' },
+        response: { status: 404 },
+      }),
+    })
+
+    await h.coordinator.restore(h.client)
+
+    expect(h.prompts).toHaveLength(0)
+    expect(h.turns.has(pending.key)).toBe(false)
+    expect(h.events).toContain(`release:${pending.key}`)
+  })
+
+  test('a failed session history read is reported and retried after backoff', async () => {
+    const pending = turn('history-error')
+    const reported: string[] = []
+    let reads = 0
+    const h = harness(
+      [pending],
+      {
+        messages: async () =>
+          reads++ === 0
+            ? { error: { name: 'UnknownError' } }
+            : { data: [{ info: user(pending), parts: [] }] },
+      },
+      {
+        onRestoreError: (_pendingRef, error) => {
+          reported.push(String(error))
+        },
+      },
+    )
+
+    await h.coordinator.restore(h.client)
+
+    expect(reported).toEqual([
+      `Error: Failed to read pending session ${pending.sessionID}`,
+    ])
+    expect(h.events.filter((event) => event.startsWith('sleep:'))).toEqual([
+      'sleep:1000',
+    ])
+    expect(h.prompts).toHaveLength(1)
+    expect(h.turns.has(pending.key)).toBe(true)
+  })
+
+  test('a prompt answering 404 removes the row instead of retrying', async () => {
+    const pending = turn('prompt-gone')
+    let prompts = 0
+    const h = harness([pending], {
+      prompt: async () => {
+        prompts += 1
+        return { error: { name: 'NotFoundError' }, response: { status: 404 } }
+      },
+    })
+
+    await h.coordinator.restore(h.client)
+
+    expect(prompts).toBe(1)
+    expect(h.turns.has(pending.key)).toBe(false)
+    expect(h.events).toContain(`release:${pending.key}`)
+    expect(h.events.some((event) => event.startsWith('sleep:'))).toBe(false)
+  })
+
+  test('a prompt answering an error is reported and retried after backoff', async () => {
+    const pending = turn('prompt-error')
+    const reported: string[] = []
+    let prompts = 0
+    const h = harness(
+      [pending],
+      {
+        prompt: async () =>
+          prompts++ === 0 ? { error: { name: 'ServerError' } } : { data: {} },
+      },
+      {
+        onRestoreError: (_pendingRef, error) => {
+          reported.push(String(error))
+        },
+      },
+    )
+
+    await h.coordinator.restore(h.client)
+
+    expect(reported).toEqual([
+      `Error: Failed to restore pending message ${pending.messageID}`,
+    ])
+    expect(h.events.filter((event) => event.startsWith('sleep:'))).toEqual([
+      'sleep:1000',
+    ])
+    expect(prompts).toBe(2)
+    expect(h.turns.has(pending.key)).toBe(true)
+  })
+
+  test('a failing backoff sleep stops retrying, keeping the row and releasing its lease', async () => {
+    const pending = turn('broken-timer')
+    let prompts = 0
+    const h = harness(
+      [pending],
+      {
+        prompt: async () => {
+          prompts += 1
+          throw new Error('server unavailable')
+        },
+      },
+      {
+        sleep: async () => {
+          throw new Error('timer failed')
+        },
+      },
+    )
+
+    await expect(h.coordinator.restore(h.client)).resolves.toBeUndefined()
+
+    expect(prompts).toBe(1)
+    expect(h.turns.has(pending.key)).toBe(true)
+    expect(h.events.filter((event) => event.startsWith('release:'))).toEqual([
+      `release:${pending.key}`,
+    ])
+    expect(
+      h.events.filter((event) => event.startsWith('restore-error:')),
+    ).toEqual([`restore-error:${pending.messageID}`])
   })
 })

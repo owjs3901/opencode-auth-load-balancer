@@ -372,4 +372,129 @@ describe('PendingCoordinator live waits', () => {
     expect(h.events).toContain(`remove:${pendingRef.messageID}`)
     expect(h.events).toContain(`release:${pendingKey(pendingRef)}`)
   })
+
+  test('a lease granted after dispose is released at once and the row is kept for restart', async () => {
+    let grant: () => void = () => undefined
+    const h = harness({
+      acquireLease: (key) =>
+        new Promise((resolve) => {
+          grant = () =>
+            resolve({
+              release: async () => {
+                h.events.push(`release:${key}`)
+              },
+            })
+        }),
+    })
+    const pendingRef = ref('late-lease')
+    const waiting = h.coordinator.waitForCapacity(
+      pendingRef,
+      quota(START + 100, START + 100),
+    )
+    await h.coordinator.dispose()
+    grant()
+
+    await expect(waiting).rejects.toThrow('OpenCode plugin disposed')
+    expect(h.events.filter((event) => event.startsWith('release:'))).toEqual([
+      `release:${pendingKey(pendingRef)}`,
+    ])
+    expect(h.turns.has(pendingKey(pendingRef))).toBe(true)
+    expect(
+      h.events.some(
+        (event) => event.startsWith('sleep:') || event.startsWith('pending:'),
+      ),
+    ).toBe(false)
+  })
+
+  test('a failed pool read keeps the turn quota-blocked and checks again after one usage-refresh interval', async () => {
+    let reads = 0
+    const h = harness({
+      readPool: async () => {
+        reads += 1
+        if (reads === 1) throw new Error('pool file locked')
+        return readyPool()
+      },
+    })
+    const pendingRef = ref('unreadable')
+
+    expect(
+      await h.coordinator.waitForCapacity(
+        pendingRef,
+        quota(START + 100, START + 200),
+      ),
+    ).toBe('available')
+    expect(h.turns.get(pendingKey(pendingRef))).toMatchObject({
+      nextCheckAt: START + 100 + 5 * 60_000,
+      resumeAt: START + 200,
+    })
+    expect(h.events.filter((event) => event.startsWith('sleep:'))).toEqual([
+      'sleep:100',
+      `sleep:${5 * 60_000}`,
+    ])
+  })
+
+  test('an unexpected sleep failure releases the lease but keeps the row', async () => {
+    const h = harness({
+      sleep: async () => {
+        throw new Error('timer failed')
+      },
+    })
+    const pendingRef = ref('broken-timer')
+
+    await expect(
+      h.coordinator.waitForCapacity(
+        pendingRef,
+        quota(START + 100, START + 100),
+      ),
+    ).rejects.toThrow('timer failed')
+    expect(h.events).toContain(`release:${pendingKey(pendingRef)}`)
+    expect(h.events).not.toContain(`remove:${pendingRef.messageID}`)
+    expect(h.turns.has(pendingKey(pendingRef))).toBe(true)
+  })
+
+  test('an abort during shutdown forgets the turn but keeps its row for restart', async () => {
+    const h = harness()
+    h.setPool(readyPool())
+    const pendingRef = ref('shutdown-cancel')
+    await h.coordinator.waitForCapacity(
+      pendingRef,
+      quota(START + 100, START + 100),
+    )
+    await h.coordinator.dispose()
+
+    await h.coordinator.abort(pendingRef)
+    await h.coordinator.complete(pendingRef)
+
+    expect(h.turns.has(pendingKey(pendingRef))).toBe(true)
+    expect(h.events).not.toContain(`remove:${pendingRef.messageID}`)
+    expect(h.events.filter((event) => event.startsWith('release:'))).toEqual([
+      `release:${pendingKey(pendingRef)}`,
+    ])
+  })
+
+  test('removing a session aborts its live wait and leaves other sessions waiting', async () => {
+    const h = harness({ sleep: sleepAbortable })
+    const removedRef = ref('removed')
+    const keptRef = ref('kept')
+    const removedWait = h.coordinator.waitForCapacity(
+      removedRef,
+      quota(START + 60_000, START + 60_000),
+    )
+    const keptWait = h.coordinator.waitForCapacity(
+      keptRef,
+      quota(START + 60_000, START + 60_000),
+    )
+    while (h.turns.size < 2) await sleep(0)
+    const removedFailure = removedWait.catch((error: unknown) => error)
+
+    expect(await h.coordinator.removeSession(removedRef.sessionID)).toBe(1)
+    expect(await removedFailure).toHaveProperty('name', 'AbortError')
+    expect(h.turns.has(pendingKey(removedRef))).toBe(false)
+    expect(h.events).toContain(`release:${pendingKey(removedRef)}`)
+    expect(h.turns.has(pendingKey(keptRef))).toBe(true)
+    expect(h.events).not.toContain(`release:${pendingKey(keptRef)}`)
+
+    await h.coordinator.dispose()
+    await expect(keptWait).rejects.toThrow('OpenCode plugin disposed')
+  })
 })

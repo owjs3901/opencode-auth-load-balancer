@@ -766,6 +766,29 @@ describe('pool store', () => {
     ).toEqual({ opus: until })
   })
 
+  test('readPool drops an unknown cooldownKind but keeps the cooldown it classified', async () => {
+    const until = Date.now() + 60_000
+    await writeFile(
+      POOL,
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          {
+            ...account(),
+            id: 'odd',
+            cooldownUntil: until,
+            cooldownKind: 'bogus',
+          },
+        ],
+        lastSelected: {},
+        sessions: {},
+      }),
+    )
+    const row = (await readPool()).accounts.find((a) => a.id === 'odd')
+    expect(row?.cooldownUntil).toBe(until)
+    expect(row?.cooldownKind).toBeUndefined()
+  })
+
   test('readPool heals hand-edited primitive/array sessions and lastSelected to {}', async () => {
     // `??` only replaces null/undefined, so a hand-edited `"sessions": "oops"`
     // survived into the pool object — and recordSuccess's property assignment

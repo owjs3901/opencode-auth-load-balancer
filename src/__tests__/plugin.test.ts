@@ -2468,6 +2468,16 @@ describe('toast on switch + status tool', () => {
     expect((await readPool()).lastSelected.anthropic).toBeUndefined()
   })
 
+  test('primeInUse marks nothing in use when every account of the provider is disabled', async () => {
+    await mutatePool((pool) => {
+      pool.accounts.push(
+        account({ id: 'off', disabledReason: MANUAL_DISABLED_REASON }),
+      )
+    })
+    await primeInUse('anthropic', Date.now())
+    expect((await readPool()).lastSelected.anthropic).toBeUndefined()
+  })
+
   test('every entry export is a real plugin (a stray/broken export crashes opencode startup)', async () => {
     // opencode's loader treats EVERY value exported by the entry module as a plugin
     // (getLegacyPlugins -> Object.values -> invoke). A non-plugin export gets called

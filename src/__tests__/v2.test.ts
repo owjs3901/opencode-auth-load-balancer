@@ -11,6 +11,7 @@ import type { SessionHooks } from '@opencode/plugin/promise/session'
 import type { Info } from '@opencode/plugin/promise/tool'
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 
+import * as legacy from '../legacy'
 import { listPendingForWorkspace, upsertPending } from '../pending/store'
 import { createV2ResumeClient } from '../pending/v2'
 import { mutatePool, readPool } from '../pool/store'
@@ -342,6 +343,43 @@ test('a real V3 Codex SDK request rotates on 429 and preserves session identity'
   )
 })
 
+test('V2 model requests carry the remembered prompt id only on primary turns', async () => {
+  await mutatePool((pool) => {
+    pool.accounts.push(
+      testAccount({ providerID: 'openai', expires: Number.MAX_SAFE_INTEGER }),
+    )
+  })
+  let contextReads = 0
+  const fake = host()
+  Object.assign(fake.ctx.session, {
+    context: async () => {
+      contextReads++
+      return [{ type: 'assistant', id: 'assistant-reply' }]
+    },
+  })
+  dispose = await setupV2(fake.ctx)
+  fake.prompts[0]!({
+    sessionID: 'session-b',
+    messageID: 'remembered-message',
+  } as SessionHooks['prompt'])
+  const title = {
+    sessionID: 'session-b',
+    kind: 'title',
+    headers: {},
+  } as SessionHooks['model.request']
+  await fake.request.get('openai')!(title)
+  expect(title.headers).toEqual({ [SESSION_HEADER]: 'session-b' })
+  expect(contextReads).toBe(0)
+  const primary = {
+    sessionID: 'session-b',
+    kind: 'primary',
+    headers: {},
+  } as SessionHooks['model.request']
+  await fake.request.get('openai')!(primary)
+  expect(primary.headers[MESSAGE_HEADER]).toBe('remembered-message')
+  expect(contextReads).toBe(1)
+})
+
 test('RPC exposes safe status and serializes management through the pool lock', async () => {
   await mutatePool((pool) => {
     pool.accounts.push(
@@ -450,6 +488,50 @@ test('V2 login and host refresh share the pooled token lifecycle', async () => {
     exchange.mockRestore()
     refresh.mockRestore()
   }
+})
+
+test('V2 host refresh finds the pooled row by its refresh or access token when the account id is stale', async () => {
+  const expires = Date.now() + 3_600_000
+  await mutatePool((pool) => {
+    pool.accounts.push(
+      testAccount({
+        id: 'first',
+        providerID: 'openai',
+        access: 'first-access',
+        refresh: 'first-refresh',
+        expires,
+      }),
+      testAccount({
+        id: 'second',
+        providerID: 'openai',
+        access: 'second-access',
+        refresh: 'second-refresh',
+        expires,
+      }),
+    )
+  })
+  const fake = host()
+  dispose = await setupV2(fake.ctx)
+  const method = fake.methods.find(
+    (method) => method.integrationID === 'openai',
+  )!
+  const stale = {
+    type: 'oauth',
+    methodID: method.method.id,
+    access: 'stale-access',
+    refresh: 'second-refresh',
+    expires: 1,
+    metadata: { accountID: 'deleted-account' },
+  } as unknown as Parameters<NonNullable<typeof method.refresh>>[0]
+  const pooled = { access: 'second-access', refresh: 'second-refresh', expires }
+  expect(await method.refresh!(stale)).toMatchObject(pooled)
+  expect(
+    await method.refresh!({
+      ...stale,
+      access: 'second-access',
+      refresh: 'stale-refresh',
+    }),
+  ).toMatchObject(pooled)
 })
 
 test('Kimi key and automatic device login register accounts under V2', async () => {
@@ -577,6 +659,31 @@ test('V2 Claude and both Kimi SDKs route requests through pooled credentials', a
   expect(result.content).toContain('Claude')
 })
 
+test('V2 wraps a status tool that returns plain text as tool content', async () => {
+  const spy = spyOn(legacy, 'AuthLoadBalancerStatusPlugin').mockResolvedValue({
+    tool: {
+      auth_lb_status: {
+        description: 'Plain status',
+        args: {},
+        execute: async () => 'plain status',
+      },
+    },
+  })
+  try {
+    const fake = host()
+    dispose = await setupV2(fake.ctx)
+    const toolContext = { signal: new AbortController().signal } as Parameters<
+      Info['execute']
+    >[1]
+    const result = await fake.tools
+      .find((tool) => tool.name === 'auth_lb_status')!
+      .execute({}, toolContext)
+    expect(result).toEqual({ content: 'plain status' })
+  } finally {
+    spy.mockRestore()
+  }
+})
+
 test('unpooled providers remain native and setup failures clean up', async () => {
   const fake = host([
     { type: 'other' },
@@ -700,6 +807,32 @@ test('V2 imports a connected Kimi key and cleans stale restart references', asyn
   ).toBe(false)
 })
 
+test('V2 imports a connected OAuth login with its tokens unchanged', async () => {
+  const expires = Date.now() + 3_600_000
+  const fake = host()
+  Object.assign(fake.ctx.integration.connection, {
+    active: async (id: string) =>
+      id === 'anthropic' ? { id: 'oauth-connection' } : undefined,
+    resolve: async () => ({
+      type: 'oauth',
+      methodID: 'claude-login',
+      access: 'connected-access',
+      refresh: 'connected-refresh',
+      expires,
+    }),
+  })
+  dispose = await setupV2(fake.ctx)
+  expect(
+    (await readPool()).accounts.find(
+      (account) => account.providerID === 'anthropic',
+    ),
+  ).toMatchObject({
+    access: 'connected-access',
+    refresh: 'connected-refresh',
+    expires,
+  })
+})
+
 test('V2 pending emits waiting and resumed notifications when quota resets', async () => {
   await mutatePool((pool) => {
     pool.accounts.push(
@@ -782,4 +915,35 @@ test('V2 restart recovery discards missing sessions but retries transient failur
   await expect(createV2ResumeClient(ctx).resumePending(turn)).rejects.toThrow(
     'temporary',
   )
+})
+
+test('V2 restart recovery discards a turn whose message no longer exists', async () => {
+  const turn = {
+    key: 'key',
+    workspace: dir,
+    providerID: 'openai',
+    sessionID: 's',
+    messageID: 'm',
+    createdAt: 1,
+    updatedAt: 1,
+    nextCheckAt: 2,
+    resumeAt: null,
+  }
+  const ctx = {
+    session: {
+      context: async () => [{ id: 'm', type: 'user' }],
+      prompt: async () => {
+        throw { _tag: 'MessageNotFoundError' }
+      },
+    },
+  } as unknown as Plugin.Context
+  expect(await createV2ResumeClient(ctx).resumePending(turn)).toBe('obsolete')
+  Object.assign(ctx.session, {
+    prompt: async () => {
+      throw { _tag: 'StorageError' }
+    },
+  })
+  await expect(createV2ResumeClient(ctx).resumePending(turn)).rejects.toEqual({
+    _tag: 'StorageError',
+  })
 })

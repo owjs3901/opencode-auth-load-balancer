@@ -98,7 +98,7 @@ describe('pending store', () => {
     })
   })
 
-  test('deduplicates hand-edited rows by deterministic key, keeping the newest row', async () => {
+  test('deduplicates hand-edited rows by deterministic key, keeping the newest row in either order', async () => {
     const older = {
       ...A,
       key: 'wrong',
@@ -115,6 +115,12 @@ describe('pending store', () => {
       resumeAt: 500,
     }
     await writeFile(FILE, JSON.stringify({ version: 1, turns: [newer, older] }))
+
+    expect((await readPending()).turns).toEqual([
+      { ...newer, key: pendingKey(A), createdAt: 100 },
+    ])
+
+    await writeFile(FILE, JSON.stringify({ version: 1, turns: [older, newer] }))
 
     expect((await readPending()).turns).toEqual([
       { ...newer, key: pendingKey(A), createdAt: 100 },

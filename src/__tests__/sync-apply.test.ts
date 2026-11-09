@@ -451,6 +451,29 @@ describe('applying a plan', () => {
     expect(Object.keys(result.imported)).toEqual(['gone'])
   })
 
+  test('a removed credential-only row takes its in-use marker and session pins with it', async () => {
+    const gone = ref('row', CLAUDE_TOKEN)
+    const now = Date.now()
+    await mutatePool((p) => {
+      p.accounts = [held('row', CLAUDE_TOKEN), held('other', CLAUDE_TOKEN_2)]
+      p.lastSelected = { anthropic: 'row' }
+      p.sessions = {
+        'anthropic:s:one': { accountId: 'row', updatedAt: now },
+        'anthropic:s:two': { accountId: 'other', updatedAt: now },
+      }
+    })
+    const result = await applyPlan(
+      { imports: [], drops: [['gone', gone]], forgets: [] },
+      { imported: newRefs({ gone }), skipped: {} },
+      [],
+    )
+    expect(result).toMatchObject({ removed: 1, deferred: 0 })
+    const after = await readPool()
+    expect(after.accounts.map((a) => a.id)).toEqual(['other'])
+    expect(after.lastSelected).toEqual({})
+    expect(Object.keys(after.sessions)).toEqual(['anthropic:s:two'])
+  })
+
   test('a credential the user already holds is neither counted nor tracked, and is remembered as skipped', async () => {
     await mutatePool((p) => {
       p.accounts = [held('mine', CLAUDE_TOKEN_2)]

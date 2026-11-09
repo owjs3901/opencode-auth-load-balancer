@@ -1,7 +1,0 @@
-{
-  "changes": {
-    "package.json": "Patch"
-  },
-  "note": "Keep usage current for a Claude OAuth login the usage endpoint refuses with HTTP 403 (missing user:profile, left behind by the auto-mint of 0.6-0.8): measure it with the same one-token quota check as a setup-token, instead of freezing its windows at the last reading, which made the dashboards show a reset weekly window as 0% with no reset time. A fresh OAuth login still restores the usage endpoint.",
-  "date": "2026-11-08T11:00:00.000Z"
-}
